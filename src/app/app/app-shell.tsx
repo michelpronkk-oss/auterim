@@ -2,10 +2,45 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { ReactNode } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import {
+  resolveWorkspaceBootstrapState,
+  type WorkspaceBootstrapState,
+} from "@/lib/app/workspace-bootstrap";
+
+const BOOTSTRAP_TIMEOUT_MS = 12_000;
+
+class AppRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, message: string): Promise<T> {
+  let timer: number | undefined;
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      timer = window.setTimeout(() => reject(new Error(message)), BOOTSTRAP_TIMEOUT_MS);
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) window.clearTimeout(timer);
+  });
+}
 
 type Workspace = { workspaceId: string; name: string; role: string };
 type AppContextValue = {
@@ -38,37 +73,54 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceId, setWorkspaceId] = useState("");
   const [unread, setUnread] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [bootstrapState, setBootstrapState] = useState<WorkspaceBootstrapState>("LOADING");
+  const bootstrapRequestId = useRef(0);
+  const sessionRef = useRef<Session | null>(null);
 
   const api = useCallback(
     async <T,>(path: string, init?: RequestInit): Promise<T> => {
-      if (!session?.access_token) throw new Error("Sign in to continue.");
-      const response = await fetch(path, {
-        ...init,
-        headers: { authorization: `Bearer ${session.access_token}`, ...(init?.headers ?? {}) },
-      });
-      const body: unknown = await response.json().catch(() => null);
-      if (!response.ok) {
-        const message =
-          body && typeof body === "object" && "error" in body
-            ? String(body.error)
-            : "Request failed.";
-        throw new Error(message);
+      if (!session?.access_token) throw new AppRequestError("authentication_required", 401);
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), BOOTSTRAP_TIMEOUT_MS);
+      try {
+        const response = await fetch(path, {
+          ...init,
+          signal: controller.signal,
+          headers: { authorization: `Bearer ${session.access_token}`, ...(init?.headers ?? {}) },
+        });
+        const body: unknown = await response.json().catch(() => null);
+        if (!response.ok) {
+          const message =
+            body && typeof body === "object" && "error" in body
+              ? String(body.error)
+              : "request_failed";
+          throw new AppRequestError(message, response.status);
+        }
+        return body as T;
+      } catch (requestError) {
+        if (requestError instanceof AppRequestError) throw requestError;
+        if (controller.signal.aborted) throw new Error("workspace_request_timed_out");
+        throw new Error("workspace_request_failed");
+      } finally {
+        window.clearTimeout(timer);
       }
-      return body as T;
     },
     [session],
   );
 
   const refresh = useCallback(async () => {
-    if (!session) return;
-    const list = await api<{ workspaces?: Array<{ workspace_id: string; role: string }> }>(
-      "/api/account/status",
-    );
-    const entries = await Promise.all(
-      (list.workspaces ?? []).map(async (item) => {
-        try {
+    const requestId = ++bootstrapRequestId.current;
+    if (!session) {
+      setBootstrapState("AUTH_REQUIRED");
+      return;
+    }
+    setBootstrapState("LOADING");
+    try {
+      const list = await api<{ workspaces?: Array<{ workspace_id: string; role: string }> }>(
+        "/api/account/status",
+      );
+      const entries = await Promise.all(
+        (list.workspaces ?? []).map(async (item) => {
           const account = await api<{ onboarding?: { company?: { name?: string } } }>(
             `/api/account/status?workspaceId=${encodeURIComponent(item.workspace_id)}`,
           );
@@ -77,48 +129,101 @@ export function AppShell({ children }: { children: ReactNode }) {
             name: account.onboarding?.company?.name || "Workspace",
             role: item.role,
           };
-        } catch {
-          return { workspaceId: item.workspace_id, name: "Workspace", role: item.role };
-        }
-      }),
-    );
-    setWorkspaces(entries);
-    const saved = window.localStorage.getItem("auterim-workspace-id");
-    const selected = entries.some((item) => item.workspaceId === saved)
-      ? saved!
-      : (entries[0]?.workspaceId ?? "");
-    setWorkspaceId(selected);
-    if (selected) window.localStorage.setItem("auterim-workspace-id", selected);
+        }),
+      );
+      if (
+        requestId !== bootstrapRequestId.current ||
+        sessionRef.current?.user.id !== session.user.id ||
+        sessionRef.current?.access_token !== session.access_token
+      )
+        return;
+      setWorkspaces(entries);
+      const saved = window.localStorage.getItem("auterim-workspace-id");
+      const selected = entries.some((item) => item.workspaceId === saved)
+        ? saved!
+        : (entries[0]?.workspaceId ?? "");
+      setWorkspaceId(selected);
+      if (selected) window.localStorage.setItem("auterim-workspace-id", selected);
+      else window.localStorage.removeItem("auterim-workspace-id");
+      setBootstrapState(
+        resolveWorkspaceBootstrapState({ authenticated: true, workspaceCount: entries.length }),
+      );
+    } catch (bootstrapError) {
+      if (requestId !== bootstrapRequestId.current) return;
+      if (bootstrapError instanceof AppRequestError && bootstrapError.status === 401) {
+        sessionRef.current = null;
+        setSession(null);
+        setWorkspaces([]);
+        setWorkspaceId("");
+        setBootstrapState("AUTH_REQUIRED");
+        return;
+      }
+      setBootstrapState(resolveWorkspaceBootstrapState({ authenticated: true, failed: true }));
+    }
   }, [api, session]);
 
   useEffect(() => {
     const client = createSupabaseBrowserClient();
-    void client.auth
-      .getSession()
-      .then(({ data }) => setSession(data.session))
-      .catch(() => setError("Could not check your sign-in state."))
-      .finally(() => setLoading(false));
+    let cancelled = false;
+    let authEventSeen = false;
+    void withTimeout(client.auth.getSession(), "session_restore_timed_out")
+      .then(({ data }) => {
+        if (cancelled || authEventSeen) return;
+        sessionRef.current = data.session;
+        setSession(data.session);
+        if (!data.session) setBootstrapState("AUTH_REQUIRED");
+      })
+      .catch(() => {
+        if (!cancelled && !authEventSeen) {
+          setBootstrapState("ERROR");
+        }
+      });
     const { data: listener } = client.auth.onAuthStateChange((_event, next) => {
+      authEventSeen = true;
+      const userChanged = sessionRef.current?.user.id !== next?.user.id;
+      sessionRef.current = next;
+      if (userChanged) bootstrapRequestId.current += 1;
       setSession(next);
-      setWorkspaceId("");
-      setWorkspaces([]);
+      if (userChanged) {
+        setWorkspaceId("");
+        setWorkspaces([]);
+      }
+      setBootstrapState(
+        resolveWorkspaceBootstrapState({ authenticated: Boolean(next), workspaceCount: undefined }),
+      );
     });
-    return () => listener.subscription.unsubscribe();
+    return () => {
+      cancelled = true;
+      bootstrapRequestId.current += 1;
+      listener.subscription.unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
-    if (session)
-      queueMicrotask(() => {
-        void refresh().catch(() => setError("Could not load your workspace."));
-      });
+    if (!session) return;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) void refresh();
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [session, refresh]);
   useEffect(() => {
     if (!session || !workspaceId) return;
+    let cancelled = false;
     void api<{ unreadCount: number }>(
       `/api/notifications?workspaceId=${encodeURIComponent(workspaceId)}&limit=1`,
     )
-      .then((data) => setUnread(data.unreadCount))
-      .catch(() => setUnread(0));
+      .then((data) => {
+        if (!cancelled) setUnread(data.unreadCount);
+      })
+      .catch(() => {
+        if (!cancelled) setUnread(0);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [api, session, workspaceId, pathname]);
 
   const value = useMemo(
@@ -137,14 +242,39 @@ export function AppShell({ children }: { children: ReactNode }) {
     [session, workspaceId, workspaces, api, refresh],
   );
 
-  if (loading || (session && !workspaces.length && !error))
+  if (bootstrapState === "LOADING")
     return (
       <main className="app-loading">
         <span className="brand-mark">A</span>
         <p>Loading your protection workspace…</p>
       </main>
     );
-  if (!session)
+  if (bootstrapState === "ERROR")
+    return (
+      <main className="app-auth">
+        <div className="auth-card">
+          <span className="brand-mark">A</span>
+          <p className="eyebrow">Workspace unavailable</p>
+          <h1>We couldn’t load your protection workspace.</h1>
+          <p>Try again in a moment. Your account and workspace data have not been changed.</p>
+          <div className="app-auth-actions">
+            <button
+              className="button-primary"
+              onClick={() => (session ? void refresh() : window.location.reload())}
+            >
+              Try again
+            </button>
+            <button
+              className="button-secondary"
+              onClick={() => void createSupabaseBrowserClient().auth.signOut()}
+            >
+              Sign out
+            </button>
+          </div>
+        </div>
+      </main>
+    );
+  if (bootstrapState === "AUTH_REQUIRED" || !session)
     return (
       <main className="app-auth">
         <div className="auth-card">
@@ -163,7 +293,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       </main>
     );
-  if (!workspaces.length && pathname !== "/app/account")
+  if (bootstrapState === "NEEDS_ONBOARDING" && pathname !== "/app/account")
     return (
       <main className="app-auth">
         <div className="auth-card">
@@ -179,6 +309,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       </main>
     );
+  if (bootstrapState === "NEEDS_ONBOARDING") return <>{children}</>;
   const active = (href: string) =>
     href === "/app" ? pathname === href : pathname === href || pathname.startsWith(`${href}/`);
   return (
@@ -277,19 +408,6 @@ export function AppShell({ children }: { children: ReactNode }) {
               </Link>
             </div>
           </header>
-          {error && (
-            <div className="app-banner" role="status">
-              {error}{" "}
-              <button
-                onClick={() => {
-                  setError("");
-                  void refresh().catch(() => setError("Could not load your workspace."));
-                }}
-              >
-                Retry
-              </button>
-            </div>
-          )}
           <main className="app-content">{children}</main>
         </div>
         <nav className="mobile-nav" aria-label="Main navigation">

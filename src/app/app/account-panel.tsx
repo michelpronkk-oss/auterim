@@ -43,6 +43,36 @@ const accountSchema = z
 
 type AccountData = z.infer<typeof accountSchema>;
 
+const ACCOUNT_BOOTSTRAP_TIMEOUT_MS = 12_000;
+
+function withAccountTimeout<T>(promise: Promise<T>): Promise<T> {
+  let timer: number | undefined;
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      timer = window.setTimeout(
+        () => reject(new Error("Could not restore your sign-in state.")),
+        ACCOUNT_BOOTSTRAP_TIMEOUT_MS,
+      );
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) window.clearTimeout(timer);
+  });
+}
+
+async function fetchAccountWithTimeout(input: RequestInfo | URL, init?: RequestInit) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), ACCOUNT_BOOTSTRAP_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch {
+    if (controller.signal.aborted) throw new Error("Workspace request timed out. Try again.");
+    throw new Error("Could not reach your workspace. Try again.");
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 function createInitialSetupForm(websiteUrl: string) {
   try {
     const parsed = new URL(websiteUrl);
@@ -73,6 +103,7 @@ export function AccountPanel({ initialWebsiteUrl = "" }: { initialWebsiteUrl?: s
   >([]);
   const [account, setAccount] = useState<AccountData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [setupForm, setSetupForm] = useState(() => createInitialSetupForm(initialWebsiteUrl));
@@ -98,7 +129,7 @@ export function AccountPanel({ initialWebsiteUrl = "" }: { initialWebsiteUrl?: s
 
   const load = useCallback(async (token: string, selected?: string) => {
     const headers = { authorization: `Bearer ${token}` };
-    const listResponse = await fetch("/api/account/status", { headers });
+    const listResponse = await fetchAccountWithTimeout("/api/account/status", { headers });
     const listBody = await listResponse.json();
     if (!listResponse.ok) throw new Error("Could not load your workspaces.");
     const membershipOptions = z
@@ -107,7 +138,7 @@ export function AccountPanel({ initialWebsiteUrl = "" }: { initialWebsiteUrl?: s
     const options = await Promise.all(
       membershipOptions.map(async (item) => {
         try {
-          const workspaceResponse = await fetch(
+          const workspaceResponse = await fetchAccountWithTimeout(
             `/api/account/status?workspaceId=${encodeURIComponent(item.workspace_id)}`,
             { headers },
           );
@@ -125,39 +156,47 @@ export function AccountPanel({ initialWebsiteUrl = "" }: { initialWebsiteUrl?: s
     if (!options.length) {
       setWorkspaceId("");
       setAccount(null);
+      setLoadError(false);
       return;
     }
     const stored = selected ?? window.localStorage.getItem("auterim-workspace-id");
     const target = options.some((item) => item.workspace_id === stored)
       ? stored!
       : options[0]!.workspace_id;
-    const response = await fetch(`/api/account/status?workspaceId=${encodeURIComponent(target)}`, {
-      headers,
-    });
+    const response = await fetchAccountWithTimeout(
+      `/api/account/status?workspaceId=${encodeURIComponent(target)}`,
+      {
+        headers,
+      },
+    );
     const body = await response.json();
     if (!response.ok) throw new Error("Could not load workspace protection.");
     setWorkspaceId(target);
     window.localStorage.setItem("auterim-workspace-id", target);
     setAccount(accountSchema.parse(body));
+    setLoadError(false);
   }, []);
 
   useEffect(() => {
     const client = createSupabaseBrowserClient();
-    void client.auth
-      .getSession()
+    void withAccountTimeout(client.auth.getSession())
       .then(({ data }) => {
         setSession(data.session);
         if (data.session) return load(data.session.access_token);
       })
-      .catch(() => setMessage("Could not check your sign-in state."))
+      .catch(() => {
+        setLoadError(true);
+        setMessage("Could not check your sign-in state.");
+      })
       .finally(() => setLoading(false));
     const { data: listener } = client.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
       setAccount(null);
       if (nextSession)
-        void load(nextSession.access_token).catch(() =>
-          setMessage("Could not load your workspace."),
-        );
+        void load(nextSession.access_token).catch(() => {
+          setLoadError(true);
+          setMessage("Could not load your workspace.");
+        });
     });
     return () => listener.subscription.unsubscribe();
   }, [load]);
@@ -309,7 +348,25 @@ export function AccountPanel({ initialWebsiteUrl = "" }: { initialWebsiteUrl?: s
             {message}
           </p>
         )}
-        {!workspaces.length && (
+        {loadError && (
+          <section className="auth-message" role="alert">
+            <p>We couldn’t verify your existing workspace, so setup is paused.</p>
+            <button
+              type="button"
+              className="secondary-link"
+              disabled={busy}
+              onClick={() => {
+                setBusy(true);
+                void load(session.access_token)
+                  .catch(() => setLoadError(true))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              Try again
+            </button>
+          </section>
+        )}
+        {!loadError && !workspaces.length && (
           <form className="auth-form workspace-form" onSubmit={startWorkspace}>
             <label>
               Workspace name
