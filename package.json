@@ -15,6 +15,8 @@
     "test:run": "vitest run",
     "eval:semantic": "vitest run tests/classification.test.ts",
     "eval:semantic:live": "vitest run --config vitest.live.config.mts",
+    "eval:impact": "vitest run tests/impact.test.ts",
+    "eval:impact:live": "vitest run --config vitest.impact-live.config.mts",
     "env:check": "node --experimental-strip-types scripts/env-check.mts",
     "project:check": "node --experimental-strip-types scripts/project-check.mts"
   },

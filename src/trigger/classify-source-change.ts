@@ -4,6 +4,7 @@ import {
   ClassifierConfigurationError,
   classifySourceChange,
 } from "@/lib/monitoring/classification";
+import { dispatchCustomerImpactTask } from "@/trigger/dispatch-customer-impact";
 
 export const semanticClassifyChangeTask = schemaTask({
   id: "classify-source-change",
@@ -18,11 +19,19 @@ export const semanticClassifyChangeTask = schemaTask({
   concurrency: { total: 4 },
   run: async ({ sourceChangeId }, { ctx }) => {
     try {
-      return await classifySourceChange({
+      const outcome = await classifySourceChange({
         changeId: sourceChangeId,
         triggerRunId: ctx.run.id,
         attemptNumber: ctx.attempt.number,
       });
+      if (
+        outcome.status === "classified" &&
+        outcome.classification.material &&
+        outcome.classification.decisionStatus === "classified"
+      ) {
+        await dispatchCustomerImpactTask.trigger({ sourceChangeId });
+      }
+      return outcome;
     } catch (error) {
       if (error instanceof ClassifierConfigurationError) {
         throw new AbortTaskRunError(error.message);

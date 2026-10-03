@@ -26,6 +26,8 @@ Global records describe public software providers and their sources: `dependency
 
 Tenant records are `workspaces`, `workspace_members`, `companies`, `company_context`, `workspace_dependencies`, and `dependency_context`. They carry explicit workspace relationships and are protected by RLS policies that check membership in the database. The first owner is the authenticated workspace creator; additional member-management flows are deferred.
 
+Milestone 4 adds a separate customer impact stage. It loads only an eligible global classification and the matching workspace dependency context, writes an idempotent historical `impact_assessments` row, and fans out one Trigger.dev task per workspace dependency. See [customer impact intelligence](customer-impact.md) for context, isolation, retries, and evaluation details.
+
 ## Monitoring behavior
 
 The `scan-source` Trigger.dev task loads one enabled catalog source with a server-only Supabase client, fetches and normalizes it, then submits the result to a database RPC. The RPC locks the source row, checks the latest snapshot inside the same transaction, and writes a baseline, unchanged run, not-modified run, or one changed snapshot and change. Stable Trigger run/attempt identifiers make retries replay-safe. A stale concurrent result is diffed against the locked latest snapshot before it can be saved.

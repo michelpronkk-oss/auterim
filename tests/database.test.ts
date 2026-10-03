@@ -22,6 +22,15 @@ const classificationMigration = await readFile(
   ),
   "utf8",
 );
+const impactMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261004010000_customer_impact_intelligence.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase() {
   const db = new PGlite();
@@ -39,6 +48,7 @@ async function makeDatabase() {
   `);
   await db.exec(migration);
   await db.exec(classificationMigration);
+  await db.exec(impactMigration);
   return db;
 }
 
@@ -406,6 +416,303 @@ describe("Auterim migration and monitoring transaction", () => {
     );
     expect(runs.rows).toContainEqual({ status: "failed", error_category: "timeout" });
     expect(runs.rows).toContainEqual({ status: "not_modified", error_category: null });
+    await db.exec("reset role");
+  });
+
+  it("stores tenant impact separately, fingerprints re-evaluations, and enforces member-only reads", async () => {
+    const userA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const userB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const dependency = await db.query<{ dependency_id: string }>(
+      "select dependency_id from public.source_catalog where id=$1",
+      [sourceId],
+    );
+    const workspaceA = await db.query<{ id: string }>(
+      "select id from public.workspaces where created_by=$1 limit 1",
+      [userA],
+    );
+    const classification = await db.query<{
+      id: string;
+      change_id: string;
+      evidence_fingerprint: string;
+    }>(
+      "select id,change_id,evidence_fingerprint from public.source_change_classifications where status='classified' and material and decision_status='classified' order by created_at desc,id desc limit 1",
+    );
+    expect(workspaceA.rows).toHaveLength(1);
+    expect(classification.rows).toHaveLength(1);
+
+    await db.exec("set role service_role");
+    const workspaceDependencyA = await db.query<{ id: string }>(
+      "insert into public.workspace_dependencies (workspace_id,dependency_id,selected_by) values ($1,$2,$3) returning id",
+      [workspaceA.rows[0]!.id, dependency.rows[0]!.dependency_id, userA],
+    );
+    const workspaceB = await db.query<{ id: string }>(
+      "insert into public.workspaces (name,created_by) values ('Tenant B', $1) returning id",
+      [userB],
+    );
+    await db.query(
+      "insert into public.workspace_members (workspace_id,user_id,role) values ($1,$2,'owner')",
+      [workspaceB.rows[0]!.id, userB],
+    );
+    const workspaceDependencyB = await db.query<{ id: string }>(
+      "insert into public.workspace_dependencies (workspace_id,dependency_id,selected_by) values ($1,$2,$3) returning id",
+      [workspaceB.rows[0]!.id, dependency.rows[0]!.dependency_id, userB],
+    );
+    await db.query(
+      `insert into public.dependency_context (
+        workspace_id,workspace_dependency_id,criticality,production_critical,used_for,context_note
+      ) values ($1,$2,'critical',true,'["verification"]'::jsonb,'Tenant A private verification context'),
+               ($3,$4,'normal',false,'["billing"]'::jsonb,'TENANT_B_SECRET_CONTEXT')`,
+      [
+        workspaceA.rows[0]!.id,
+        workspaceDependencyA.rows[0]!.id,
+        workspaceB.rows[0]!.id,
+        workspaceDependencyB.rows[0]!.id,
+      ],
+    );
+
+    const assessment = await db.query<{ id: string }>(
+      `insert into public.impact_assessments (
+        workspace_id,workspace_dependency_id,source_change_classification_id,context_fingerprint,
+        impact_engine_version,schema_version,prompt_version,provider,model,status,attempt_count,
+        trigger_run_id,attempt_number,relevant,relevance,severity,affected_areas,impact_summary,
+        why_it_matters,action_required,recommended_action,confidence,missing_context,evidence_refs,assessed_at
+      ) values (
+        $1,$2,$3,repeat('a',64),'impact-v1',1,'impact-prompt-v1','openai','gpt-6.1-sol','assessed',1,
+        'impact-run-a',1,true,'high','high','["verification"]'::jsonb,
+        'The provider change may affect verification.','The dependency is marked production critical.',
+        false,null,0.91,'[]'::jsonb,'[]'::jsonb,now()
+      ) returning id`,
+      [workspaceA.rows[0]!.id, workspaceDependencyA.rows[0]!.id, classification.rows[0]!.id],
+    );
+
+    const packet = await db.query<{ value: Record<string, unknown> }>(
+      "select public.load_customer_impact_packet($1,$2) as value",
+      [workspaceDependencyA.rows[0]!.id, classification.rows[0]!.id],
+    );
+    expect(JSON.stringify(packet.rows[0]!.value)).toContain(
+      "Tenant A private verification context",
+    );
+    expect(JSON.stringify(packet.rows[0]!.value)).not.toContain("TENANT_B_SECRET_CONTEXT");
+    await expect(
+      db.query("select public.load_customer_impact_packet($1,$2)", [
+        workspaceDependencyB.rows[0]!.id,
+        classification.rows[0]!.id,
+      ]),
+    ).resolves.toBeTruthy();
+
+    const targetIds = await db.query<{ workspace_dependency_id: string }>(
+      "select workspace_dependency_id from public.customer_impact_dispatch_queue where source_change_classification_id=$1 and context_revision=1 and status='queued'",
+      [classification.rows[0]!.id],
+    );
+    expect(targetIds.rows.map((row) => row.workspace_dependency_id).sort()).toEqual(
+      [workspaceDependencyA.rows[0]!.id, workspaceDependencyB.rows[0]!.id].sort(),
+    );
+
+    const replay = await db.query<{ value: Record<string, unknown> }>(
+      `select public.begin_customer_impact_assessment(
+        $1,$2,repeat('a',64),'impact-v1',1,'impact-prompt-v1','openai','impact-run-replay',1
+      ) as value`,
+      [workspaceDependencyA.rows[0]!.id, classification.rows[0]!.id],
+    );
+    expect(replay.rows[0]!.value).toMatchObject({ status: "assessed", replayed: true });
+
+    const changedContext = await db.query<{ value: Record<string, unknown> }>(
+      `select public.begin_customer_impact_assessment(
+        $1,$2,repeat('b',64),'impact-v1',1,'impact-prompt-v1','openai','impact-run-context-v2',1
+      ) as value`,
+      [workspaceDependencyA.rows[0]!.id, classification.rows[0]!.id],
+    );
+    expect(changedContext.rows[0]!.value).toMatchObject({ status: "processing", attemptCount: 1 });
+    const history = await db.query<{ count: number }>(
+      "select count(*)::int as count from public.impact_assessments where workspace_dependency_id=$1 and source_change_classification_id=$2",
+      [workspaceDependencyA.rows[0]!.id, classification.rows[0]!.id],
+    );
+    expect(history.rows[0]!.count).toBe(2);
+
+    await db.query(
+      `select public.upsert_dependency_impact_context($1,$2,'important',true,'["AI processing"]'::jsonb,'Updated context','{}'::jsonb)`,
+      [workspaceA.rows[0]!.id, workspaceDependencyA.rows[0]!.id],
+    );
+    const queueHistory = await db.query<{
+      context_revision: number;
+      status: string;
+      dispatch_attempt_count: number;
+    }>(
+      "select context_revision,status,dispatch_attempt_count from public.customer_impact_dispatch_queue where workspace_dependency_id=$1 and source_change_classification_id=$2 order by context_revision",
+      [workspaceDependencyA.rows[0]!.id, classification.rows[0]!.id],
+    );
+    expect(queueHistory.rows.map((row) => [row.context_revision, row.status])).toEqual([
+      [0, "superseded"],
+      [1, "superseded"],
+      [2, "queued"],
+    ]);
+    const candidateA = queueHistory.rows[2]!;
+    const queueIdA = await db.query<{ id: string }>(
+      "select id from public.customer_impact_dispatch_queue where workspace_dependency_id=$1 and source_change_classification_id=$2 and context_revision=2",
+      [workspaceDependencyA.rows[0]!.id, classification.rows[0]!.id],
+    );
+    await db.query("select public.mark_customer_impact_queue_dispatched($1)", [
+      queueIdA.rows[0]!.id,
+    ]);
+    await db.query("select public.mark_customer_impact_queue_complete($1)", [queueIdA.rows[0]!.id]);
+    const queueIdBInitial = await db.query<{ id: string }>(
+      "select id from public.customer_impact_dispatch_queue where workspace_dependency_id=$1 and source_change_classification_id=$2 and context_revision=1",
+      [workspaceDependencyB.rows[0]!.id, classification.rows[0]!.id],
+    );
+    await db.query("select public.mark_customer_impact_queue_dispatched($1)", [
+      queueIdBInitial.rows[0]!.id,
+    ]);
+    await db.exec("reset role");
+    await db.exec(
+      "alter table public.customer_impact_dispatch_queue disable trigger customer_impact_queue_set_updated_at",
+    );
+    await db.query(
+      "update public.customer_impact_dispatch_queue set status='dispatched',updated_at=now()-interval '16 minutes' where workspace_dependency_id=$1 and source_change_classification_id=$2 and context_revision=1",
+      [workspaceDependencyB.rows[0]!.id, classification.rows[0]!.id],
+    );
+    await db.exec(
+      "alter table public.customer_impact_dispatch_queue enable trigger customer_impact_queue_set_updated_at",
+    );
+    await db.exec("set role service_role");
+    const recoveredQueue = await db.query<{ queue_id: string }>(
+      "select queue_id from public.list_customer_impact_dispatch_queue($1,100)",
+      [classification.rows[0]!.change_id],
+    );
+    expect(recoveredQueue.rows).toHaveLength(1);
+    const queueIdB = recoveredQueue.rows[0]!.queue_id;
+    await db.query("select public.mark_customer_impact_queue_dispatched($1)", [queueIdB]);
+    const dispatchAttempts = await db.query<{ dispatch_attempt_count: number }>(
+      "select dispatch_attempt_count from public.customer_impact_dispatch_queue where id=$1",
+      [queueIdB],
+    );
+    expect(dispatchAttempts.rows[0]!.dispatch_attempt_count).toBe(2);
+    await db.query(
+      `select public.upsert_dependency_impact_context($1,$2,'important',true,'["AI processing"]'::jsonb,'Updated context','{}'::jsonb)`,
+      [workspaceA.rows[0]!.id, workspaceDependencyA.rows[0]!.id],
+    );
+    const unchangedContextRevision = await db.query<{ context_revision: number }>(
+      "select context_revision from public.dependency_context where workspace_dependency_id=$1",
+      [workspaceDependencyA.rows[0]!.id],
+    );
+    expect(unchangedContextRevision.rows[0]!.context_revision).toBe(2);
+    await expect(
+      db.query(
+        `select public.upsert_dependency_impact_context($1,$2,'important',true,'["unknown label"]'::jsonb,'bad','{}'::jsonb)`,
+        [workspaceA.rows[0]!.id, workspaceDependencyA.rows[0]!.id],
+      ),
+    ).rejects.toBeTruthy();
+    expect(candidateA.dispatch_attempt_count).toBe(0);
+
+    const staleAssessmentStart = await db.query<{ value: Record<string, unknown> }>(
+      `select public.begin_customer_impact_assessment(
+        $1,$2,repeat('e',64),'impact-race-v1',1,'impact-prompt-v1','openai','stale-race-run',1
+      ) as value`,
+      [workspaceDependencyB.rows[0]!.id, classification.rows[0]!.id],
+    );
+    expect(staleAssessmentStart.rows[0]!.value).toMatchObject({ status: "processing" });
+    await db.query(
+      "select public.begin_source_change_classification($1,'classifier-run-v3',1,'semantic-v3',3,'materiality-v3','openai')",
+      [classification.rows[0]!.change_id],
+    );
+    await db.query(
+      `select public.record_source_change_classification(
+        $1,'semantic-v3',$2,'classifier-run-v3',1,'openai','fixture/model-v3',3,'materiality-v3',true,
+        'api_change','["/v3"]'::jsonb,'high',0.94,'A newer global classification. ',
+        '[{"type":"added","excerpt":"A newer global classification."}]'::jsonb,
+        'The source documents a newer API behavior change.','classified',null,null,1
+      )`,
+      [classification.rows[0]!.change_id, classification.rows[0]!.evidence_fingerprint],
+    );
+    await expect(
+      db.query("select public.load_customer_impact_packet($1,$2)", [
+        workspaceDependencyA.rows[0]!.id,
+        classification.rows[0]!.id,
+      ]),
+    ).rejects.toBeTruthy();
+    await expect(
+      db.query(
+        `select public.record_customer_impact_assessment(
+          $1,'stale-race-run',1,'openai','fixture/model-v1',false,'none','low',
+          '["billing"]'::jsonb,'No recorded billing impact.','The tenant uses billing only.',
+          false,null,0.7,'[]'::jsonb,
+          '[{"source":"global_evidence","excerpt":"Meaningful change"},{"source":"dependency_context","excerpt":"billing"}]'::jsonb,
+          100,50,1
+        )`,
+        [(staleAssessmentStart.rows[0]!.value as { id: string }).id],
+      ),
+    ).rejects.toBeTruthy();
+    await expect(
+      db.query(
+        `select public.begin_customer_impact_assessment(
+          $1,$2,repeat('d',64),'impact-v1',1,'impact-prompt-v1','openai','stale-run',1
+        )`,
+        [workspaceDependencyA.rows[0]!.id, classification.rows[0]!.id],
+      ),
+    ).rejects.toBeTruthy();
+    await db.query(
+      "select public.begin_source_change_classification($1,'classifier-run-v4',1,'semantic-v4',4,'materiality-v4','openai')",
+      [classification.rows[0]!.change_id],
+    );
+    await db.query(
+      `select public.record_source_change_classification_failure(
+        $1,'semantic-v4',$2,'classifier-run-v4',1,'openai',4,'materiality-v4',
+        'fixture_failure','The newer classifier fixture failed.'
+      )`,
+      [classification.rows[0]!.change_id, classification.rows[0]!.evidence_fingerprint],
+    );
+    const latestSuccessful = await db.query<{ id: string }>(
+      "select id from public.source_change_classifications where change_id=$1 and classifier_version='semantic-v3'",
+      [classification.rows[0]!.change_id],
+    );
+    await expect(
+      db.query("select public.load_customer_impact_packet($1,$2)", [
+        workspaceDependencyA.rows[0]!.id,
+        latestSuccessful.rows[0]!.id,
+      ]),
+    ).resolves.toBeTruthy();
+    const recoveredAfterFailure = await db.query<{ source_change_classification_id: string }>(
+      "select source_change_classification_id from public.list_customer_impact_dispatch_queue($1,100)",
+      [classification.rows[0]!.change_id],
+    );
+    expect(recoveredAfterFailure.rows.length).toBeGreaterThan(0);
+    expect(
+      recoveredAfterFailure.rows.every(
+        (row) => row.source_change_classification_id === latestSuccessful.rows[0]!.id,
+      ),
+    ).toBe(true);
+    await db.exec("reset role");
+
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [userA]);
+    await db.exec("set role authenticated");
+    const visibleToMember = await db.query<{ id: string }>(
+      "select id from public.impact_assessments where id=$1",
+      [assessment.rows[0]!.id],
+    );
+    expect(visibleToMember.rows).toHaveLength(1);
+    await expect(
+      db.query(
+        "insert into public.impact_assessments (workspace_id,workspace_dependency_id,source_change_classification_id,context_fingerprint,impact_engine_version,schema_version,prompt_version,provider) values ($1,$2,$3,repeat('c',64),'impact-v1',1,'impact-prompt-v1','openai')",
+        [workspaceA.rows[0]!.id, workspaceDependencyA.rows[0]!.id, classification.rows[0]!.id],
+      ),
+    ).rejects.toBeTruthy();
+    await expect(
+      db.query("select public.get_dependency_impact_context($1,$2)", [
+        workspaceA.rows[0]!.id,
+        workspaceDependencyA.rows[0]!.id,
+      ]),
+    ).rejects.toBeTruthy();
+    await db.exec("reset role");
+
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [userB]);
+    await db.exec("set role authenticated");
+    const hiddenFromOtherMember = await db.query<{ id: string }>(
+      "select id from public.impact_assessments where id=$1",
+      [assessment.rows[0]!.id],
+    );
+    expect(hiddenFromOtherMember.rows).toHaveLength(0);
+    await db.exec("reset role");
+    await db.exec("set role anon");
+    await expect(db.query("select * from public.impact_assessments")).rejects.toBeTruthy();
     await db.exec("reset role");
   });
 });

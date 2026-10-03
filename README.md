@@ -25,6 +25,10 @@ npm run build
 npm run format:check
 ```
 
+## Customer impact evaluation
+
+Run `npm run eval:impact` for deterministic offline coverage. `npm run eval:impact:live` is opt-in and makes up to three paid OpenAI calls using only this repository's configured key and model; run it only when that configuration is intended for live evaluation.
+
 Run the identity and environment checks before any Supabase, Trigger.dev, GitHub, or deployment operation. The checks inspect only this checkout's configuration, make no remote calls, and never print secret values.
 
 ## Architecture
