@@ -4,7 +4,11 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
-import { emitPublicConversionEvent, readPublicAttribution } from "@/lib/public/conversion";
+import {
+  confirmSignupConversion,
+  emitPublicConversionEvent,
+  readPublicAttribution,
+} from "@/lib/public/conversion";
 
 export type AuthMode = "signup" | "login" | "forgot" | "reset";
 
@@ -78,7 +82,7 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
         });
         if (error) throw error;
         if (data.session) {
-          emitPublicConversionEvent("signup_completed", readPublicAttribution(current, "/signup"));
+          void confirmSignupConversion(data.session.access_token);
           router.push(nextPath);
         } else setMessage("Check your email to verify your account, then sign in to continue.");
       } else if (mode === "login") {

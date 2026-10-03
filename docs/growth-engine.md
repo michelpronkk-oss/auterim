@@ -34,7 +34,7 @@ Growth tables have RLS enabled with access revoked from `anon` and `authenticate
 
 ## Future integrations
 
-Distribution candidates are structured records for review (channel, angle, claim boundaries, freshness, and evidence fingerprint). The engine does not publish or send them. Free-tool recommendations are metadata only, use noindex/nofollow link policy, and do not create tools or UI. Search Console, public rendering, sitemap automation, outbound, CRM, and Connector Platform work remain deferred.
+Distribution candidates are structured records for review (channel, angle, claim boundaries, freshness, and evidence fingerprint). The engine does not publish or send them. Free-tool recommendations are metadata only, use noindex/nofollow link policy, and do not create tools or UI. Search Console feedback is implemented separately in Growth Engine V2; it cannot bypass this V1 public-safety and publication gate. See [Growth Engine V2](growth-engine-v2.md).
 
 ## Validation
 

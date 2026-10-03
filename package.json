@@ -23,6 +23,7 @@
     "eval:preflight:live": "vitest run --config vitest.preflight-live.config.mts",
     "eval:protection": "vitest run tests/protection.test.ts",
     "eval:growth": "vitest run tests/growth.test.ts tests/database.test.ts",
+    "eval:growth-v2": "vitest run tests/growth-v2.test.ts tests/database.test.ts",
     "eval:connectors": "vitest run tests/connectors.test.ts tests/database.test.ts",
     "eval:dashboard": "vitest run tests/dashboard.test.ts",
     "eval:public": "vitest run tests/public-growth.test.ts",

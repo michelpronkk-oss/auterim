@@ -68,6 +68,42 @@ describe("environment validation", () => {
     expect(isIntegrationConfigured("resend", enabled)).toBe(true);
   });
 
+  it("accepts Resend sender display names without loosening address validation", () => {
+    expect(
+      parseEnvironment({ RESEND_FROM_EMAIL: "Auterim Alerts <alerts@example.test>" })
+        .RESEND_FROM_EMAIL,
+    ).toBe("Auterim Alerts <alerts@example.test>");
+    expect(() => parseEnvironment({ RESEND_FROM_EMAIL: "Auterim Alerts <bad-address>" })).toThrow();
+    expect(() =>
+      parseEnvironment({ RESEND_FROM_EMAIL: "Auterim\r\nBcc: x@example.test" }),
+    ).toThrow();
+  });
+
+  it("reports Search Console configuration only when exact-property admin and encryption settings exist", () => {
+    const base = {
+      GOOGLE_SEARCH_CONSOLE_CLIENT_ID: "fixture-client-id",
+      GOOGLE_SEARCH_CONSOLE_CLIENT_SECRET: "fixture-client-secret",
+      GOOGLE_SEARCH_CONSOLE_REDIRECT_URI:
+        "https://auterim.example/api/internal/growth/search-console/callback",
+      GOOGLE_SEARCH_CONSOLE_PROPERTY: "sc-domain:auterim.com",
+      AUTERIM_GROWTH_ADMIN_EMAILS: "ops@example.test",
+      CONNECTOR_CREDENTIAL_ENCRYPTION_KEYS: JSON.stringify({
+        "1": Buffer.alloc(32, 1).toString("base64"),
+      }),
+      CONNECTOR_CREDENTIAL_ACTIVE_KEY_VERSION: "1",
+    };
+    expect(isIntegrationConfigured("searchConsole", parseEnvironment(base))).toBe(true);
+    expect(() =>
+      parseEnvironment({ ...base, GOOGLE_SEARCH_CONSOLE_PROPERTY: "sc-domain:other.example" }),
+    ).toThrow();
+    expect(
+      isIntegrationConfigured(
+        "searchConsole",
+        parseEnvironment({ ...base, CONNECTOR_CREDENTIAL_ENCRYPTION_KEYS: undefined }),
+      ),
+    ).toBe(false);
+  });
+
   it("requires the Supabase URL and publishable key as a pair", () => {
     expect(() =>
       parseEnvironment({ NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co" }),

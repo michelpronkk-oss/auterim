@@ -3,6 +3,7 @@ import { getEnvironment, isIntegrationConfigured } from "@/lib/env/schema";
 import { GitHubAppRepositoryProvider } from "@/lib/preflight/github-provider";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getWorkspaceRole, resolveWorkspaceEntitlementsForService } from "@/lib/billing/server";
+import { recordGrowthFirstPartyEvent } from "@/lib/growth-v2/feedback";
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -127,6 +128,14 @@ export async function GET(request: Request) {
   if (consumeError)
     return Response.json({ error: "installation_state_unavailable" }, { status: 503 });
   if (!consumed) return Response.json({ error: "installation_state_replayed" }, { status: 409 });
+  try {
+    await recordGrowthFirstPartyEvent({
+      eventType: "github_connected",
+      stableKey: `${stateRow.workspace_id}:${installationId}`,
+    });
+  } catch {
+    // Product connection success is independent of funnel reporting availability.
+  }
   return Response.json({
     connected: true,
     account: accountLogin,

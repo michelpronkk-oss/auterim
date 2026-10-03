@@ -46,4 +46,27 @@ export function emitPublicConversionEvent(
       detail: { event, attribution },
     }),
   );
+  try {
+    void fetch("/api/public/conversion", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ event, attribution }),
+      keepalive: true,
+    }).catch(() => undefined);
+  } catch {
+    // Browser storage/network availability does not block the product flow.
+  }
+}
+
+export async function confirmSignupConversion(accessToken: string) {
+  if (typeof window === "undefined") return;
+  try {
+    await fetch("/api/public/conversion/confirmed", {
+      method: "POST",
+      headers: { authorization: `Bearer ${accessToken}` },
+      keepalive: true,
+    });
+  } catch {
+    // Conversion reporting cannot block account creation or sign-in.
+  }
 }

@@ -103,6 +103,12 @@ const connectorMigration = await readFile(
   ),
   "utf8",
 );
+const growthFeedbackMigration = await readFile(
+  fileURLToPath(
+    new URL("../supabase/migrations/20261010000000_growth_feedback_v2.sql", import.meta.url),
+  ),
+  "utf8",
+);
 
 async function makeDatabase() {
   const db = new PGlite();
@@ -130,6 +136,7 @@ async function makeDatabase() {
   await db.exec(growthMigration);
   await db.exec(growthBoundsMigration);
   await db.exec(connectorMigration);
+  await db.exec(growthFeedbackMigration);
   return db;
 }
 
@@ -1150,6 +1157,203 @@ describe("Auterim migration and monitoring transaction", () => {
     );
     expect(rls.rows).toHaveLength(tables.length);
     expect(rls.rows.every((row) => row.relrowsecurity)).toBe(true);
+    await db.exec("reset role");
+  });
+
+  it("keeps Search Console credentials, queries, conversions and feedback private", async () => {
+    const tables = [
+      "growth_search_console_oauth_states",
+      "growth_search_console_connection",
+      "growth_search_console_metrics",
+      "growth_first_party_events",
+      "growth_public_event_ingest_buckets",
+      "growth_feedback_opportunities",
+      "growth_search_console_sync_runs",
+    ];
+    await db.exec("set role anon");
+    for (const table of tables)
+      await expect(db.query(`select * from public.${table}`)).rejects.toBeTruthy();
+    await expect(
+      db.query(
+        "select public.claim_growth_search_console_oauth_state(repeat('a',64),repeat('b',64))",
+      ),
+    ).rejects.toBeTruthy();
+    await db.exec("reset role; set role authenticated");
+    for (const table of tables)
+      await expect(db.query(`select * from public.${table}`)).rejects.toBeTruthy();
+    await expect(
+      db.query(
+        "select public.persist_growth_search_console_connection('sc-domain:auterim.com','c','n','t',1,array['https://www.googleapis.com/auth/webmasters.readonly'],'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',now())",
+      ),
+    ).rejects.toBeTruthy();
+    await db.exec("reset role");
+    const userId = "abababab-abab-4bab-8bab-abababababab";
+    await db.query("insert into auth.users(id) values($1)", [userId]);
+    await db.exec("set role service_role");
+    await db.query(
+      "insert into public.growth_search_console_oauth_states(state_hash,actor_user_id,browser_hash,verifier_ciphertext,verifier_nonce,verifier_authentication_tag,verifier_key_version,actor_token_ciphertext,actor_token_nonce,actor_token_authentication_tag,actor_token_key_version,expires_at) values(repeat('a',64),$1,repeat('b',64),'cipher','nonce','tag',1,'actor','nonce','tag',1,now()+interval '5 minutes')",
+      [userId],
+    );
+    const wrongBrowserClaim = await db.query(
+      "select * from public.claim_growth_search_console_oauth_state(repeat('a',64),repeat('c',64))",
+    );
+    expect(wrongBrowserClaim.rows).toHaveLength(0);
+    const claimed = await db.query<{ actor_user_id: string }>(
+      "select * from public.claim_growth_search_console_oauth_state(repeat('a',64),repeat('b',64))",
+    );
+    expect(claimed.rows).toHaveLength(1);
+    const replay = await db.query(
+      "select * from public.claim_growth_search_console_oauth_state(repeat('a',64),repeat('b',64))",
+    );
+    expect(replay.rows).toHaveLength(0);
+    const firstSyncClaim = await db.query<{ acquired: boolean }>(
+      "select acquired from public.claim_growth_search_console_sync('m14-sync-test','2026-09-01','2026-09-30',$1)",
+      ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+    );
+    const competingSyncClaim = await db.query<{ acquired: boolean }>(
+      "select acquired from public.claim_growth_search_console_sync('m14-sync-test','2026-09-01','2026-09-30',$1)",
+      ["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"],
+    );
+    expect(firstSyncClaim.rows[0]?.acquired).toBe(true);
+    expect(competingSyncClaim.rows[0]?.acquired).toBe(false);
+    let acceptedPublicEvents = 0;
+    for (let index = 0; index < 121; index += 1) {
+      const allowed = await db.query<{ allowed: boolean }>(
+        "select public.claim_growth_public_conversion_event() as allowed",
+      );
+      if (allowed.rows[0]?.allowed) acceptedPublicEvents += 1;
+    }
+    expect(acceptedPublicEvents).toBe(120);
+    const candidatePayload = {
+      opportunity_key: "c".repeat(64),
+      opportunity_type: "near_page_one",
+      canonical_path: "/tools",
+      topic_key: null,
+      evidence: { currentImpressions: 123, rulesVersion: "growth-feedback-v2-rules-1" },
+      rules_version: "growth-feedback-v2-rules-1",
+    };
+    const firstCandidate = await db.query<{ id: string }>(
+      "select public.record_growth_feedback_candidate($1::jsonb) as id",
+      [JSON.stringify(candidatePayload)],
+    );
+    await db.query(
+      "update public.growth_feedback_opportunities set status='approved' where opportunity_key=$1",
+      [candidatePayload.opportunity_key],
+    );
+    const retryCandidate = await db.query<{ id: string }>(
+      "select public.record_growth_feedback_candidate($1::jsonb) as id",
+      [
+        JSON.stringify({
+          ...candidatePayload,
+          evidence: { currentImpressions: 150, rulesVersion: "growth-feedback-v2-rules-1" },
+        }),
+      ],
+    );
+    expect(retryCandidate.rows[0]?.id).toBe(firstCandidate.rows[0]?.id);
+    const preservedCandidate = await db.query<{
+      status: string;
+      evidence: Record<string, unknown>;
+    }>(
+      "select status,evidence from public.growth_feedback_opportunities where opportunity_key=$1",
+      [candidatePayload.opportunity_key],
+    );
+    expect(preservedCandidate.rows[0]).toMatchObject({
+      status: "approved",
+      evidence: { currentImpressions: 150 },
+    });
+    const metricColumns = await db.query<{ has_query_text: boolean }>(
+      "select exists(select 1 from information_schema.columns where table_schema='public' and table_name='growth_search_console_metrics' and column_name in ('query','query_text')) as has_query_text",
+    );
+    expect(metricColumns.rows[0]?.has_query_text).toBe(false);
+    const visitorColumns = await db.query<{ has_visitor_identifier: boolean }>(
+      "select exists(select 1 from information_schema.columns where table_schema='public' and table_name='growth_first_party_events' and column_name in ('visitor_id','visitor_hash','fingerprint')) as has_visitor_identifier",
+    );
+    expect(visitorColumns.rows[0]?.has_visitor_identifier).toBe(false);
+    await db.query(
+      "insert into public.growth_search_console_metrics(metric_key,property,metric_date,query_fingerprint,query_fingerprint_key_version,query_topic_match,page_url,clicks,impressions,ctr,average_position) values(repeat('d',64),'sc-domain:auterim.com','2026-10-01',repeat('e',64),1,true,'https://auterim.com/tools',1,100,0.01,10) on conflict(metric_key) do update set clicks=excluded.clicks,impressions=excluded.impressions,ctr=excluded.ctr",
+    );
+    await db.query(
+      "insert into public.growth_search_console_metrics(metric_key,property,metric_date,query_fingerprint,query_fingerprint_key_version,query_topic_match,page_url,clicks,impressions,ctr,average_position) values(repeat('d',64),'sc-domain:auterim.com','2026-10-01',repeat('e',64),1,true,'https://auterim.com/tools',3,120,0.025,9) on conflict(metric_key) do update set clicks=excluded.clicks,impressions=excluded.impressions,ctr=excluded.ctr",
+    );
+    const reconciledMetric = await db.query<{ count: number; clicks: number }>(
+      "select count(*)::int as count,max(clicks)::int as clicks from public.growth_search_console_metrics where metric_key=repeat('d',64)",
+    );
+    expect(reconciledMetric.rows[0]).toEqual({ count: 1, clicks: 3 });
+    await db.query(
+      "insert into public.growth_search_console_connection(id,property,lifecycle_state,health_state,scopes,ciphertext,nonce,authentication_tag,key_version,access_expires_at) values('auterim','sc-domain:auterim.com','connected','healthy',array['https://www.googleapis.com/auth/webmasters.readonly'],'c','n','t',1,now()-interval '1 minute')",
+    );
+    const refreshA = await db.query<{ credential_version: number }>(
+      "select credential_version from public.claim_growth_search_console_refresh($1)",
+      ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+    );
+    const refreshB = await db.query(
+      "select * from public.claim_growth_search_console_refresh($1)",
+      ["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"],
+    );
+    expect(refreshA.rows).toHaveLength(1);
+    expect(refreshB.rows).toHaveLength(0);
+    const refreshReleased = await db.query<{ released: boolean }>(
+      "select public.release_growth_search_console_refresh($1,'degraded','degraded','provider_unavailable') as released",
+      ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+    );
+    expect(refreshReleased.rows[0]?.released).toBe(true);
+    const syncRun = await db.query<{ id: string }>(
+      "select id from public.growth_search_console_sync_runs where run_key='m14-sync-test'",
+    );
+    const completedSync = await db.query<{ finished: boolean }>(
+      "select public.finish_growth_search_console_sync($1,$2,'complete',2,12,12,null,now()) as finished",
+      [syncRun.rows[0]?.id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+    );
+    expect(completedSync.rows[0]?.finished).toBe(true);
+    const completedHealth = await db.query<{ status: string; health_state: string }>(
+      `select run.status,connection.health_state from public.growth_search_console_sync_runs run
+       cross join public.growth_search_console_connection connection where run.run_key='m14-sync-test'`,
+    );
+    expect(completedHealth.rows[0]).toEqual({ status: "complete", health_state: "healthy" });
+    const replayedFinish = await db.query<{ finished: boolean }>(
+      "select public.finish_growth_search_console_sync($1,$2,'complete',2,12,12,null,now()) as finished",
+      [syncRun.rows[0]?.id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+    );
+    expect(replayedFinish.rows[0]?.finished).toBe(false);
+
+    const expiredClaim = await db.query<{ run_id: string; acquired: boolean }>(
+      "select run_id,acquired from public.claim_growth_search_console_sync('m14-expired-sync-test','2026-09-01','2026-09-30',$1)",
+      ["cccccccc-cccc-4ccc-8ccc-cccccccccccc"],
+    );
+    await db.query(
+      "update public.growth_search_console_sync_runs set lease_until=now()-interval '1 second' where run_key='m14-expired-sync-test'",
+    );
+    const expiredFinish = await db.query<{ finished: boolean }>(
+      "select public.finish_growth_search_console_sync($1,$2,'complete',1,1,1,null,now()) as finished",
+      [expiredClaim.rows[0]?.run_id, "cccccccc-cccc-4ccc-8ccc-cccccccccccc"],
+    );
+    expect(expiredClaim.rows[0]?.acquired).toBe(true);
+    expect(expiredFinish.rows[0]?.finished).toBe(false);
+
+    const failedClaim = await db.query<{ run_id: string; acquired: boolean }>(
+      "select run_id,acquired from public.claim_growth_search_console_sync('m14-failed-sync-test','2026-09-01','2026-09-30',$1)",
+      ["dddddddd-dddd-4ddd-8ddd-dddddddddddd"],
+    );
+    const failedFinish = await db.query<{ finished: boolean }>(
+      "select public.finish_growth_search_console_sync($1,$2,'failed',1,0,0,'provider_unavailable',now()) as finished",
+      [failedClaim.rows[0]?.run_id, "dddddddd-dddd-4ddd-8ddd-dddddddddddd"],
+    );
+    const failedHealth = await db.query<{ status: string; health_state: string }>(
+      "select last_sync_status as status,health_state from public.growth_search_console_connection where id='auterim'",
+    );
+    expect(failedFinish.rows[0]?.finished).toBe(true);
+    expect(failedHealth.rows[0]).toEqual({ status: "failed", health_state: "degraded" });
+    await expect(
+      db.query(
+        "insert into public.growth_search_console_connection(id,property,lifecycle_state,health_state,scopes,ciphertext,nonce,authentication_tag,key_version) values('auterim','https://example.com','connected','healthy',array[]::text[],'c','n','t',1)",
+      ),
+    ).rejects.toBeTruthy();
+    const secured = await db.query<{ table_name: string; relrowsecurity: boolean }>(
+      "select c.relname as table_name,c.relrowsecurity from pg_class c where c.oid=any($1::regclass[])",
+      [tables.map((table) => `public.${table}`)],
+    );
+    expect(secured.rows).toHaveLength(tables.length);
+    expect(secured.rows.every((row) => row.relrowsecurity)).toBe(true);
     await db.exec("reset role");
   });
 

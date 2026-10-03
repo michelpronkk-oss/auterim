@@ -46,6 +46,7 @@ try {
   const slackConfigured = isIntegrationConfigured("slackApp", environment);
   const linearConfigured = isIntegrationConfigured("linearApp", environment);
   const sentryConfigured = isIntegrationConfigured("sentryApp", environment);
+  const searchConsoleConfigured = isIntegrationConfigured("searchConsole", environment);
   const connectorEncryptionConfigured = isIntegrationConfigured("connectorEncryption", environment);
   const dodoConfigured = isIntegrationConfigured("dodo", environment);
   const preflightFixtureConfigured =
@@ -94,6 +95,9 @@ try {
   );
   console.log(
     `Sentry connector: ${sentryConfigured && connectorEncryptionConfigured ? "configured" : "not configured"}`,
+  );
+  console.log(
+    `Google Search Console growth integration: ${searchConsoleConfigured ? "configured" : "not configured"}`,
   );
   console.log(
     `Connector credential encryption: ${connectorEncryptionConfigured ? "configured" : "not configured"}`,

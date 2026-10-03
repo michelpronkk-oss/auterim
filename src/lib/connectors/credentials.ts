@@ -1,5 +1,5 @@
 import "server-only";
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
 import { getEnvironment } from "@/lib/env/schema";
 
 export type EncryptedCredential = {
@@ -66,6 +66,18 @@ export function decryptConnectorCredential(
   } catch {
     throw new Error("connector_credential_decryption_failed");
   }
+}
+
+/** Keyed, non-reversible fingerprint for private values that must be joined without storing plaintext. */
+export function fingerprintConnectorValue(value: string, purpose: string) {
+  const { activeVersion, keys } = keyRing();
+  return {
+    keyVersion: activeVersion,
+    fingerprint: createHmac("sha256", keys.get(activeVersion)!)
+      .update(`auterim-connector-fingerprint:v1:${purpose}:`)
+      .update(value)
+      .digest("hex"),
+  };
 }
 
 export function connectorCredentialAad(

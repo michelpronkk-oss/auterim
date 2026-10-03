@@ -3,7 +3,8 @@ import { createClient, type SupabaseClient, type User } from "@supabase/supabase
 import { getSupabasePublicConfig } from "@/lib/env/schema";
 
 export type OnboardingAuthResult =
-  { ok: true; client: SupabaseClient; user: User } | { ok: false; response: Response };
+  | { ok: true; client: SupabaseClient; user: User; accessToken: string }
+  | { ok: false; response: Response };
 
 export async function authenticateOnboardingRequest(
   request: Request,
@@ -30,7 +31,7 @@ export async function authenticateOnboardingRequest(
         response: Response.json({ error: "authentication_required" }, { status: 401 }),
       };
     }
-    return { ok: true, client, user: data.user };
+    return { ok: true, client, user: data.user, accessToken: token };
   } catch {
     return {
       ok: false,

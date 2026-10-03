@@ -7,6 +7,7 @@ import {
 } from "@/lib/onboarding/auth";
 import type { scanSourceTask } from "@/trigger/scan-source";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { recordGrowthFirstPartyEvent } from "@/lib/growth-v2/feedback";
 
 const inputSchema = z.object({ workspaceId: z.string().uuid() }).strict();
 const activationSchema = z.object({
@@ -37,6 +38,31 @@ export async function POST(request: Request) {
     });
     if (activated.error) return onboardingError(activated.error);
     const response = activationSchema.parse(activated.data);
+    try {
+      await recordGrowthFirstPartyEvent({
+        eventType: "protection_activation",
+        stableKey: input.workspaceId,
+        occurredAt: response.activatedAt,
+      });
+      const service = createSupabaseServerClient();
+      const { data: subscription } = await service
+        .from("workspace_subscriptions")
+        .select("trial_started_at,status,plan")
+        .eq("workspace_id", input.workspaceId)
+        .maybeSingle();
+      if (
+        subscription?.status === "trialing" &&
+        subscription.plan === "pro" &&
+        subscription.trial_started_at
+      )
+        await recordGrowthFirstPartyEvent({
+          eventType: "trial_started",
+          stableKey: `${input.workspaceId}:${subscription.trial_started_at}`,
+          occurredAt: subscription.trial_started_at,
+        });
+    } catch {
+      // Growth reporting is idempotent and never blocks protection activation.
+    }
     const dispatchClient = createSupabaseServerClient();
     const claims = await dispatchClient.rpc("claim_onboarding_baseline_sources", {
       p_actor_user_id: auth.user.id,

@@ -4,6 +4,18 @@ const emptyToUndefined = (value: unknown) =>
   typeof value === "string" && value.trim() === "" ? undefined : value;
 const optionalSecret = z.preprocess(emptyToUndefined, z.string().trim().min(1).optional());
 const optionalUrl = z.preprocess(emptyToUndefined, z.string().trim().url().optional());
+const resendFromAddress = z.preprocess(
+  emptyToUndefined,
+  z
+    .string()
+    .trim()
+    .refine((value) => {
+      if (z.email().safeParse(value).success) return true;
+      const displayAddress = /^([^<>\r\n]{1,100})\s+<([^<>\s]+)>$/.exec(value);
+      return Boolean(displayAddress?.[1]?.trim() && z.email().safeParse(displayAddress[2]).success);
+    }, "Expected an email address or display name with an email address.")
+    .optional(),
+);
 
 export const environmentSchema = z
   .object({
@@ -13,7 +25,7 @@ export const environmentSchema = z
     SUPABASE_SERVICE_ROLE_KEY: optionalSecret,
     TRIGGER_SECRET_KEY: optionalSecret,
     RESEND_API_KEY: optionalSecret,
-    RESEND_FROM_EMAIL: z.preprocess(emptyToUndefined, z.string().trim().email().optional()),
+    RESEND_FROM_EMAIL: resendFromAddress,
     AUTERIM_NOTIFICATION_EMAIL_LIVE: z.preprocess(
       emptyToUndefined,
       z.enum(["0", "1"]).default("0"),
@@ -49,6 +61,14 @@ export const environmentSchema = z
     SENTRY_CLIENT_ID: optionalSecret,
     SENTRY_CLIENT_SECRET: optionalSecret,
     SENTRY_REDIRECT_URI: optionalUrl,
+    GOOGLE_SEARCH_CONSOLE_CLIENT_ID: optionalSecret,
+    GOOGLE_SEARCH_CONSOLE_CLIENT_SECRET: optionalSecret,
+    GOOGLE_SEARCH_CONSOLE_REDIRECT_URI: optionalUrl,
+    GOOGLE_SEARCH_CONSOLE_PROPERTY: z.preprocess(
+      emptyToUndefined,
+      z.literal("sc-domain:auterim.com").optional(),
+    ),
+    AUTERIM_GROWTH_ADMIN_EMAILS: z.preprocess(emptyToUndefined, z.string().trim().optional()),
     CONNECTOR_CREDENTIAL_ENCRYPTION_KEYS: optionalSecret,
     CONNECTOR_CREDENTIAL_ACTIVE_KEY_VERSION: z.preprocess(
       emptyToUndefined,
@@ -193,6 +213,7 @@ export function isIntegrationConfigured(
     | "slackApp"
     | "linearApp"
     | "sentryApp"
+    | "searchConsole"
     | "connectorEncryption"
     | "dodo",
   environment: AppEnvironment,
@@ -239,6 +260,16 @@ export function isIntegrationConfigured(
       environment.SENTRY_CLIENT_ID &&
       environment.SENTRY_CLIENT_SECRET &&
       environment.SENTRY_REDIRECT_URI,
+    );
+  if (name === "searchConsole")
+    return Boolean(
+      environment.GOOGLE_SEARCH_CONSOLE_CLIENT_ID &&
+      environment.GOOGLE_SEARCH_CONSOLE_CLIENT_SECRET &&
+      environment.GOOGLE_SEARCH_CONSOLE_REDIRECT_URI &&
+      environment.GOOGLE_SEARCH_CONSOLE_PROPERTY === "sc-domain:auterim.com" &&
+      environment.AUTERIM_GROWTH_ADMIN_EMAILS &&
+      environment.CONNECTOR_CREDENTIAL_ENCRYPTION_KEYS &&
+      environment.CONNECTOR_CREDENTIAL_ACTIVE_KEY_VERSION,
     );
   if (name === "connectorEncryption")
     return Boolean(

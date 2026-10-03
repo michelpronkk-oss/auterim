@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
-import { emitPublicConversionEvent, readPublicAttribution } from "@/lib/public/conversion";
+import { confirmSignupConversion } from "@/lib/public/conversion";
 
 function safeNextPath(value: string | null) {
   if (!value || !value.startsWith("/") || value.startsWith("//") || value.includes("\\"))
@@ -20,18 +20,14 @@ export default function AuthCallbackPage() {
     void (async () => {
       try {
         const supabase = createSupabaseBrowserClient();
-        const { error: sessionError } = await supabase.auth.getSession();
+        const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
         if (sessionError) throw sessionError;
         const { data } = await supabase.auth.getUser();
         if (!data.user) throw new Error("auth_session_missing");
         if (!cancelled) {
           const nextPath = safeNextPath(new URLSearchParams(window.location.search).get("next"));
           if (nextPath.startsWith("/app/account")) {
-            const handoff = new URL(nextPath, window.location.origin);
-            emitPublicConversionEvent(
-              "signup_completed",
-              readPublicAttribution(handoff.searchParams, "/signup"),
-            );
+            if (sessionData.session) void confirmSignupConversion(sessionData.session.access_token);
           }
           router.replace(nextPath);
         }
