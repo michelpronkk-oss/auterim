@@ -13,6 +13,11 @@ export const environmentSchema = z
     SUPABASE_SERVICE_ROLE_KEY: optionalSecret,
     TRIGGER_SECRET_KEY: optionalSecret,
     RESEND_API_KEY: optionalSecret,
+    RESEND_FROM_EMAIL: z.preprocess(emptyToUndefined, z.string().trim().email().optional()),
+    AUTERIM_NOTIFICATION_EMAIL_LIVE: z.preprocess(
+      emptyToUndefined,
+      z.enum(["0", "1"]).default("0"),
+    ),
     DODO_PAYMENTS_API_KEY: optionalSecret,
     DODO_PAYMENTS_WEBHOOK_KEY: optionalSecret,
     DODO_PAYMENTS_ENVIRONMENT: z.preprocess(
@@ -150,5 +155,9 @@ export function isIntegrationConfigured(
 
   return name === "trigger"
     ? Boolean(environment.TRIGGER_SECRET_KEY)
-    : Boolean(environment.RESEND_API_KEY);
+    : Boolean(
+        environment.RESEND_API_KEY &&
+        environment.RESEND_FROM_EMAIL &&
+        environment.AUTERIM_NOTIFICATION_EMAIL_LIVE === "1",
+      );
 }

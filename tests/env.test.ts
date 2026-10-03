@@ -47,8 +47,25 @@ describe("environment validation", () => {
         SUPABASE_SECRET_KEY: "",
         TRIGGER_SECRET_KEY: "",
         RESEND_API_KEY: "",
+        RESEND_FROM_EMAIL: "",
       }),
     ).toMatchObject({ NEXT_PUBLIC_APP_URL: "http://localhost:3000" });
+  });
+
+  it("requires both a server key and verified sender configuration for Resend", () => {
+    const keyOnly = parseEnvironment({ RESEND_API_KEY: "test-key" });
+    expect(isIntegrationConfigured("resend", keyOnly)).toBe(false);
+    const configured = parseEnvironment({
+      RESEND_API_KEY: "test-key",
+      RESEND_FROM_EMAIL: "alerts@example.test",
+    });
+    expect(isIntegrationConfigured("resend", configured)).toBe(false);
+    const enabled = parseEnvironment({
+      RESEND_API_KEY: "test-key",
+      RESEND_FROM_EMAIL: "alerts@example.test",
+      AUTERIM_NOTIFICATION_EMAIL_LIVE: "1",
+    });
+    expect(isIntegrationConfigured("resend", enabled)).toBe(true);
   });
 
   it("requires the Supabase URL and publishable key as a pair", () => {

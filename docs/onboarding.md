@@ -29,7 +29,7 @@ Confirmed dependencies default to `criticality=normal` and `production_critical=
 
 ## Notification preferences
 
-`PUT /api/onboarding/preferences` persists choices only. `criticalChanges` is fixed to `instant`; `importantChanges` supports `daily_digest`, `instant`, or `off`; `informational` supports `off` or `digest`; and `monthlyProtectionReport` is a boolean. Defaults are instant for critical, daily digest for important, off for informational, and no monthly report. No email or other notification is sent by this milestone.
+`PUT /api/onboarding/preferences` persists choices. `criticalChanges` is fixed to `instant`; `importantChanges` supports `daily_digest`, `instant`, or `off`; `informational` supports `off` or `digest`; and `monthlyProtectionReport` is a boolean. Defaults are instant for critical, daily digest for important, off for informational, and no monthly report. Milestone 6 itself did not deliver notifications; Milestone 9 extends this same preference row with `inAppEnabled` and `emailEnabled` and implements only high-signal in-app/instant email events. See [protection value and notifications](protection-value-notifications.md) for delivery semantics.
 
 ## Coverage preview
 

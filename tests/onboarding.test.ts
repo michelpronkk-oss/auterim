@@ -12,6 +12,7 @@ const migrationPaths = [
   "20261005000000_preflight_breakage_prevention.sql",
   "20261005010000_preflight_claim_privilege_hardening.sql",
   "20261006000000_auth_accounts_billing_entitlements.sql",
+  "20261007000000_protection_value_notifications.sql",
 ];
 const migrations = await Promise.all(
   migrationPaths.map((name) =>
@@ -26,7 +27,7 @@ async function database() {
     create role authenticated;
     create role service_role bypassrls;
     create schema auth;
-    create table auth.users (id uuid primary key);
+    create table auth.users (id uuid primary key,email text,email_confirmed_at timestamptz);
     create function auth.uid() returns uuid language sql stable as $$
       select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
     $$;

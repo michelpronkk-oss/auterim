@@ -13,6 +13,8 @@ const eslintConfig = defineConfig([
     ".next/**",
     "out/**",
     "build/**",
+    // Trigger.dev bundles third-party dependencies here; lint authored task sources only.
+    ".trigger/**",
     "next-env.d.ts",
   ]),
 ]);

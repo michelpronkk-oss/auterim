@@ -24,4 +24,4 @@ The impact classifier applies the untrusted-data rule to provider evidence and c
 
 ## External-resource safeguards
 
-Before remote database operations, the project identity checker and environment checker must pass and the Supabase ref must match the dedicated Auterim project. No account-wide project discovery is used. The GitHub remote is restricted by repository checks; this milestone does not require Vercel deployment, external Trigger execution, or Resend. Wanterest is outside the allowed project boundary and must remain untouched.
+Before remote database operations, the project identity checker and environment checker must pass and the Supabase ref must match the dedicated Auterim project. No account-wide project discovery is used. The GitHub remote is restricted by repository checks; this milestone does not require Vercel deployment or live Resend delivery. The bounded notification dispatcher is scoped to the dedicated Auterim Trigger project. Wanterest is outside the allowed project boundary and must remain untouched.

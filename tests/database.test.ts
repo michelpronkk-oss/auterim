@@ -73,6 +73,15 @@ const billingMigration = await readFile(
   ),
   "utf8",
 );
+const protectionMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261007000000_protection_value_notifications.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase() {
   const db = new PGlite();
@@ -81,7 +90,7 @@ async function makeDatabase() {
     create role authenticated;
     create role service_role bypassrls;
     create schema auth;
-    create table auth.users (id uuid primary key);
+    create table auth.users (id uuid primary key,email text,email_confirmed_at timestamptz);
     create function auth.uid() returns uuid language sql stable as $$
       select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
     $$;
@@ -96,6 +105,7 @@ async function makeDatabase() {
   await db.exec(preflightMigration);
   await db.exec(preflightPrivilegeMigration);
   await db.exec(billingMigration);
+  await db.exec(protectionMigration);
   return db;
 }
 

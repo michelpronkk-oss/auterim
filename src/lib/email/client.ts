@@ -13,3 +13,9 @@ export function createEmailClient() {
 
   return new Resend(apiKey);
 }
+
+export function getNotificationEmailSender() {
+  const sender = getEnvironment().RESEND_FROM_EMAIL;
+  if (!sender) throw new Error("resend_sender_not_configured");
+  return sender;
+}

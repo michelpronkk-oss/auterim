@@ -24,4 +24,4 @@ No real credentials belong in `.env.example` or Git. `npm run env:check` reports
 
 ## Other integrations
 
-`TRIGGER_SECRET_KEY` is used by Trigger.dev when the configured Auterim project runs the daily dispatcher, source scan, and classification tasks. `RESEND_API_KEY` remains unconfigured and no email is sent. No Vercel deployment is required.
+`TRIGGER_SECRET_KEY` is used by Trigger.dev when the configured Auterim project runs scheduled dispatchers and monitoring tasks. Notification email requires server-only `RESEND_API_KEY`, a verified `RESEND_FROM_EMAIL`, and explicit `AUTERIM_NOTIFICATION_EMAIL_LIVE=1`; the opt-in defaults to `0`. `npm run env:check` reports presence only. If any requirement is missing, email is not sent. No Vercel deployment is required for Milestone 9.
