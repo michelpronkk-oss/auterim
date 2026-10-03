@@ -712,4 +712,35 @@ describe("offline Preflight evidence evaluation", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("surfaces the explicit GitHub installation repository cap", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        if (String(input).endsWith("/access_tokens"))
+          return new Response(
+            JSON.stringify({
+              token: "ghs_fixture_ephemeral",
+              expires_at: new Date(Date.now() + 50 * 60_000).toISOString(),
+            }),
+            { status: 201 },
+          );
+        return new Response(JSON.stringify({ total_count: 501, repositories: [] }), {
+          status: 200,
+        });
+      }),
+    );
+    try {
+      const provider = new GitHubAppRepositoryProvider({
+        appId: "12345",
+        privateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      });
+      await expect(provider.listInstallationRepositories(2001)).rejects.toThrow(
+        "github_repository_limit_exceeded",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

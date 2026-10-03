@@ -55,7 +55,13 @@ export async function GET(request: Request) {
       provider.getInstallationAccount(installationId),
       provider.listInstallationRepositories(installationId),
     ]);
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message === "github_repository_limit_exceeded") {
+      return Response.json(
+        { error: "github_installation_repository_limit_exceeded", maximumRepositories: 500 },
+        { status: 422 },
+      );
+    }
     return Response.json({ error: "github_installation_unavailable" }, { status: 503 });
   }
   if (accountLogin.toLowerCase() !== String(stateRow.github_login).toLowerCase())
