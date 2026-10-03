@@ -16,7 +16,7 @@ The pipeline now continues asynchronously after a new `source_changes` row is co
 
 The scan task makes a best-effort enqueue and finishes independently of the model provider. A database trigger creates a durable queued classification row in the same transaction as a source change; the daily dispatcher rediscovers queued, failed, and stale work. The dedicated `classify-source-change` task loads only global source/change evidence through a server-only repository, constructs a bounded packet, validates structured output with Zod, applies a conservative confidence policy, and persists a versioned interpretation. No model call is made during ordinary tests.
 
-`SemanticClassifier` is the provider boundary. The current implementation uses AI Gateway with a model explicitly configured by `AUTERIM_CLASSIFIER_MODEL`; OpenAI or Anthropic can be selected through that boundary later. The provider is called without tools. Missing configuration becomes a recorded permanent failure and does not affect deterministic scanning.
+`SemanticClassifier` is the provider boundary. The current live implementation calls the OpenAI Responses API directly, using `OPENAI_API_KEY` server-side and the explicitly configured `AUTERIM_CLASSIFIER_MODEL`. `AUTERIM_CLASSIFIER_PROVIDER` is validated and currently supports `openai` only. The request uses strict JSON Schema output generated from the existing Zod schema, no tools, and `store: false`. Missing configuration becomes a recorded permanent failure and does not affect deterministic scanning.
 
 Materiality categories are pricing, API change, deprecation, limits, terms, feature change, availability, documentation, security, and other. Material decisions below 0.82 confidence, with missing/unsupported evidence, generic category, or truncated input are marked `review_required`. Critical severity is retained only with grounded evidence and confidence at least 0.97; non-material decisions are always informational. The rationale is a short evidence-based summary, never hidden chain-of-thought.
 
@@ -44,6 +44,6 @@ The fetcher blocks common private, local, link-local, documentation, multicast, 
 
 - Tenant APIs rely on explicit grants and RLS policies; clients cannot read global scan evidence or write catalog/monitoring data.
 - `SUPABASE_SECRET_KEY` (or the compatibility service-role variable) is used only by server-only monitoring/classification repositories.
-- `AI_GATEWAY_API_KEY` is optional, server-only, and read only by the semantic classifier. `AUTERIM_CLASSIFIER_MODEL` must be set explicitly for live calls. External page content and catalog text are untrusted data, have no tool access, and are never mixed with tenant/company context.
+- `OPENAI_API_KEY` is optional, server-only, and read only by the semantic classifier. `AUTERIM_CLASSIFIER_MODEL` must be set explicitly for live calls. External page content and catalog text are untrusted data, have no tool access, and are never mixed with tenant/company context.
 - External source HTML is untrusted data and is parsed as inert text; no page scripts run.
 - Git and Supabase identity guards use the repository's own local config. No automatic project discovery or linking occurs.

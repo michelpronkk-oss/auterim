@@ -274,7 +274,7 @@ describe("Auterim migration and monitoring transaction", () => {
     expect(queued.rows[0]!.status).toBe("queued");
     const changeId = queued.rows[0]!.change_id;
     const classificationStart = await db.query<{ value: Record<string, unknown> }>(
-      "select public.begin_source_change_classification($1,'classifier-run-1',1,'semantic-v1',1,'materiality-v1','ai-gateway') as value",
+      "select public.begin_source_change_classification($1,'classifier-run-1',1,'semantic-v1',1,'materiality-v1','openai') as value",
       [changeId],
     );
     const classificationPacket = classificationStart.rows[0]!.value;
@@ -283,7 +283,7 @@ describe("Auterim migration and monitoring transaction", () => {
     const evidenceFingerprint = classificationPacket.evidenceFingerprint;
     const classification = await db.query<{ value: Record<string, unknown> }>(
       `select public.record_source_change_classification(
-        $1,'semantic-v1',$2,'classifier-run-1',1,'ai-gateway','fixture/model',1,'materiality-v1',true,
+        $1,'semantic-v1',$2,'classifier-run-1',1,'openai','fixture/model',1,'materiality-v1',true,
         'api_change','[\"/v2\"]'::jsonb,'high',0.91,'The changed API limit can affect integrations.',
         '[{"type":"added","excerpt":"Meaningful change"}]'::jsonb,
         'The source documents an API behavior change.','classified',null,null,5
@@ -303,7 +303,7 @@ describe("Auterim migration and monitoring transaction", () => {
       replayed: false,
     });
     const replayedClassification = await db.query<{ value: Record<string, unknown> }>(
-      "select public.begin_source_change_classification($1,'classifier-run-2',1,'semantic-v1',1,'materiality-v1','ai-gateway') as value",
+      "select public.begin_source_change_classification($1,'classifier-run-2',1,'semantic-v1',1,'materiality-v1','openai') as value",
       [changeId],
     );
     expect(replayedClassification.rows[0]!.value).toMatchObject({
@@ -313,7 +313,7 @@ describe("Auterim migration and monitoring transaction", () => {
     });
 
     const v2 = await db.query<{ value: Record<string, unknown> }>(
-      `select public.begin_source_change_classification($1,'classifier-run-v2',1,'semantic-v2',2,'materiality-v2','ai-gateway') as value`,
+      `select public.begin_source_change_classification($1,'classifier-run-v2',1,'semantic-v2',2,'materiality-v2','openai') as value`,
       [changeId],
     );
     expect(v2.rows[0]!.value).toMatchObject({
@@ -322,7 +322,7 @@ describe("Auterim migration and monitoring transaction", () => {
     });
     await db.query(
       `select public.record_source_change_classification(
-        $1,'semantic-v2',$2,'classifier-run-v2',1,'ai-gateway','fixture/model-v2',2,'materiality-v2',true,
+        $1,'semantic-v2',$2,'classifier-run-v2',1,'openai','fixture/model-v2',2,'materiality-v2',true,
         'api_change','[\"/v2\"]'::jsonb,'high',0.91,'API contract changed.',
         '[{"type":"added","excerpt":"Meaningful change"}]'::jsonb,
         'The source documents an API behavior change.','classified',null,null,2

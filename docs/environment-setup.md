@@ -16,7 +16,7 @@ The local environment check reads only this project's `.env.local`; it does not 
 
 The Supabase client convention is a publishable key for browser-facing use and a secret key for privileged server-side use. The app also recognizes the legacy `SUPABASE_SERVICE_ROLE_KEY` name for compatibility. Never prefix the privileged key with `NEXT_PUBLIC_`. The monitoring repository is server-only and uses only the local Auterim URL and server secret.
 
-Semantic classification is optional. For explicitly enabled live classification, set `AI_GATEWAY_API_KEY` and select a model with `AUTERIM_CLASSIFIER_MODEL` in this repository's `.env.local`. Keep both server-only; do not use a `NEXT_PUBLIC_` prefix. The default local setup may omit both values, and offline tests/evaluation use deterministic fakes. The key is not discovered from other repositories or machine-wide configuration.
+Semantic classification is optional. For live OpenAI classification, set `OPENAI_API_KEY`, `AUTERIM_CLASSIFIER_PROVIDER=openai`, and `AUTERIM_CLASSIFIER_MODEL` in this repository's `.env.local`. Keep the key server-only; do not use a `NEXT_PUBLIC_` prefix. Offline tests/evaluation use deterministic fakes. `npm run env:check` reports whether the combination is configured and prints only provider/model names, never the key. The key is not discovered from other repositories or machine-wide configuration.
 
 No real credentials belong in `.env.example` or Git. `npm run env:check` reports configuration presence and a redacted project identifier from `.env.local` without printing key values.
 

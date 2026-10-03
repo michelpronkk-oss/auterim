@@ -1,5 +1,4 @@
 import "server-only";
-import { generateText, gateway, Output } from "ai";
 import { z } from "zod";
 import { getEnvironment } from "@/lib/env/schema";
 import { SupabaseChangeClassificationRepository } from "@/lib/monitoring/classification-repository";
@@ -97,36 +96,121 @@ export class ClassifierConfigurationError extends Error {
   }
 }
 
-export class GatewaySemanticClassifier implements SemanticClassifier {
-  readonly providerId = "ai-gateway";
+export class OpenAISemanticClassifier implements SemanticClassifier {
+  readonly providerId = "openai";
   readonly modelId: string;
 
   constructor(
     modelId: string,
     private readonly apiKey: string,
+    private readonly request: typeof fetch = fetch,
   ) {
     this.modelId = modelId;
-    // The SDK resolves Gateway credentials from process env. Do not let an omitted
-    // local secret fall through to ambient Vercel credentials in a developer run.
-    if (!apiKey) throw new ClassifierConfigurationError("AI Gateway is not configured.");
+    if (!apiKey) throw new ClassifierConfigurationError("OpenAI classification is not configured.");
   }
 
   async classify(packet: ClassificationEvidencePacket): Promise<SemanticClassifierResponse> {
-    const result = await generateText({
-      model: gateway(this.modelId),
-      system: CLASSIFIER_SYSTEM_PROMPT,
-      prompt: buildClassifierPrompt(packet),
-      output: Output.object({ schema: semanticClassificationSchema }),
-      maxOutputTokens: 700,
-      maxRetries: 0,
-      timeout: 20_000,
+    const response = await this.request("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${this.apiKey}`,
+        "content-type": "application/json",
+      },
+      signal: AbortSignal.timeout(20_000),
+      body: JSON.stringify({
+        model: this.modelId,
+        instructions: CLASSIFIER_SYSTEM_PROMPT,
+        input: buildClassifierPrompt(packet),
+        max_output_tokens: 700,
+        reasoning: { effort: "low" },
+        store: false,
+        text: {
+          format: {
+            type: "json_schema",
+            name: "semantic_classification",
+            strict: true,
+            schema: openAIStructuredOutputSchema(),
+          },
+        },
+      }),
     });
+    if (!response.ok) throw new OpenAIClassifierError("provider_http_error");
+    let payload: z.infer<typeof openAIResponseSchema>;
+    try {
+      payload = openAIResponseSchema.parse(await response.json());
+    } catch {
+      throw new OpenAIClassifierError("invalid_response");
+    }
+    if (payload.status === "incomplete") throw new OpenAIClassifierError("incomplete_response");
+    const content = payload.output
+      .flatMap((item) => item.content ?? [])
+      .find((item) => item.type === "output_text");
+    if (payload.output.some((item) => item.content?.some((part) => part.type === "refusal"))) {
+      throw new OpenAIClassifierError("provider_refusal");
+    }
+    if (!content?.text || payload.status !== "completed") {
+      throw new OpenAIClassifierError("missing_structured_output");
+    }
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(content.text);
+    } catch {
+      throw new OpenAIClassifierError("invalid_json");
+    }
+    let classification: SemanticClassification;
+    try {
+      classification = semanticClassificationSchema.parse(decoded);
+    } catch {
+      throw new OpenAIClassifierError("schema_validation_error");
+    }
     return {
-      classification: semanticClassificationSchema.parse(result.output),
-      inputTokens: result.usage.inputTokens ?? null,
-      outputTokens: result.usage.outputTokens ?? null,
+      classification,
+      inputTokens: payload.usage?.input_tokens ?? null,
+      outputTokens: payload.usage?.output_tokens ?? null,
     };
   }
+}
+
+const openAIResponseSchema = z
+  .object({
+    status: z.string(),
+    output: z.array(
+      z
+        .object({
+          content: z
+            .array(
+              z
+                .object({
+                  type: z.string(),
+                  text: z.string().optional(),
+                })
+                .passthrough(),
+            )
+            .optional(),
+        })
+        .passthrough(),
+    ),
+    usage: z
+      .object({
+        input_tokens: z.number().int().nonnegative(),
+        output_tokens: z.number().int().nonnegative(),
+      })
+      .nullable()
+      .optional(),
+  })
+  .passthrough();
+
+export class OpenAIClassifierError extends Error {
+  constructor(readonly category: string) {
+    super(`OpenAI Responses classification failed (${category}).`);
+    this.name = "OpenAIClassifierError";
+  }
+}
+
+function openAIStructuredOutputSchema() {
+  const schema = z.toJSONSchema(semanticClassificationSchema, { target: "draft-7" });
+  delete schema.$schema;
+  return schema;
 }
 
 const CLASSIFIER_SYSTEM_PROMPT = `You are Auterim's material-change classifier. Return only the requested structured result.
@@ -343,6 +427,7 @@ export async function classifySourceChange(
     });
   } catch (error) {
     const permanent = error instanceof ClassifierConfigurationError;
+    const providerFailure = error instanceof OpenAIClassifierError;
     await repository.fail({
       changeId: input.changeId,
       classifierVersion: start.classifierVersion,
@@ -352,7 +437,11 @@ export async function classifySourceChange(
       promptVersion: start.promptVersion,
       triggerRunId: input.triggerRunId,
       attemptNumber: input.attemptNumber,
-      category: permanent ? error.category : "classification_error",
+      category: permanent
+        ? error.category
+        : providerFailure
+          ? error.category
+          : "classification_error",
       summary: permanent
         ? error.message
         : "Semantic classification failed validation or provider processing.",
@@ -363,13 +452,17 @@ export async function classifySourceChange(
 
 function makeConfiguredClassifier() {
   const environment = getEnvironment();
-  if (!environment.AUTERIM_CLASSIFIER_MODEL || !environment.AI_GATEWAY_API_KEY) {
+  if (
+    environment.AUTERIM_CLASSIFIER_PROVIDER !== "openai" ||
+    !environment.AUTERIM_CLASSIFIER_MODEL ||
+    !environment.OPENAI_API_KEY
+  ) {
     throw new ClassifierConfigurationError(
-      "Set AUTERIM_CLASSIFIER_MODEL and AI_GATEWAY_API_KEY to enable semantic classification.",
+      "Set AUTERIM_CLASSIFIER_PROVIDER=openai, AUTERIM_CLASSIFIER_MODEL, and OPENAI_API_KEY to enable semantic classification.",
     );
   }
-  return new GatewaySemanticClassifier(
+  return new OpenAISemanticClassifier(
     environment.AUTERIM_CLASSIFIER_MODEL,
-    environment.AI_GATEWAY_API_KEY,
+    environment.OPENAI_API_KEY,
   );
 }

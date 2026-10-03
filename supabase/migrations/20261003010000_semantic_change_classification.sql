@@ -68,7 +68,7 @@ begin
   where ch.id = new.id;
   insert into public.source_change_classifications (
     change_id, classifier_version, schema_version, prompt_version, evidence_fingerprint, provider
-  ) values (new.id, 'semantic-v1', 1, 'materiality-v1', fingerprint, 'ai-gateway')
+  ) values (new.id, 'semantic-v1', 1, 'materiality-v1', fingerprint, 'openai')
   on conflict (change_id, classifier_version, schema_version, prompt_version, provider, evidence_fingerprint) do nothing;
   return new;
 end;

@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   applyClassificationPolicy,
   buildClassifierPrompt,
   buildEvidencePacket,
   ClassifierConfigurationError,
+  OpenAISemanticClassifier,
   classifySourceChange,
   semanticClassificationSchema,
   type ChangeClassificationRepository,
@@ -402,6 +403,61 @@ describe("offline semantic materiality evaluation harness", () => {
     ).toBe(false);
   });
 
+  it("calls only the Responses API with strict Zod-derived JSON Schema and no tools", async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              content: [{ type: "output_text", text: JSON.stringify(result()) }],
+            },
+          ],
+          usage: { input_tokens: 320, output_tokens: 82 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const classifier = new OpenAISemanticClassifier("gpt-6.1-sol", "fake-openai-key", request);
+    const response = await classifier.classify(buildEvidencePacket(baseChange));
+    const [url, init] = request.mock.calls[0]!;
+    const body = JSON.parse(String(init?.body));
+
+    expect(url).toBe("https://api.openai.com/v1/responses");
+    expect(init?.method).toBe("POST");
+    expect(new Headers(init?.headers).get("authorization")).toBe("Bearer fake-openai-key");
+    expect(body.model).toBe("gpt-6.1-sol");
+    expect(body.max_output_tokens).toBe(700);
+    expect(body.store).toBe(false);
+    expect(body.tools).toBeUndefined();
+    expect(body.text.format).toMatchObject({
+      type: "json_schema",
+      name: "semantic_classification",
+      strict: true,
+    });
+    expect(body.text.format.schema.$schema).toBeUndefined();
+    expect(response).toMatchObject({
+      inputTokens: 320,
+      outputTokens: 82,
+      classification: result(),
+    });
+  });
+
+  it("does not expose an OpenAI error response body or key in provider errors", async () => {
+    const classifier = new OpenAISemanticClassifier(
+      "gpt-6.1-sol",
+      "fake-secret-that-must-not-escape",
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response("key fake-secret-that-must-not-escape", { status: 401 })),
+    );
+    await expect(classifier.classify(buildEvidencePacket(baseChange))).rejects.toMatchObject({
+      category: "provider_http_error",
+      message: "OpenAI Responses classification failed (provider_http_error).",
+    });
+  });
+
   it("rejects an evidence excerpt attributed to the wrong diff side", async () => {
     const repository = makeRepository(fixtureChange("-Old contract\n+New contract"));
     await expect(
@@ -461,7 +517,7 @@ describe("offline semantic materiality evaluation harness", () => {
       providerId: "mock",
       modelId: "unconfigured",
       async classify() {
-        throw new ClassifierConfigurationError("AI Gateway is not configured.");
+        throw new ClassifierConfigurationError("OpenAI classification is not configured.");
       },
     };
     await expect(
@@ -475,7 +531,7 @@ describe("offline semantic materiality evaluation harness", () => {
       ),
     ).rejects.toBeInstanceOf(ClassifierConfigurationError);
     expect(repository.failures).toEqual([
-      { category: "permanent_configuration", summary: "AI Gateway is not configured." },
+      { category: "permanent_configuration", summary: "OpenAI classification is not configured." },
     ]);
   });
 });

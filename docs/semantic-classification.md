@@ -18,7 +18,7 @@ Model evidence entries include a type (`added`, `removed`, or `changed`) and an 
 
 ## Provider, versioning, and output
 
-Core code depends on the `SemanticClassifier` interface. The current provider adapter uses AI Gateway, with `AI_GATEWAY_API_KEY` and an explicitly chosen `AUTERIM_CLASSIFIER_MODEL`. No default model is selected and there is no live-provider requirement for tests. The provider has no tools.
+Core code depends on the `SemanticClassifier` interface. The current supported live provider is `openai`; `AUTERIM_CLASSIFIER_PROVIDER` is enum-validated. Its provider adapter calls `POST https://api.openai.com/v1/responses` directly, with `OPENAI_API_KEY` and the explicitly selected `AUTERIM_CLASSIFIER_MODEL`. The request uses the Responses API's strict `json_schema` output format generated from the existing Zod schema, `store: false`, one bounded call with a 20-second timeout, and no tools. No default provider key is searched and there is no live-provider requirement for normal tests.
 
 Persisted fields include classifier, prompt, and schema versions, provider/model, deterministic evidence fingerprint, materiality/category, affected entities, severity hint, confidence, summary, typed evidence, concise rationale, decision state, token/latency metadata, attempt state, and error category/summary. The fingerprint is a database-generated MD5 idempotency fingerprint over immutable diff/snapshot hashes; it is not a security credential. Uniqueness includes source change, classifier version, schema version, prompt version, provider, and evidence fingerprint, so a later version can be stored without overwriting history. Any model change must bump `classifier_version`.
 
@@ -37,5 +37,7 @@ Monitored source text and metadata are untrusted data. The system prompt states 
 ## Evaluation and limitations
 
 `npm run eval:semantic` runs offline fixtures with deterministic mocked responses. Cases cover copyright, navigation, typos, equivalent rearrangement, pricing, limits, deprecation, authentication, optional features, availability removal, ambiguity, large noisy diffs with meaningful tails, injection text, secret/tool requests, wrong-side evidence, truncation, and malformed output. This verifies the pipeline, policy, schema, and evidence checks; it does not measure a live model's classification accuracy or confidence calibration.
+
+`npm run eval:semantic:live` is opt-in and uses only this repository's configured OpenAI Responses API credentials. It checks the configured provider/model before making at most three paid calls on static fixtures, prints bounded classifications and provider-reported token usage, and estimates cost from published model rates. It does not write to the database. Do not use this command in routine tests or CI.
 
 The classifier can miss a material fact omitted by the deterministic bounded diff and may misread ambiguous prose. Truncated decisions are review-only, but full model quality requires an explicitly configured, separately approved live evaluation set. The next intelligence stage may consume only high-confidence classified material events and must add company context in its own isolated job.

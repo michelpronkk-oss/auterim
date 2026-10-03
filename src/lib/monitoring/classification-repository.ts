@@ -105,7 +105,7 @@ export class SupabaseChangeClassificationRepository implements ChangeClassificat
       p_classifier_version: "semantic-v1",
       p_schema_version: 1,
       p_prompt_version: "materiality-v1",
-      p_provider: "ai-gateway",
+      p_provider: "openai",
     });
     throwOnError(error);
     return classificationStartSchema.parse(data) as ClassificationStart;

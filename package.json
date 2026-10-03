@@ -14,13 +14,13 @@
     "test": "vitest",
     "test:run": "vitest run",
     "eval:semantic": "vitest run tests/classification.test.ts",
+    "eval:semantic:live": "vitest run --config vitest.live.config.mts",
     "env:check": "node --experimental-strip-types scripts/env-check.mts",
     "project:check": "node --experimental-strip-types scripts/project-check.mts"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.117.2",
     "@trigger.dev/sdk": "4.7.2",
-    "ai": "^7.0.127",
     "next": "16.3.8",
     "parse5": "8.0.1",
     "react": "19.2.8",

@@ -41,6 +41,7 @@ try {
   // Deliberately inspect only this project's .env.local, never inherited machine variables.
   const environment = parseEnvironment(readLocalEnvironmentFile());
   const supabaseConfigured = isIntegrationConfigured("supabase", environment);
+  const classifierConfigured = isIntegrationConfigured("classifier", environment);
 
   console.log("Auterim environment check");
   console.log(
@@ -57,6 +58,9 @@ try {
   console.log(
     `Resend: ${isIntegrationConfigured("resend", environment) ? "configured" : "not configured"}`,
   );
+  console.log(`OpenAI classification: ${classifierConfigured ? "configured" : "not configured"}`);
+  console.log(`  Provider: ${environment.AUTERIM_CLASSIFIER_PROVIDER}`);
+  console.log(`  Model: ${environment.AUTERIM_CLASSIFIER_MODEL ?? "not set"}`);
   console.log("No secrets were printed. No project discovery or network calls were made.");
 } catch (error) {
   console.error("Environment validation failed:");

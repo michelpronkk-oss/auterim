@@ -13,7 +13,11 @@ export const environmentSchema = z
     SUPABASE_SERVICE_ROLE_KEY: optionalSecret,
     TRIGGER_SECRET_KEY: optionalSecret,
     RESEND_API_KEY: optionalSecret,
-    AI_GATEWAY_API_KEY: optionalSecret,
+    OPENAI_API_KEY: optionalSecret,
+    AUTERIM_CLASSIFIER_PROVIDER: z.preprocess(
+      emptyToUndefined,
+      z.enum(["openai"]).default("openai"),
+    ),
     AUTERIM_CLASSIFIER_MODEL: z.preprocess(
       emptyToUndefined,
       z.string().trim().min(1).max(160).optional(),
@@ -68,12 +72,20 @@ export function getSupabasePublicConfig(environment: AppEnvironment = getEnviron
 }
 
 export function isIntegrationConfigured(
-  name: "supabase" | "trigger" | "resend",
+  name: "supabase" | "trigger" | "resend" | "classifier",
   environment: AppEnvironment,
 ) {
   if (name === "supabase") {
     return Boolean(
       environment.NEXT_PUBLIC_SUPABASE_URL && environment.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
+    );
+  }
+
+  if (name === "classifier") {
+    return Boolean(
+      environment.AUTERIM_CLASSIFIER_PROVIDER === "openai" &&
+      environment.OPENAI_API_KEY &&
+      environment.AUTERIM_CLASSIFIER_MODEL,
     );
   }
 
