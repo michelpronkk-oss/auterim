@@ -13,7 +13,7 @@ const queueBatchSchema = z.array(
 
 export const dispatchPreflightQueueTask = schedules.task({
   id: "dispatch-preflight-queue",
-  cron: "*/5 * * * *",
+  cron: { pattern: "*/5 * * * *", window: "5m" },
   run: async () => {
     const client = createSupabaseServerClient();
     const { data, error } = await client.rpc("list_preflight_dispatch_queue", { p_limit: 40 });
