@@ -8,7 +8,7 @@ Before database/deployment work, run `npm run project:check` and `npm run env:ch
 
 ## Tables
 
-Tenant scope: `workspaces`, `workspace_members`, `companies`, `company_context`, `workspace_dependencies`, and `dependency_context`.
+Tenant scope: `workspaces`, `workspace_members`, `companies`, `company_context`, `workspace_dependencies`, and `dependency_context`. URL dependency discovery adds workspace-scoped `dependency_discovery_runs`, `dependency_discovery_evidence`, and `discovered_dependencies` candidate rows. Candidates remain separate from confirmed `workspace_dependencies`.
 
 Global scope: `dependency_catalog`, `source_catalog`, `scan_runs`, `source_snapshots`, `source_changes`, and `source_change_classifications`.
 

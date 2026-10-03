@@ -19,3 +19,7 @@ Tenant/company tables remain workspace-scoped with membership RLS. Global catalo
 ## Known limits
 
 The scan task is not a browser crawler and does not execute dynamic pages. Classification is an interpretation of a bounded diff, not a replacement for it. Truncated evidence lowers confidence and forces review. Provider credentials/model configuration are optional, so monitoring can operate while classification records a permanent configuration failure. Large normalized snapshots may later move to private object storage while hashes and references remain in Postgres.
+
+## URL dependency discovery
+
+Public URL dependency discovery is implemented as a separate deterministic pipeline. Its provider signatures, safety boundaries, tenant-scoped candidate persistence, fast/deep limits, and offline/live evaluation are documented in [URL dependency discovery](./url-dependency-discovery.md). Discovered candidates are not confirmed dependencies.

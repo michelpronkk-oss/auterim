@@ -31,6 +31,12 @@ const impactMigration = await readFile(
   ),
   "utf8",
 );
+const discoveryMigration = await readFile(
+  fileURLToPath(
+    new URL("../supabase/migrations/20261004020000_url_dependency_discovery.sql", import.meta.url),
+  ),
+  "utf8",
+);
 
 async function makeDatabase() {
   const db = new PGlite();
@@ -49,6 +55,7 @@ async function makeDatabase() {
   await db.exec(migration);
   await db.exec(classificationMigration);
   await db.exec(impactMigration);
+  await db.exec(discoveryMigration);
   return db;
 }
 
@@ -208,6 +215,140 @@ describe("Auterim migration and monitoring transaction", () => {
 
     await db.exec("set role anon");
     await expect(db.query("select * from public.workspaces")).rejects.toBeTruthy();
+    await db.exec("reset role");
+  });
+
+  it("isolates discovery evidence by workspace and preserves confirmed dependency decisions", async () => {
+    const userA = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const userB = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    await db.query("insert into auth.users (id) values ($1),($2)", [userA, userB]);
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [userA]);
+    await db.exec("set role authenticated");
+    const workspace = await db.query<{ id: string }>(
+      "select public.create_workspace('Discovery tenant') as id",
+    );
+    const workspaceId = workspace.rows[0]!.id;
+    const company = await db.query<{ id: string }>(
+      "insert into public.companies (workspace_id,name,slug) values ($1,'Discovery Co','discovery-co') returning id",
+      [workspaceId],
+    );
+    const companyId = company.rows[0]!.id;
+    await db.exec("reset role");
+
+    await db.exec("set role service_role");
+    const run = await db.query<{ id: string }>(
+      `insert into public.dependency_discovery_runs (
+        workspace_id,company_id,website_url,trigger_run_id,attempt_number
+      ) values ($1,$2,'https://discovery.example/','discovery-run',1) returning id`,
+      [workspaceId, companyId],
+    );
+    const provider = await db.query<{ id: string }>(
+      "select id from public.dependency_catalog where slug='stripe'",
+    );
+    await db.query(
+      `select public.complete_url_dependency_discovery_run(
+        $1,$2,$3,'completed',null,false,0,0,
+        '[{"provider_slug":"stripe","signature_key":"stripe-js-v3","signal_type":"script_host","strength":"strong","source_origin":"https://discovery.example"}]'::jsonb,
+        '[{"provider_slug":"stripe","confidence":0.72,"confidence_label":"medium","evidence_summary":[{"signatureKey":"stripe-js-v3"}]}]'::jsonb
+      )`,
+      [run.rows[0]!.id, workspaceId, companyId],
+    );
+    const candidate = await db.query<{ id: string }>(
+      "select id from public.discovered_dependencies where company_id=$1 and dependency_id=$2",
+      [companyId, provider.rows[0]!.id],
+    );
+    const candidateId = candidate.rows[0]!.id;
+    await db.query("update public.discovered_dependencies set status='confirmed' where id=$1", [
+      candidateId,
+    ]);
+    await db.query("select public.fail_url_dependency_discovery_run($1,$2,'network_error')", [
+      run.rows[0]!.id,
+      workspaceId,
+    ]);
+    const completedAfterLateFailure = await db.query<{ status: string }>(
+      "select status from public.dependency_discovery_runs where id=$1",
+      [run.rows[0]!.id],
+    );
+    expect(completedAfterLateFailure.rows[0]!.status).toBe("completed");
+    await db.query(
+      `select public.upsert_discovered_dependency_candidate(
+        $1,$2,$3,0.99,'high','[{"signatureKey":"new-evidence"}]'::jsonb
+      )`,
+      [workspaceId, companyId, provider.rows[0]!.id],
+    );
+    const preserved = await db.query<{
+      status: string;
+      confidence: string;
+      evidence_summary: unknown;
+    }>(
+      "select status,confidence,evidence_summary from public.discovered_dependencies where id=$1",
+      [candidateId],
+    );
+    expect(preserved.rows[0]).toMatchObject({
+      status: "confirmed",
+      confidence: "0.720",
+      evidence_summary: [{ signatureKey: "stripe-js-v3" }],
+    });
+
+    const atomicRun = await db.query<{ id: string }>(
+      `insert into public.dependency_discovery_runs (
+        workspace_id,company_id,website_url,trigger_run_id,attempt_number
+      ) values ($1,$2,'https://discovery.example/','atomic-failure-run',1) returning id`,
+      [workspaceId, companyId],
+    );
+    await expect(
+      db.query(
+        `select public.complete_url_dependency_discovery_run(
+          $1,$2,$3,'completed',null,false,0,0,'[]'::jsonb,
+          '[{"provider_slug":"cloudflare","confidence":0.72,"confidence_label":"medium","evidence_summary":[]},
+            {"provider_slug":"vercel","confidence":2,"confidence_label":"high","evidence_summary":[]}]'::jsonb
+        )`,
+        [atomicRun.rows[0]!.id, workspaceId, companyId],
+      ),
+    ).rejects.toBeTruthy();
+    const rolledBackCandidates = await db.query<{ count: string }>(
+      `select count(*)::text as count from public.discovered_dependencies d
+       join public.dependency_catalog c on c.id=d.dependency_id
+       where d.company_id=$1 and c.slug in ('cloudflare','vercel')`,
+      [companyId],
+    );
+    expect(rolledBackCandidates.rows[0]!.count).toBe("0");
+    const atomicState = await db.query<{ status: string }>(
+      "select status from public.dependency_discovery_runs where id=$1",
+      [atomicRun.rows[0]!.id],
+    );
+    expect(atomicState.rows[0]!.status).toBe("running");
+    await db.exec("reset role");
+
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [userB]);
+    await db.exec("set role authenticated");
+    expect(
+      (
+        await db.query("select * from public.dependency_discovery_runs where workspace_id=$1", [
+          workspaceId,
+        ])
+      ).rows,
+    ).toHaveLength(0);
+    expect(
+      (
+        await db.query("select * from public.dependency_discovery_evidence where workspace_id=$1", [
+          workspaceId,
+        ])
+      ).rows,
+    ).toHaveLength(0);
+    expect(
+      (
+        await db.query("select * from public.discovered_dependencies where workspace_id=$1", [
+          workspaceId,
+        ])
+      ).rows,
+    ).toHaveLength(0);
+    await expect(
+      db.query(
+        "insert into public.discovered_dependencies (workspace_id,company_id,dependency_id,confidence,confidence_label) values ($1,$2,$3,0.5,'medium')",
+        [workspaceId, companyId, provider.rows[0]!.id],
+      ),
+    ).rejects.toBeTruthy();
     await db.exec("reset role");
   });
 

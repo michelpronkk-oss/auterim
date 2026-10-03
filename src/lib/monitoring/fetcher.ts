@@ -13,6 +13,7 @@ export type FetchResult = {
   status: number;
   body: Buffer;
   contentType: string | null;
+  safeHeaders: Record<string, string>;
   etag: string | null;
   lastModified: string | null;
   finalUrl: string;
@@ -43,6 +44,10 @@ type FetchDependencies = {
     addresses: Array<{ address: string; family: number }>,
     timeoutMs: number,
   ) => Promise<WireResponse>;
+  acceptedContentTypes?: readonly string[];
+  maxResponseBytes?: number;
+  allowedOrigins?: readonly string[];
+  restrictToStandardPorts?: boolean;
 };
 
 function parseIPv4(value: string): number[] {
@@ -198,15 +203,15 @@ function nodeRequest(
   });
 }
 
-async function readBounded(response: WireResponse): Promise<Buffer> {
+async function readBounded(response: WireResponse, maxBytes: number): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of response.body) {
     size += chunk.byteLength;
-    if (size > MAX_RESPONSE_BYTES) {
+    if (size > maxBytes) {
       throw new SafeFetchError(
         "response_too_large",
-        "The source response exceeded the 2 MiB limit.",
+        "The source response exceeded the configured size limit.",
         response.status,
       );
     }
@@ -253,6 +258,20 @@ export async function fetchHttpSource(
     }
     if (originalProtocol === "https:" && current.protocol !== "https:") {
       throw new SafeFetchError("unsafe_redirect", "HTTPS sources cannot redirect to HTTP.");
+    }
+    if (dependencies.allowedOrigins && !dependencies.allowedOrigins.includes(current.origin)) {
+      throw new SafeFetchError(
+        "unsafe_redirect",
+        "The source redirected outside the approved origin.",
+      );
+    }
+    if (
+      dependencies.restrictToStandardPorts &&
+      current.port !== "" &&
+      current.port !== "80" &&
+      current.port !== "443"
+    ) {
+      throw new SafeFetchError("unsafe_redirect", "The source uses a non-standard public port.");
     }
     current.hash = "";
     if (visited.has(current.href))
@@ -332,6 +351,7 @@ export async function fetchHttpSource(
         status: 304,
         body: Buffer.alloc(0),
         contentType,
+        safeHeaders: {},
         etag: returnedEtag,
         lastModified: returnedModified,
         finalUrl: current.href,
@@ -344,10 +364,12 @@ export async function fetchHttpSource(
         response.status,
       );
     }
-    if (
-      !contentType ||
-      !["text/html", "application/xhtml+xml", "text/plain"].includes(contentType)
-    ) {
+    const acceptedContentTypes = dependencies.acceptedContentTypes ?? [
+      "text/html",
+      "application/xhtml+xml",
+      "text/plain",
+    ];
+    if (!contentType || !acceptedContentTypes.includes(contentType)) {
       throw new SafeFetchError(
         "invalid_content_type",
         "The source did not return HTML or plain text.",
@@ -357,7 +379,7 @@ export async function fetchHttpSource(
 
     let body: Buffer;
     try {
-      body = await readBounded(response);
+      body = await readBounded(response, dependencies.maxResponseBytes ?? MAX_RESPONSE_BYTES);
     } catch (error) {
       if (error instanceof SafeFetchError) throw error;
       if (isTimeout(error)) throw new SafeFetchError("timeout", "The source response timed out.");
@@ -367,6 +389,21 @@ export async function fetchHttpSource(
       status: response.status,
       body,
       contentType,
+      safeHeaders: Object.fromEntries(
+        [
+          "server",
+          "x-powered-by",
+          "x-vercel-id",
+          "x-vercel-cache",
+          "cf-ray",
+          "x-nf-request-id",
+          "x-served-by",
+        ].flatMap((name) => {
+          const value = response.headers[name];
+          const header = safeHeader(Array.isArray(value) ? value[0] : value);
+          return header ? [[name, header]] : [];
+        }),
+      ),
       etag: returnedEtag,
       lastModified: returnedModified,
       finalUrl: current.href,

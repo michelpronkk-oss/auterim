@@ -108,6 +108,63 @@ describe("safe HTTP fetcher", () => {
     ).rejects.toMatchObject({ category: "unsafe_target" });
   });
 
+  it("rejects a discovery redirect to a non-standard port before requesting it", async () => {
+    let requestCount = 0;
+    await expect(
+      fetchHttpSource(
+        "https://start.example.com/",
+        {},
+        {
+          resolveHost: publicAddresses,
+          restrictToStandardPorts: true,
+          request: async () => {
+            requestCount += 1;
+            return wire(302, "", { location: "https://end.example.com:8443/" });
+          },
+        },
+      ),
+    ).rejects.toMatchObject({ category: "unsafe_redirect" });
+    expect(requestCount).toBe(1);
+  });
+
+  it("keeps the optional deep pass on the approved origin after redirects", async () => {
+    let requestCount = 0;
+    await expect(
+      fetchHttpSource(
+        "https://start.example.com/app.js",
+        {},
+        {
+          resolveHost: publicAddresses,
+          allowedOrigins: ["https://start.example.com"],
+          request: async () => {
+            requestCount += 1;
+            return wire(302, "", { location: "https://third-party.example/app.js" });
+          },
+        },
+      ),
+    ).rejects.toMatchObject({ category: "unsafe_redirect" });
+    expect(requestCount).toBe(1);
+  });
+
+  it("returns only allowlisted provider headers and never cookies", async () => {
+    const result = await fetchHttpSource(
+      "https://start.example.com/",
+      {},
+      {
+        resolveHost: publicAddresses,
+        request: async () =>
+          wire(200, "ok", {
+            "content-type": "text/html",
+            server: "Vercel",
+            "x-powered-by": "Next.js",
+            "set-cookie": "session=secret",
+            authorization: "Bearer secret",
+          }),
+      },
+    );
+    expect(result.safeHeaders).toEqual({ server: "Vercel", "x-powered-by": "Next.js" });
+  });
+
   it("supports 304 and rejects timeout, content type, oversize and private destinations", async () => {
     const options = { resolveHost: publicAddresses };
     await expect(
