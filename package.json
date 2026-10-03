@@ -13,20 +13,24 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest",
     "test:run": "vitest run",
-    "env:check": "node --experimental-strip-types scripts/env-check.mts"
+    "eval:semantic": "vitest run tests/classification.test.ts",
+    "env:check": "node --experimental-strip-types scripts/env-check.mts",
+    "project:check": "node --experimental-strip-types scripts/project-check.mts"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.117.2",
     "@trigger.dev/sdk": "4.7.2",
+    "ai": "^7.0.127",
     "next": "16.3.8",
+    "parse5": "8.0.1",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "resend": "6.32.0",
     "zod": "4.6.5"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
     "@tailwindcss/postcss": "^4",
-    "@trigger.dev/build": "4.7.2",
     "@types/node": "22.20.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",

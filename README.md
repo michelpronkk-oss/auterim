@@ -2,38 +2,35 @@
 
 Auterim helps companies know when the tools they depend on change—before those changes become their problem.
 
-This repository is the local application foundation: Next.js App Router, strict TypeScript, Tailwind CSS, environment validation, and safe integration boundaries. Database implementation and all remote service connections are intentionally deferred.
-
-## Requirements
-
-- Node.js 22 or newer
-- npm
-
 ## Local development
+
+Requirements: Node.js 22 or newer and npm.
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`. The `/app` route is a product shell placeholder; authentication and dependency tracking are not implemented.
+The `/app` route remains a product shell. Milestone 2 adds the database foundation and a server-side source-monitoring pipeline; it does not add sign-in screens or customer workflows.
 
-## Validation commands
+## Safety and validation
 
 ```bash
+npm run project:check
+npm run env:check
 npm run lint
 npm run typecheck
 npm run test:run
 npm run build
-npm run env:check
+npm run format:check
 ```
 
-`npm run env:check` reads only this project's `.env.local`. It validates values without printing secrets and does not make remote requests.
-
-## Environment
-
-Copy `.env.example` to `.env.local` when configuring a local integration. Do not put privileged values in `NEXT_PUBLIC_` variables. See [environment setup](docs/environment-setup.md) before configuring the dedicated Auterim Supabase project.
+Run the identity and environment checks before any Supabase, Trigger.dev, GitHub, or deployment operation. The checks inspect only this checkout's configuration, make no remote calls, and never print secret values.
 
 ## Architecture
 
-See [architecture](docs/architecture.md) and the design-only [database plan](docs/database-plan.md). No schema, migrations, or SQL are included in this milestone.
+- [Architecture and security boundaries](docs/architecture.md)
+- [Database migration and operational notes](docs/database-plan.md)
+- [Environment setup](docs/environment-setup.md)
+
+The migration under `supabase/migrations/` is the database source of truth. The OpenAI dependency and pricing source are seeded there. Trigger.dev contains one daily dispatcher and one source scan task; automated tests use controlled content and an in-memory Postgres engine.

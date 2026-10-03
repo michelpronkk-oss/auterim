@@ -1,43 +1,31 @@
-Database implementation is intentionally blocked until the dedicated Auterim Supabase environment is explicitly configured.
+# Database migration and operational notes
 
-# Database plan (design notes only)
+## Source of truth
 
-This document describes candidate concepts. It does not define a schema. No SQL or generated database types belong to this milestone.
+`supabase/migrations/20261002232050_auterim_monitoring_foundation.sql` is the Milestone 2 schema source of truth. It creates the tenant foundation, global dependency/source catalog, immutable monitoring evidence, security helper functions, RPCs, indexes, and the one OpenAI pricing-source seed. The migration is validated in an in-memory PostgreSQL engine; whether it has been applied remotely is reported in the task completion notes.
 
-## Candidate entities
+Before database/deployment work, run `npm run project:check` and `npm run env:check`. Use only the project ref parsed from this repository's `.env.local`; do not use project listing, auto-linking, or credentials discovered elsewhere. Do not use destructive reset commands against a linked/remote project.
 
-| Entity                     | Scope  | Purpose and expected relationships                                                    |
-| -------------------------- | ------ | ------------------------------------------------------------------------------------- |
-| `workspaces`               | Tenant | Tenant root; owns workspace members and selected dependencies.                        |
-| `workspace_members`        | Tenant | Joins users to workspaces with membership state and future roles.                     |
-| `companies`                | Tenant | Company identity associated with a workspace.                                         |
-| `company_context`          | Tenant | Company-specific operating context used when assessing impact.                        |
-| `dependency_catalog`       | Global | Canonical catalog of external providers such as payment or infrastructure services.   |
-| `source_catalog`           | Global | Authoritative sources for one catalog dependency; each has a source category and URL. |
-| `workspace_dependencies`   | Tenant | Joins a workspace to selected catalog dependencies.                                   |
-| `dependency_context`       | Tenant | Workspace-specific notes and usage context for a selected dependency.                 |
-| `scan_runs`                | Global | Tracks a fetch attempt for a source, including outcome and timing.                    |
-| `source_snapshots`         | Global | Stores normalized observations and hashes for a source over time.                     |
-| `source_changes`           | Global | Records deterministic differences between successive snapshots.                       |
-| `impact_assessments`       | Tenant | Relates a global change to a workspace dependency and its context.                    |
-| `recommended_actions`      | Tenant | Suggested response associated with a tenant impact assessment.                        |
-| `notification_preferences` | Tenant | Workspace or member delivery preferences.                                             |
-| `notifications`            | Tenant | Delivery state and references to the tenant impact/action that prompted it.           |
-| `feedback_events`          | Tenant | Customer feedback about detected changes, assessments, or recommendations.            |
-| `usage_events`             | Tenant | Metering events associated with a workspace.                                          |
+## Tables
 
-## Relationships and invariants to decide
+Tenant scope: `workspaces`, `workspace_members`, `companies`, `company_context`, `workspace_dependencies`, and `dependency_context`.
 
-- A source belongs to one global dependency; snapshots and scan runs belong to one source.
-- A source change is derived from a pair of snapshots and should be uniquely identified by the source and snapshot pair (or an equivalent stable change key).
-- A workspace selects a catalog dependency at most once; dependency context belongs to that selection.
-- A tenant impact assessment ties one global change to one workspace dependency. Retries must not create duplicate assessments for the same change and selection.
-- A notification should have a stable idempotency key for its assessment, channel, and intended recipient.
-- Fetch and job retries should reuse stable run/idempotency identifiers where the provider supports it.
-- Global source observations must not contain tenant-specific context. Tenant-owned records must carry an explicit workspace relationship.
+Global scope: `dependency_catalog`, `source_catalog`, `scan_runs`, `source_snapshots`, `source_changes`, and `source_change_classifications`.
 
-Exact keys, deletion behavior, retention, and uniqueness constraints should be settled during schema design against the verified Auterim project.
+Tenant tables have workspace membership policies. Authenticated users may select enabled catalog rows. Global monitoring evidence has no authenticated grants; the service role is the only application role allowed to manage it. Snapshots and changes are immutable by trigger as well as privilege boundary.
 
-## Why RLS matters
+## Integrity and concurrency
 
-Tenant records may be reachable through client-facing APIs. RLS should enforce workspace membership and row access in the database in addition to server-side authorization. Policies must be designed per operation and role; an authenticated session or a caller-provided workspace ID alone does not establish access. Any privileged server key bypasses RLS protections and therefore must stay server-only and be used narrowly.
+Foreign keys preserve workspace/source relationships; uniqueness constraints prevent duplicate memberships, dependency selections, source runs per Trigger attempt, source versions, and changes for a new snapshot. Check constraints bound text payloads, HTTP values, statuses, and diff sizes.
+
+`record_source_scan_result` takes a row lock on the source, reads its latest snapshot, and commits snapshot, change, scan result, and source validators together. Concurrent identical results therefore serialize: the first records the new version, and the next observes unchanged content. If another distinct version was recorded while a worker was fetching, the stale worker receives the current snapshot and recalculates its diff before retrying the transaction.
+
+`source_change_classifications` is a service-only interpretation table. Its unique key is `(change_id, classifier_version, schema_version, prompt_version, provider, evidence_fingerprint)`, allowing safe retries for the same immutable evidence and preserving later classifier/prompt/schema versions as separate rows. Model changes must also bump the classifier version. The database trigger creates the initial queued `semantic-v1` row with each source change. RPCs lock the row while claiming work and only accept persistence for the current run/attempt. Output fields, confidence, payload sizes, and state are constrained. Six total claims bound automatic dispatch/retry. RLS is enabled, with all client-role access revoked and service-role access granted.
+
+## Payload and retention
+
+Only normalized text is stored in snapshot rows (maximum 512 KiB); raw fetched bytes are discarded after processing. Move snapshot content to private object storage when captures regularly approach the cap or retention cost requires it. Preserve immutable hashes and byte counts in Postgres and store an object reference in place of inline text in that follow-up migration.
+
+## Deferred
+
+Profiles, invite/member-management flows, workspace impact records, notifications, retention automation, browser rendering, and large-payload object storage are not part of this schema. Customer-specific impact remains deferred; classification contains no tenant or company fields.

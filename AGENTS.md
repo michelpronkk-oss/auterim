@@ -9,7 +9,7 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 <!-- END:nextjs-agent-rules -->
 
 <!-- TRIGGER.DEV SKILLS START -->
-## Trigger.dev agent skills
+## Trigger.dev skills
 
-This project has Trigger.dev agent skills installed in `.agents/skills/`. Before writing or changing Trigger.dev code (background tasks, scheduled tasks, realtime, or chat.agent AI agents), load the most relevant skill: `trigger-authoring-chat-agent`.
+This project has Trigger.dev skills installed in `.agents/skills/`. Before editing a background or scheduled task, load `trigger-authoring-tasks`. Load `trigger-authoring-chat-agent` only when implementing a `chat.agent` AI agent.
 <!-- TRIGGER.DEV SKILLS END -->

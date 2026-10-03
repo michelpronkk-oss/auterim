@@ -13,6 +13,11 @@ export const environmentSchema = z
     SUPABASE_SERVICE_ROLE_KEY: optionalSecret,
     TRIGGER_SECRET_KEY: optionalSecret,
     RESEND_API_KEY: optionalSecret,
+    AI_GATEWAY_API_KEY: optionalSecret,
+    AUTERIM_CLASSIFIER_MODEL: z.preprocess(
+      emptyToUndefined,
+      z.string().trim().min(1).max(160).optional(),
+    ),
     NEXT_PUBLIC_APP_URL: z.preprocess(
       emptyToUndefined,
       z.string().trim().url().default("http://localhost:3000"),

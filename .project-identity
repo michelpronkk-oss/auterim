@@ -1,0 +1,5 @@
+PROJECT_NAME=Auterim
+EXPECTED_GITHUB_REPOSITORY=michelpronkk-oss/auterim
+EXPECTED_GITHUB_REMOTE=https://github.com/michelpronkk-oss/auterim.git
+EXPECTED_VERCEL_PROJECT=auterim
+EXPECTED_TRIGGER_PROJECT=proj_hwqtxtyrvwykjirkrdoh

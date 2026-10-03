@@ -1,5 +1,7 @@
 node_modules
 .next
 coverage
+.agents
+AGENTS.md
 package-lock.json
 next-env.d.ts

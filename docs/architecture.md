@@ -1,54 +1,49 @@
 # Auterim architecture
 
-## Product boundary
+## Milestone 2 deterministic evidence
 
-Auterim protects a company from meaningful external changes in the software and services it depends on. The first product job is to make important changes visible early with low noise. The foundation does not crawl sources, classify changes, run customer workflows, or send notifications yet.
+The deterministic monitoring path ends at historical snapshots and diffs:
+
+`global source → guarded HTTP fetch → normalized text → SHA-256 → immutable snapshot → bounded deterministic diff`
+
+The deterministic evidence remains the source of truth. Later interpretation is linked to that immutable evidence and cannot replace it.
+
+## Milestone 3 semantic classification
+
+The pipeline now continues asynchronously after a new `source_changes` row is committed:
+
+`global source → guarded HTTP fetch → normalized text → SHA-256 → immutable snapshot → bounded deterministic diff → queued semantic classification`
+
+The scan task makes a best-effort enqueue and finishes independently of the model provider. A database trigger creates a durable queued classification row in the same transaction as a source change; the daily dispatcher rediscovers queued, failed, and stale work. The dedicated `classify-source-change` task loads only global source/change evidence through a server-only repository, constructs a bounded packet, validates structured output with Zod, applies a conservative confidence policy, and persists a versioned interpretation. No model call is made during ordinary tests.
+
+`SemanticClassifier` is the provider boundary. The current implementation uses AI Gateway with a model explicitly configured by `AUTERIM_CLASSIFIER_MODEL`; OpenAI or Anthropic can be selected through that boundary later. The provider is called without tools. Missing configuration becomes a recorded permanent failure and does not affect deterministic scanning.
+
+Materiality categories are pricing, API change, deprecation, limits, terms, feature change, availability, documentation, security, and other. Material decisions below 0.82 confidence, with missing/unsupported evidence, generic category, or truncated input are marked `review_required`. Critical severity is retained only with grounded evidence and confidence at least 0.97; non-material decisions are always informational. The rationale is a short evidence-based summary, never hidden chain-of-thought.
 
 ## Global and tenant data
 
-Future global data describes public providers and their authoritative sources:
+Global records describe public software providers and their sources: `dependency_catalog`, `source_catalog`, `scan_runs`, `source_snapshots`, and `source_changes`. A source is fetched once for all customers. Snapshot and change rows contain no tenant context.
 
-- Dependency catalog
-- Source catalog
-- Source snapshots
-- Detected changes
+Tenant records are `workspaces`, `workspace_members`, `companies`, `company_context`, `workspace_dependencies`, and `dependency_context`. They carry explicit workspace relationships and are protected by RLS policies that check membership in the database. The first owner is the authenticated workspace creator; additional member-management flows are deferred.
 
-Future tenant data describes a customer's workspace and interpretation:
+## Monitoring behavior
 
-- Workspaces and members
-- Companies and company context
-- Selected dependencies and dependency context
-- Impact assessments
-- Notifications and feedback
+The `scan-source` Trigger.dev task loads one enabled catalog source with a server-only Supabase client, fetches and normalizes it, then submits the result to a database RPC. The RPC locks the source row, checks the latest snapshot inside the same transaction, and writes a baseline, unchanged run, not-modified run, or one changed snapshot and change. Stable Trigger run/attempt identifiers make retries replay-safe. A stale concurrent result is diffed against the locked latest snapshot before it can be saved.
 
-Public source content should be fetched and normalized once for shared use. Tenant-specific context and impact assessments remain isolated by workspace.
+One daily UTC dispatcher checks due sources and enqueues at most 100 in a run. It creates no per-source schedules. Run history remains in Postgres for inspection.
 
-## Intended change pipeline
+## Fetch and payload limits
 
-`source → fetch → normalize → hash → snapshot → deterministic diff → semantic classifier → tenant impact → notification/action`
+The HTTP fetcher accepts HTTP and HTTPS only, rejects credentials and non-public destinations, resolves and pins public DNS addresses per request, repeats those checks after every redirect, disallows HTTPS downgrade, limits redirects to three, times out requests after 10 seconds, accepts HTML/XHTML/plain text, and caps response bodies at 2 MiB. It sends a fixed User-Agent and forwards conditional headers only while requests remain on the original origin.
 
-The stages will have explicit inputs and outputs. Stable normalized content and hashes make repeated fetches comparable; deterministic diffs separate observed content changes from later semantic judgments.
+HTML normalization removes document head, scripts, styles, noscript, templates, and SVG; retains ordered text; collapses layout whitespace; and caps normalized snapshots at 512 KiB. Raw response bodies are not stored. Normalized text is retained in Postgres for reproducible diffs. Move snapshot bodies to private Supabase Storage when normal content begins approaching the 512 KiB cap or database retention cost warrants it, while keeping hashes, byte counts, and object references in Postgres.
 
-## Shared monitoring
+The fetcher blocks common private, local, link-local, documentation, multicast, and special-purpose IP ranges. It does not execute JavaScript or follow browser behavior. Publicly routed addresses outside those ranges can still be operationally unusual; sources should be curated, and the source catalog must remain server-managed.
 
-If 2,000 customers depend on OpenAI, Auterim should fetch a public OpenAI pricing page once globally, then evaluate that change against each customer's dependency context. This reduces duplicated work and keeps public observations consistent across tenants.
+## Privilege boundaries
 
-## Future security architecture
-
-- Enforce explicit multi-tenant isolation in every tenant-owned data path.
-- Use Row Level Security (RLS) on exposed tenant tables.
-- Keep Supabase secret/service-role credentials in server-only code.
-- Never authorize a request only because it supplies a workspace ID; derive and verify membership on the server.
-- Treat external connectors and their content as untrusted input. Never infer Auterim credentials or project selection from connector state.
-
-## Future job architecture
-
-Trigger.dev will eventually run durable, bounded jobs for source fetching, semantic classification, impact analysis, and notifications. Jobs should be idempotent, retryable, observable, and separated by responsibility. No Trigger project has been selected or authenticated, and this foundation includes no job definitions.
-
-## Snapshot and history model
-
-Snapshots should preserve the normalized source observation, content hash, fetch time, and source metadata needed for reproducibility. Changes should reference the before/after snapshots. Retention and payload storage can be selected after the source types and operating costs are understood.
-
-## Deferred features
-
-Database schema, migrations, RLS policies, Supabase Auth, source fetching, crawling, snapshots, diffing, semantic classification, tenant impact, notifications, email delivery, billing, AI, browser automation, connectors, and production deployment are deferred. The database milestone must wait for the dedicated Auterim Supabase environment to be explicitly configured and verified.
+- Tenant APIs rely on explicit grants and RLS policies; clients cannot read global scan evidence or write catalog/monitoring data.
+- `SUPABASE_SECRET_KEY` (or the compatibility service-role variable) is used only by server-only monitoring/classification repositories.
+- `AI_GATEWAY_API_KEY` is optional, server-only, and read only by the semantic classifier. `AUTERIM_CLASSIFIER_MODEL` must be set explicitly for live calls. External page content and catalog text are untrusted data, have no tool access, and are never mixed with tenant/company context.
+- External source HTML is untrusted data and is parsed as inert text; no page scripts run.
+- Git and Supabase identity guards use the repository's own local config. No automatic project discovery or linking occurs.
