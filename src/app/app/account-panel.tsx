@@ -43,7 +43,29 @@ const accountSchema = z
 
 type AccountData = z.infer<typeof accountSchema>;
 
-export function AccountPanel() {
+function createInitialSetupForm(websiteUrl: string) {
+  try {
+    const parsed = new URL(websiteUrl);
+    if (
+      !["http:", "https:"].includes(parsed.protocol) ||
+      parsed.username ||
+      parsed.password ||
+      !["", "80", "443"].includes(parsed.port)
+    )
+      throw new Error("invalid_site");
+    const domain = parsed.hostname.replace(/^www\./, "");
+    const companyName = domain.split(".")[0]?.replace(/[-_]+/g, " ") ?? "";
+    return {
+      websiteUrl: parsed.origin,
+      companyName,
+      workspaceName: companyName && `${companyName} team`,
+    };
+  } catch {
+    return { workspaceName: "", companyName: "", websiteUrl: "" };
+  }
+}
+
+export function AccountPanel({ initialWebsiteUrl = "" }: { initialWebsiteUrl?: string }) {
   const [session, setSession] = useState<Session | null>(null);
   const [workspaceId, setWorkspaceId] = useState("");
   const [workspaces, setWorkspaces] = useState<
@@ -53,6 +75,7 @@ export function AccountPanel() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [setupForm, setSetupForm] = useState(() => createInitialSetupForm(initialWebsiteUrl));
 
   const api = useCallback(
     async (path: string, init?: RequestInit) => {
@@ -296,6 +319,10 @@ export function AccountPanel() {
                 minLength={1}
                 maxLength={120}
                 placeholder="Acme engineering"
+                value={setupForm.workspaceName}
+                onChange={(event) =>
+                  setSetupForm((current) => ({ ...current, workspaceName: event.target.value }))
+                }
               />
             </label>
             <label>
@@ -306,6 +333,10 @@ export function AccountPanel() {
                 minLength={1}
                 maxLength={160}
                 placeholder="Acme, Inc."
+                value={setupForm.companyName}
+                onChange={(event) =>
+                  setSetupForm((current) => ({ ...current, companyName: event.target.value }))
+                }
               />
             </label>
             <label>
@@ -316,6 +347,10 @@ export function AccountPanel() {
                 required
                 maxLength={2048}
                 placeholder="https://example.com"
+                value={setupForm.websiteUrl}
+                onChange={(event) =>
+                  setSetupForm((current) => ({ ...current, websiteUrl: event.target.value }))
+                }
               />
             </label>
             <button className="primary-link auth-submit" disabled={busy}>

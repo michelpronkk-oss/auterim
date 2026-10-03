@@ -322,6 +322,7 @@ export async function getChangePageContract(
       "id,canonical_slug,label,provider:dependency_catalog!inner(slug,name,category,website_url)",
     )
     .eq("canonical_slug", canonicalSlug)
+    .eq("provider.enabled", true)
     .maybeSingle();
   throwIf(error, "growth_change_page_unavailable");
   if (!topic) return null;
@@ -332,8 +333,10 @@ export async function getChangePageContract(
     .select(opportunitySelect)
     .eq("topic_id", topic.id)
     .eq("decision", "PUBLIC_PAGE")
+    .eq("status", "approved_by_engine")
     .eq("publication_ready", true)
     .eq("indexable", true)
+    .in("freshness", ["current", "upcoming", "recent"])
     .maybeSingle();
   throwIf(opportunityError, "growth_change_page_unavailable");
   if (!opportunity) return null;

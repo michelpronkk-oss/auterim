@@ -163,7 +163,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       </main>
     );
-  if (!workspaces.length)
+  if (!workspaces.length && pathname !== "/app/account")
     return (
       <main className="app-auth">
         <div className="auth-card">

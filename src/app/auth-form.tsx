@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { emitPublicConversionEvent, readPublicAttribution } from "@/lib/public/conversion";
 
 export type AuthMode = "signup" | "login" | "forgot" | "reset";
 
@@ -45,14 +46,41 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
     try {
       const supabase = createSupabaseBrowserClient();
       if (mode === "signup") {
+        const current = new URLSearchParams(window.location.search);
+        const nextParams = new URLSearchParams();
+        const websiteUrl = current.get("websiteUrl");
+        if (websiteUrl && websiteUrl.length <= 2048) {
+          try {
+            const parsed = new URL(websiteUrl);
+            if (
+              ["https:", "http:"].includes(parsed.protocol) &&
+              !parsed.username &&
+              !parsed.password &&
+              ["", "80", "443"].includes(parsed.port)
+            )
+              nextParams.set("websiteUrl", websiteUrl);
+          } catch {
+            // Ignore malformed attribution input and continue through ordinary workspace setup.
+          }
+        }
+        for (const key of ["utm_source", "utm_medium", "utm_campaign"]) {
+          const value = current.get(key);
+          if (value && /^[\p{L}\p{N}._ -]{1,100}$/u.test(value)) nextParams.set(key, value);
+        }
+        const nextPath = `/app/account${nextParams.size ? `?${nextParams}` : ""}`;
+        emitPublicConversionEvent("signup_started", readPublicAttribution(current, "/signup"));
         const { data, error } = await supabase.auth.signUp({
           email,
           password,
-          options: { emailRedirectTo: `${window.location.origin}/auth/callback?next=%2Fapp` },
+          options: {
+            emailRedirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(nextPath)}`,
+          },
         });
         if (error) throw error;
-        if (data.session) router.push("/app");
-        else setMessage("Check your email to verify your account, then sign in to continue.");
+        if (data.session) {
+          emitPublicConversionEvent("signup_completed", readPublicAttribution(current, "/signup"));
+          router.push(nextPath);
+        } else setMessage("Check your email to verify your account, then sign in to continue.");
       } else if (mode === "login") {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
