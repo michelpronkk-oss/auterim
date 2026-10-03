@@ -3,6 +3,38 @@ import { authenticateOnboardingRequest } from "@/lib/onboarding/auth";
 import { getWorkspaceRole } from "@/lib/billing/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
+export async function GET(request: Request) {
+  const auth = await authenticateOnboardingRequest(request);
+  if (!auth.ok) return auth.response;
+  const workspaceId = z
+    .string()
+    .uuid()
+    .safeParse(new URL(request.url).searchParams.get("workspaceId"));
+  if (!workspaceId.success) return Response.json({ error: "invalid_workspace" }, { status: 400 });
+  if (!(await getWorkspaceRole(auth.client, workspaceId.data, auth.user.id)))
+    return Response.json({ error: "forbidden" }, { status: 403 });
+  const { data, error } = await auth.client
+    .from("workspace_notification_preferences")
+    .select(
+      "critical_changes,important_changes,informational,monthly_protection_report,in_app_enabled,email_enabled,slack_enabled",
+    )
+    .eq("workspace_id", workspaceId.data)
+    .maybeSingle();
+  if (error)
+    return Response.json({ error: "notification_preferences_unavailable" }, { status: 503 });
+  return Response.json({
+    preferences: data ?? {
+      critical_changes: "instant",
+      important_changes: "daily_digest",
+      informational: "off",
+      monthly_protection_report: false,
+      in_app_enabled: true,
+      email_enabled: false,
+      slack_enabled: false,
+    },
+  });
+}
+
 export async function PUT(request: Request) {
   const auth = await authenticateOnboardingRequest(request);
   if (!auth.ok) return auth.response;

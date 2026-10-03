@@ -160,9 +160,19 @@ export function getEnvironment() {
   return parseEnvironment(process.env);
 }
 
-export function getSupabasePublicConfig(environment: AppEnvironment = getEnvironment()) {
-  const url = environment.NEXT_PUBLIC_SUPABASE_URL;
-  const publishableKey = environment.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+export function getSupabasePublicConfig(environment?: AppEnvironment) {
+  // Next.js only inlines direct NEXT_PUBLIC_* references into client bundles.
+  // Keep server validation centralized while ensuring browser code receives the public config.
+  const source =
+    environment ??
+    (typeof window === "undefined"
+      ? getEnvironment()
+      : {
+          NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
+        });
+  const url = source.NEXT_PUBLIC_SUPABASE_URL;
+  const publishableKey = source.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
 
   if (!url || !publishableKey) {
     throw new Error(

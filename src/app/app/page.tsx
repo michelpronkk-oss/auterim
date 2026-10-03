@@ -1,5 +1,5 @@
-import { AccountPanel } from "./account-panel";
+import { DashboardPage } from "./dashboard-pages";
 
-export default function ProductAccountPage() {
-  return <AccountPanel />;
+export default function TodayPage() {
+  return <DashboardPage kind="today" />;
 }

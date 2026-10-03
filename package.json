@@ -24,6 +24,7 @@
     "eval:protection": "vitest run tests/protection.test.ts",
     "eval:growth": "vitest run tests/growth.test.ts tests/database.test.ts",
     "eval:connectors": "vitest run tests/connectors.test.ts tests/database.test.ts",
+    "eval:dashboard": "vitest run tests/dashboard.test.ts",
     "env:check": "node --experimental-strip-types scripts/env-check.mts",
     "project:check": "node --experimental-strip-types scripts/project-check.mts"
   },

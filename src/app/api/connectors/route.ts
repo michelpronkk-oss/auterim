@@ -124,6 +124,7 @@ export async function GET(request: Request) {
         scopes: provider === "github" ? [] : (installation?.scopes ?? []),
         account: installation?.account ?? null,
         connectedAt: installation?.connectedAt ?? null,
+        installationId: provider === "github" ? null : (installation?.id ?? null),
         lastCheckedAt:
           provider === "github"
             ? null

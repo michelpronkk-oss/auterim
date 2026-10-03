@@ -46,7 +46,9 @@ type AccountData = z.infer<typeof accountSchema>;
 export function AccountPanel() {
   const [session, setSession] = useState<Session | null>(null);
   const [workspaceId, setWorkspaceId] = useState("");
-  const [workspaces, setWorkspaces] = useState<Array<{ workspace_id: string; role: string }>>([]);
+  const [workspaces, setWorkspaces] = useState<
+    Array<{ workspace_id: string; role: string; name: string }>
+  >([]);
   const [account, setAccount] = useState<AccountData | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -76,9 +78,26 @@ export function AccountPanel() {
     const listResponse = await fetch("/api/account/status", { headers });
     const listBody = await listResponse.json();
     if (!listResponse.ok) throw new Error("Could not load your workspaces.");
-    const options = z
+    const membershipOptions = z
       .array(z.object({ workspace_id: z.string().uuid(), role: z.string() }))
       .parse(listBody.workspaces ?? []);
+    const options = await Promise.all(
+      membershipOptions.map(async (item) => {
+        try {
+          const workspaceResponse = await fetch(
+            `/api/account/status?workspaceId=${encodeURIComponent(item.workspace_id)}`,
+            { headers },
+          );
+          const workspaceBody = await workspaceResponse.json();
+          return {
+            ...item,
+            name: accountSchema.parse(workspaceBody).onboarding.company.name,
+          };
+        } catch {
+          return { ...item, name: "Workspace" };
+        }
+      }),
+    );
     setWorkspaces(options);
     if (!options.length) {
       setWorkspaceId("");
@@ -314,7 +333,7 @@ export function AccountPanel() {
             >
               {workspaces.map((item) => (
                 <option key={item.workspace_id} value={item.workspace_id}>
-                  {item.workspace_id.slice(0, 8)} · {item.role}
+                  {item.name} · {item.role}
                 </option>
               ))}
             </select>

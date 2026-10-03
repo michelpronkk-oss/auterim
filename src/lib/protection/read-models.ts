@@ -423,6 +423,7 @@ export async function getActionsOverview(
           blockedReason: preflightAllowed ? null : "plan_upgrade_required",
           entitlementRequirement: "pro",
           relatedPreflightRunId: change.preflight.id,
+          relatedImpactAssessmentId: change.id,
           createdAt: change.preflight.completedAt,
         });
       return items;
