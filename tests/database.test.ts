@@ -109,6 +109,15 @@ const growthFeedbackMigration = await readFile(
   ),
   "utf8",
 );
+const growthSearchConsoleScopeMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261010010000_growth_search_console_exact_scope.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase() {
   const db = new PGlite();
@@ -137,6 +146,7 @@ async function makeDatabase() {
   await db.exec(growthBoundsMigration);
   await db.exec(connectorMigration);
   await db.exec(growthFeedbackMigration);
+  await db.exec(growthSearchConsoleScopeMigration);
   return db;
 }
 
@@ -1190,6 +1200,16 @@ describe("Auterim migration and monitoring transaction", () => {
     const userId = "abababab-abab-4bab-8bab-abababababab";
     await db.query("insert into auth.users(id) values($1)", [userId]);
     await db.exec("set role service_role");
+    await expect(
+      db.query(
+        "select public.persist_growth_search_console_connection('sc-domain:auterim.com','c','n','t',1,array['https://www.googleapis.com/auth/webmasters.readonly','https://www.googleapis.com/auth/webmasters'],'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',now())",
+      ),
+    ).rejects.toBeTruthy();
+    await expect(
+      db.query(
+        "select public.persist_growth_search_console_connection('sc-domain:auterim.com','c','n','t',1,null,'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',now())",
+      ),
+    ).rejects.toBeTruthy();
     await db.query(
       "insert into public.growth_search_console_oauth_states(state_hash,actor_user_id,browser_hash,verifier_ciphertext,verifier_nonce,verifier_authentication_tag,verifier_key_version,actor_token_ciphertext,actor_token_nonce,actor_token_authentication_tag,actor_token_key_version,expires_at) values(repeat('a',64),$1,repeat('b',64),'cipher','nonce','tag',1,'actor','nonce','tag',1,now()+interval '5 minutes')",
       [userId],

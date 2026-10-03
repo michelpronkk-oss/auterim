@@ -19,7 +19,12 @@ function readCookie(request: Request, name: string) {
     .split(";")
     .map((part) => part.trim())
     .find((part) => part.startsWith(`${name}=`));
-  return entry ? decodeURIComponent(entry.slice(name.length + 1)) : null;
+  if (!entry) return null;
+  try {
+    return decodeURIComponent(entry.slice(name.length + 1));
+  } catch {
+    return null;
+  }
 }
 
 function redirect(result: "connected" | "denied" | "failed") {
@@ -28,12 +33,14 @@ function redirect(result: "connected" | "denied" | "failed") {
   const response = Response.redirect(target, 303);
   const secure =
     new URL(getEnvironment().NEXT_PUBLIC_APP_URL).protocol === "https:" ? " Secure;" : "";
-  response.headers.append(
-    "set-cookie",
-    `auterim_gsc_state=; Path=/api/internal/growth/search-console/callback; Max-Age=0; HttpOnly; SameSite=Lax;${secure}`,
-  );
-  response.headers.set("cache-control", "no-store");
-  return response;
+  return new Response(null, {
+    status: response.status,
+    headers: {
+      location: response.headers.get("location")!,
+      "set-cookie": `auterim_gsc_state=; Path=/api/internal/growth/search-console/callback; Max-Age=0; HttpOnly; SameSite=Lax;${secure}`,
+      "cache-control": "no-store",
+    },
+  });
 }
 
 export async function GET(request: Request) {
