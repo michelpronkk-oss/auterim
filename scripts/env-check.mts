@@ -43,6 +43,10 @@ try {
   const supabaseConfigured = isIntegrationConfigured("supabase", environment);
   const classifierConfigured = isIntegrationConfigured("classifier", environment);
   const githubAppConfigured = isIntegrationConfigured("githubApp", environment);
+  const slackConfigured = isIntegrationConfigured("slackApp", environment);
+  const linearConfigured = isIntegrationConfigured("linearApp", environment);
+  const sentryConfigured = isIntegrationConfigured("sentryApp", environment);
+  const connectorEncryptionConfigured = isIntegrationConfigured("connectorEncryption", environment);
   const dodoConfigured = isIntegrationConfigured("dodo", environment);
   const preflightFixtureConfigured =
     environment.AUTERIM_PREFLIGHT_LIVE === "1" &&
@@ -81,6 +85,18 @@ try {
   console.log(`GitHub App: ${githubAppConfigured ? "configured" : "not configured"}`);
   console.log(
     "  Required server-side settings: App ID, slug, OAuth client ID/secret, private key, webhook secret",
+  );
+  console.log(
+    `Slack connector: ${slackConfigured && connectorEncryptionConfigured ? "configured" : "not configured"}`,
+  );
+  console.log(
+    `Linear connector: ${linearConfigured && connectorEncryptionConfigured ? "configured" : "not configured"}`,
+  );
+  console.log(
+    `Sentry connector: ${sentryConfigured && connectorEncryptionConfigured ? "configured" : "not configured"}`,
+  );
+  console.log(
+    `Connector credential encryption: ${connectorEncryptionConfigured ? "configured" : "not configured"}`,
   );
   console.log(
     `Preflight live fixture: ${preflightFixtureConfigured ? "enabled and scoped to the Auterim fixture allowlist" : "not configured"}`,

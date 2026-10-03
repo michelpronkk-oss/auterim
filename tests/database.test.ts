@@ -97,6 +97,12 @@ const growthBoundsMigration = await readFile(
   ),
   "utf8",
 );
+const connectorMigration = await readFile(
+  fileURLToPath(
+    new URL("../supabase/migrations/20261009000000_connector_platform_v1.sql", import.meta.url),
+  ),
+  "utf8",
+);
 
 async function makeDatabase() {
   const db = new PGlite();
@@ -123,6 +129,7 @@ async function makeDatabase() {
   await db.exec(protectionMigration);
   await db.exec(growthMigration);
   await db.exec(growthBoundsMigration);
+  await db.exec(connectorMigration);
   return db;
 }
 
@@ -283,6 +290,107 @@ describe("Auterim migration and monitoring transaction", () => {
     await db.exec("set role anon");
     await expect(db.query("select * from public.workspaces")).rejects.toBeTruthy();
     await db.exec("reset role");
+  });
+
+  it("keeps connector credentials service-only and rejects cross-workspace connector mutations", async () => {
+    const connectorDb = await makeDatabase();
+    const owner = "11111111-1111-4111-8111-111111111111";
+    const unrelated = "22222222-2222-4222-8222-222222222222";
+    await connectorDb.query("insert into auth.users(id) values($1),($2)", [owner, unrelated]);
+    await connectorDb.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    await connectorDb.exec("set role authenticated");
+    const workspace = await connectorDb.query<{ id: string }>(
+      "select public.create_workspace('Connector tenant') as id",
+    );
+    const workspaceId = workspace.rows[0]!.id;
+    await connectorDb.exec("reset role");
+    await connectorDb.exec("set role service_role");
+    const inserted = await connectorDb.query<{ id: string }>(
+      `insert into public.connector_installations(workspace_id,provider,external_account_id,account_name)
+       values($1,'slack','T123','Auterim fixture') returning id`,
+      [workspaceId],
+    );
+    const installationId = inserted.rows[0]!.id;
+    await connectorDb.query(
+      `insert into public.connector_credentials(installation_id,workspace_id,ciphertext,nonce,authentication_tag,key_version)
+       values($1,$2,'ciphertext','nonce','tag',1)`,
+      [installationId, workspaceId],
+    );
+    const lateHealth = await connectorDb.query<{ value: boolean }>(
+      "select public.update_connector_health($1,$2,'degraded','provider_unavailable') as value",
+      [workspaceId, installationId],
+    );
+    expect(lateHealth.rows[0]!.value).toBe(true);
+    await connectorDb.exec("reset role");
+    await connectorDb.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    await connectorDb.exec("set role authenticated");
+    expect(
+      (
+        await connectorDb.query(
+          "select id from public.connector_installations where workspace_id=$1",
+          [workspaceId],
+        )
+      ).rows,
+    ).toHaveLength(1);
+    await expect(
+      connectorDb.query("select * from public.connector_credentials"),
+    ).rejects.toBeTruthy();
+    await expect(
+      connectorDb.query(
+        "insert into public.connector_resources(workspace_id,installation_id,external_resource_id,resource_type,display_name) values($1,$2,'C123','channel','alerts')",
+        [workspaceId, installationId],
+      ),
+    ).rejects.toBeTruthy();
+    await connectorDb.exec("reset role");
+    await connectorDb.exec("set role service_role");
+    await expect(
+      connectorDb.query("select public.claim_slack_notification_deliveries(10)"),
+    ).resolves.toBeTruthy();
+    await expect(
+      connectorDb.query("select public.select_connector_resources($1,$2,$3,array[]::uuid[])", [
+        workspaceId,
+        installationId,
+        unrelated,
+      ]),
+    ).rejects.toBeTruthy();
+    await expect(
+      connectorDb.query("select public.disconnect_connector($1,$2,$3)", [
+        workspaceId,
+        installationId,
+        unrelated,
+      ]),
+    ).rejects.toBeTruthy();
+    await connectorDb.query("select public.disconnect_connector($1,$2,$3)", [
+      workspaceId,
+      installationId,
+      owner,
+    ]);
+    const lateAfterDisconnect = await connectorDb.query<{ value: boolean }>(
+      "select public.update_connector_health($1,$2,'reauth_required','reauth_required') as value",
+      [workspaceId, installationId],
+    );
+    expect(lateAfterDisconnect.rows[0]!.value).toBe(false);
+    expect(
+      (
+        await connectorDb.query<{ lifecycle_state: string }>(
+          "select lifecycle_state from public.connector_installations where id=$1",
+          [installationId],
+        )
+      ).rows[0]!.lifecycle_state,
+    ).toBe("disconnected");
+    await connectorDb.exec("reset role");
+    await connectorDb.query("select set_config('request.jwt.claim.sub',$1,false)", [unrelated]);
+    await connectorDb.exec("set role authenticated");
+    expect(
+      (
+        await connectorDb.query(
+          "select id from public.connector_installations where workspace_id=$1",
+          [workspaceId],
+        )
+      ).rows,
+    ).toHaveLength(0);
+    await connectorDb.exec("reset role");
+    await connectorDb.close();
   });
 
   it("isolates GitHub installations and repositories and updates protection links atomically", async () => {

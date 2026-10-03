@@ -2,6 +2,7 @@ import { schedules } from "@trigger.dev/sdk";
 import { isIntegrationConfigured, getEnvironment } from "@/lib/env/schema";
 import { createResendNotificationProvider, classifyEmailFailure } from "@/lib/notifications/email";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { dispatchSlackDeliveryBatch } from "@/lib/connectors/slack-delivery";
 
 /** A bounded dispatcher; persistent claims and retry counts live in Postgres. */
 export const dispatchProtectionNotifications = schedules.task({
@@ -15,8 +16,14 @@ export const dispatchProtectionNotifications = schedules.task({
     if (deadlineError) throw new Error("deadline_notification_dispatch_failed");
 
     const environment = getEnvironment();
+    const slack = await dispatchSlackDeliveryBatch(service, environment.NEXT_PUBLIC_APP_URL);
     if (!isIntegrationConfigured("resend", environment)) {
-      return { claimed: 0, sent: 0, emailConfigured: false };
+      return {
+        claimed: slack.claimed,
+        sent: slack.delivered,
+        emailConfigured: false,
+        slackDelivered: slack.delivered,
+      };
     }
     const provider = createResendNotificationProvider();
     let claimedCount = 0;
@@ -66,6 +73,11 @@ export const dispatchProtectionNotifications = schedules.task({
       }
       if (deliveries.length < 50) break;
     }
-    return { claimed: claimedCount, sent: sentCount, emailConfigured: true };
+    return {
+      claimed: claimedCount + slack.claimed,
+      sent: sentCount + slack.delivered,
+      emailConfigured: true,
+      slackDelivered: slack.delivered,
+    };
   },
 });

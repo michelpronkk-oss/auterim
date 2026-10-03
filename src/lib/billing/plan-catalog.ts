@@ -7,7 +7,10 @@ export type CapabilityName =
   | "generateFix"
   | "automaticRemediation"
   | "automaticDraftPr"
-  | "protectionReports";
+  | "protectionReports"
+  | "slackDelivery"
+  | "linearActions"
+  | "sentryRuntimeContext";
 
 export const PLAN_CATALOG: Record<
   PlanSlug,
@@ -53,6 +56,9 @@ export const PLAN_CATALOG: Record<
       automaticRemediation: false,
       automaticDraftPr: false,
       protectionReports: true,
+      slackDelivery: true,
+      linearActions: false,
+      sentryRuntimeContext: false,
     },
   },
   pro: {
@@ -81,6 +87,9 @@ export const PLAN_CATALOG: Record<
       automaticRemediation: false,
       automaticDraftPr: false,
       protectionReports: true,
+      slackDelivery: true,
+      linearActions: true,
+      sentryRuntimeContext: true,
     },
   },
   business: {
@@ -109,6 +118,9 @@ export const PLAN_CATALOG: Record<
       automaticRemediation: true,
       automaticDraftPr: true,
       protectionReports: true,
+      slackDelivery: true,
+      linearActions: true,
+      sentryRuntimeContext: true,
     },
   },
 };
@@ -166,6 +178,9 @@ const noCapabilities = (): Record<CapabilityName, boolean> => ({
   automaticRemediation: false,
   automaticDraftPr: false,
   protectionReports: false,
+  slackDelivery: false,
+  linearActions: false,
+  sentryRuntimeContext: false,
 });
 
 export function resolveWorkspaceEntitlements(input: {

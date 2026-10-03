@@ -40,6 +40,20 @@ export const environmentSchema = z
     GITHUB_APP_CLIENT_SECRET: optionalSecret,
     GITHUB_APP_PRIVATE_KEY: optionalSecret,
     GITHUB_APP_WEBHOOK_SECRET: optionalSecret,
+    SLACK_CLIENT_ID: optionalSecret,
+    SLACK_CLIENT_SECRET: optionalSecret,
+    SLACK_REDIRECT_URI: optionalUrl,
+    LINEAR_CLIENT_ID: optionalSecret,
+    LINEAR_CLIENT_SECRET: optionalSecret,
+    LINEAR_REDIRECT_URI: optionalUrl,
+    SENTRY_CLIENT_ID: optionalSecret,
+    SENTRY_CLIENT_SECRET: optionalSecret,
+    SENTRY_REDIRECT_URI: optionalUrl,
+    CONNECTOR_CREDENTIAL_ENCRYPTION_KEYS: optionalSecret,
+    CONNECTOR_CREDENTIAL_ACTIVE_KEY_VERSION: z.preprocess(
+      emptyToUndefined,
+      z.coerce.number().int().positive().optional(),
+    ),
     AUTERIM_PREFLIGHT_LIVE: z.preprocess(emptyToUndefined, z.enum(["0", "1"]).default("0")),
     AUTERIM_PREFLIGHT_FIXTURE_OWNER: z.preprocess(emptyToUndefined, z.string().trim().optional()),
     AUTERIM_PREFLIGHT_FIXTURE_REPOSITORY: z.preprocess(
@@ -89,6 +103,51 @@ export const environmentSchema = z
         path: ["SUPABASE_SECRET_KEY"],
       });
     }
+
+    const encryptionConfigured = Boolean(
+      environment.CONNECTOR_CREDENTIAL_ENCRYPTION_KEYS &&
+      environment.CONNECTOR_CREDENTIAL_ACTIVE_KEY_VERSION,
+    );
+    if (
+      (environment.SLACK_CLIENT_ID ||
+        environment.LINEAR_CLIENT_ID ||
+        environment.SENTRY_CLIENT_ID) &&
+      !encryptionConfigured
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Connector OAuth requires versioned connector credential encryption keys.",
+        path: ["CONNECTOR_CREDENTIAL_ENCRYPTION_KEYS"],
+      });
+    }
+
+    if (
+      environment.CONNECTOR_CREDENTIAL_ENCRYPTION_KEYS &&
+      environment.CONNECTOR_CREDENTIAL_ACTIVE_KEY_VERSION
+    ) {
+      let keys: Record<string, unknown> = {};
+      try {
+        keys = JSON.parse(environment.CONNECTOR_CREDENTIAL_ENCRYPTION_KEYS) as Record<
+          string,
+          unknown
+        >;
+      } catch {
+        context.addIssue({
+          code: "custom",
+          message: "Connector encryption keys must be a JSON object keyed by version.",
+          path: ["CONNECTOR_CREDENTIAL_ENCRYPTION_KEYS"],
+        });
+      }
+      const active = keys[String(environment.CONNECTOR_CREDENTIAL_ACTIVE_KEY_VERSION)];
+      const decoded = typeof active === "string" ? Buffer.from(active, "base64") : Buffer.alloc(0);
+      if (decoded.length !== 32 || decoded.toString("base64") !== active) {
+        context.addIssue({
+          code: "custom",
+          message: "The active connector encryption key must be a base64-encoded 32-byte key.",
+          path: ["CONNECTOR_CREDENTIAL_ENCRYPTION_KEYS"],
+        });
+      }
+    }
   });
 
 export type AppEnvironment = z.infer<typeof environmentSchema>;
@@ -115,7 +174,17 @@ export function getSupabasePublicConfig(environment: AppEnvironment = getEnviron
 }
 
 export function isIntegrationConfigured(
-  name: "supabase" | "trigger" | "resend" | "classifier" | "githubApp" | "dodo",
+  name:
+    | "supabase"
+    | "trigger"
+    | "resend"
+    | "classifier"
+    | "githubApp"
+    | "slackApp"
+    | "linearApp"
+    | "sentryApp"
+    | "connectorEncryption"
+    | "dodo",
   environment: AppEnvironment,
 ) {
   if (name === "supabase") {
@@ -142,6 +211,30 @@ export function isIntegrationConfigured(
       environment.GITHUB_APP_WEBHOOK_SECRET,
     );
   }
+
+  if (name === "slackApp")
+    return Boolean(
+      environment.SLACK_CLIENT_ID &&
+      environment.SLACK_CLIENT_SECRET &&
+      environment.SLACK_REDIRECT_URI,
+    );
+  if (name === "linearApp")
+    return Boolean(
+      environment.LINEAR_CLIENT_ID &&
+      environment.LINEAR_CLIENT_SECRET &&
+      environment.LINEAR_REDIRECT_URI,
+    );
+  if (name === "sentryApp")
+    return Boolean(
+      environment.SENTRY_CLIENT_ID &&
+      environment.SENTRY_CLIENT_SECRET &&
+      environment.SENTRY_REDIRECT_URI,
+    );
+  if (name === "connectorEncryption")
+    return Boolean(
+      environment.CONNECTOR_CREDENTIAL_ENCRYPTION_KEYS &&
+      environment.CONNECTOR_CREDENTIAL_ACTIVE_KEY_VERSION,
+    );
 
   if (name === "dodo") {
     return Boolean(
