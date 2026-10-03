@@ -390,7 +390,8 @@ export async function inspectRepositories(input: {
           break;
         }
       }
-    } catch {
+    } catch (error) {
+      if (isRetryableProviderFailure(error)) throw error;
       partial = true;
     }
   }
@@ -465,6 +466,17 @@ function result(
 
 export function createPreflightFingerprint(value: unknown) {
   return hash(JSON.stringify(value));
+}
+
+export function isRetryableProviderFailure(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "AbortError" || error.name === "TimeoutError") return true;
+  return (
+    /^(?:github_(?:http|file|installation_token)_(?:408|425|429|5\d\d)|github_search_incomplete)$/.test(
+      error.message,
+    ) ||
+    /^(?:fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|UND_ERR_CONNECT_TIMEOUT)$/.test(error.message)
+  );
 }
 
 const forbiddenPatchPatterns = [

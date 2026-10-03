@@ -4,6 +4,7 @@ import {
   createPreflightFingerprint,
   deriveSearchTargets,
   inspectRepositories,
+  isRetryableProviderFailure,
   preflightResultSchema,
   redactRepositoryPath,
   redactSecretShapedContent,
@@ -325,6 +326,25 @@ describe("offline Preflight evidence evaluation", () => {
     expect(result.verifiedImpact).toBe("inconclusive");
   });
 
+  it("retries transient GitHub outages while treating revoked access as a partial result", async () => {
+    expect(isRetryableProviderFailure(new Error("github_http_503"))).toBe(true);
+    expect(isRetryableProviderFailure(new Error("github_http_403"))).toBe(false);
+    const provider: RepositoryProvider = {
+      async getHead() {
+        return shaA;
+      },
+      async searchCode() {
+        throw new Error("github_http_503");
+      },
+      async getFile() {
+        return null;
+      },
+    };
+    await expect(
+      inspectRepositories({ change: baseChange, repositories: [repository], provider }),
+    ).rejects.toThrow("github_http_503");
+  });
+
   it("16 isolates one failed repository from another repository's evidence", async () => {
     const second = {
       ...repository,
@@ -560,8 +580,39 @@ describe("offline Preflight evidence evaluation", () => {
 
   it("25 creates only an isolated draft branch and never merges or deploys", async () => {
     const provider = new MockDraftPullRequestProvider();
+    const preflight = {
+      status: "completed",
+      verifiedImpact: "verified",
+      confidence: 0.94,
+      repositoriesScanned: 1,
+      findings: [
+        {
+          repositoryId: repository.id,
+          repository: "auterim-fixtures/sample-app",
+          commitSha: shaA,
+          path: "src/model.ts",
+          lineStart: 1,
+          lineEnd: 1,
+          findingType: "model_reference",
+          affectedEntity: "Model X",
+          confidence: 0.94,
+          verification: "verified",
+          explanation: "Exact reference at the pinned commit.",
+          evidenceFingerprint: "a".repeat(64),
+        },
+      ],
+      affectedAreas: ["src"],
+      complexity: "low",
+      recommendedRemediation: "Update model configuration.",
+      effectiveAt: null,
+      announcedAt: null,
+      deadline: null,
+      daysRemaining: null,
+    } as const;
     const result = await prepareDraftPullRequest({
       provider,
+      preflight: preflight as never,
+      groundedFiles: ["src/model.ts"],
       owner: "auterim-fixtures",
       repository: "sample-app",
       defaultBranch: "main",
@@ -569,7 +620,8 @@ describe("offline Preflight evidence evaluation", () => {
       headBranch: "auterim/fix/1234567890abcdef",
       title: "Update deprecated model configuration",
       body: "Grounded migration proposal.",
-      patch: "diff --git a/src/model.ts b/src/model.ts",
+      patch:
+        "diff --git a/src/model.ts b/src/model.ts\n--- a/src/model.ts\n+++ b/src/model.ts\n@@\n-old\n+new",
       affectedFiles: ["src/model.ts"],
     });
     expect(provider.operations).toEqual([

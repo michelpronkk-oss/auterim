@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { PreflightResult } from "@/lib/preflight/preflight";
+import { validateRemediationProposal, type PreflightResult } from "@/lib/preflight/preflight";
 
 export type GroundedFinding = PreflightResult["findings"][number];
 
@@ -108,6 +108,8 @@ export class MockDraftPullRequestProvider implements DraftPullRequestProvider {
 
 export async function prepareDraftPullRequest(input: {
   provider: DraftPullRequestProvider;
+  preflight: PreflightResult;
+  groundedFiles: string[];
   owner: string;
   repository: string;
   defaultBranch: string;
@@ -118,12 +120,27 @@ export async function prepareDraftPullRequest(input: {
   patch: string;
   affectedFiles: string[];
 }) {
+  validateRemediationProposal({
+    preflight: input.preflight,
+    baseCommitSha: input.baseSha,
+    patch: input.patch,
+    affectedFiles: input.affectedFiles,
+    groundedFiles: input.groundedFiles,
+  });
   validateDraftPullRequest({
     baseBranch: input.defaultBranch,
     headBranch: input.headBranch,
     patchPrepared: Boolean(input.patch),
   });
   if (!/^[a-f0-9]{40,64}$/.test(input.baseSha)) throw new Error("invalid_base_commit");
+  if (
+    !input.owner ||
+    !input.repository ||
+    !input.title.trim() ||
+    input.title.length > 120 ||
+    input.body.length > 10_000
+  )
+    throw new Error("invalid_draft_pr_metadata");
   await input.provider.createBranch({
     owner: input.owner,
     repository: input.repository,

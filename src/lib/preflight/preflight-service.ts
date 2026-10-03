@@ -3,6 +3,7 @@ import { GitHubAppRepositoryProvider } from "@/lib/preflight/github-provider";
 import {
   createPreflightFingerprint,
   inspectRepositories,
+  isRetryableProviderFailure,
   parseExplicitChangeDates,
   PREFLIGHT_VERSION,
   MAX_REPOSITORIES,
@@ -349,6 +350,10 @@ export async function runPreflight(input: {
       commitSha: await provider.getHead(target),
     })),
   );
+  const transientHeadFailure = headResults.find(
+    (head) => head.status === "rejected" && isRetryableProviderFailure(head.reason),
+  );
+  if (transientHeadFailure?.status === "rejected") throw transientHeadFailure.reason;
   const heads = headResults.flatMap((head) => (head.status === "fulfilled" ? [head.value] : []));
   const headFailures = headResults.length - heads.length;
   const repositorySetFingerprint = createPreflightFingerprint({
