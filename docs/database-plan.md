@@ -8,11 +8,11 @@ Before database/deployment work, run `npm run project:check` and `npm run env:ch
 
 ## Tables
 
-Tenant scope: `workspaces`, `workspace_members`, `companies`, `company_context`, `workspace_dependencies`, and `dependency_context`. URL dependency discovery adds workspace-scoped `dependency_discovery_runs`, `dependency_discovery_evidence`, and `discovered_dependencies` candidate rows. Candidates remain separate from confirmed `workspace_dependencies`.
+Tenant scope: `workspaces`, `workspace_members`, `companies`, `company_context`, `workspace_dependencies`, and `dependency_context`. URL dependency discovery adds workspace-scoped `dependency_discovery_runs`, `dependency_discovery_evidence`, and `discovered_dependencies` candidate rows. Candidates remain separate from confirmed `workspace_dependencies`. Onboarding adds `workspace_onboarding`, idempotent `onboarding_requests`, `workspace_notification_preferences`, and `workspace_dependency_discovery_links`; website URL/domain fields are stored on the tenant company.
 
-Global scope: `dependency_catalog`, `source_catalog`, `scan_runs`, `source_snapshots`, `source_changes`, and `source_change_classifications`.
+Global scope: `dependency_catalog`, `source_catalog`, `scan_runs`, `source_snapshots`, `source_changes`, `source_change_classifications`, and the per-source `baseline_scan_queue` with bounded dispatch claims. Activation creates one global queue row per enabled source that needs its first baseline; it does not create tenant copies of snapshots or scan work.
 
-Tenant tables have workspace membership policies. Authenticated users may select enabled catalog rows. Global monitoring evidence has no authenticated grants; the service role is the only application role allowed to manage it. Snapshots and changes are immutable by trigger as well as privilege boundary.
+Tenant tables have workspace membership policies. Authenticated users may select enabled catalog rows. Onboarding writes occur through authenticated RPCs with explicit `auth.uid()` membership checks; onboarding tables have no direct authenticated write grants. The baseline queue is not readable or writable by tenant roles. Global monitoring evidence has no authenticated grants; the service role is the only application role allowed to manage it. Snapshots and changes are immutable by trigger as well as privilege boundary.
 
 ## Integrity and concurrency
 
@@ -28,4 +28,4 @@ Only normalized text is stored in snapshot rows (maximum 512 KiB); raw fetched b
 
 ## Deferred
 
-Profiles, invite/member-management flows, workspace impact records, notifications, retention automation, browser rendering, and large-payload object storage are not part of this schema. Customer-specific impact remains deferred; classification contains no tenant or company fields.
+Profiles, invite/member-management flows, notification delivery, retention automation, browser rendering, and large-payload object storage remain deferred. Notification preferences are persisted by onboarding, but no delivery occurs. Customer-specific impact is implemented separately in `customer-impact.md`; global classification contains no tenant or company fields.

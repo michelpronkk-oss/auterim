@@ -28,6 +28,8 @@ Tenant records are `workspaces`, `workspace_members`, `companies`, `company_cont
 
 Milestone 4 adds a separate customer impact stage. It loads only an eligible global classification and the matching workspace dependency context, writes an idempotent historical `impact_assessments` row, and fans out one Trigger.dev task per workspace dependency. See [customer impact intelligence](customer-impact.md) for context, isolation, retries, and evaluation details.
 
+Milestone 6 adds a resumable, server-side onboarding lifecycle and activation API. Public URL discovery remains candidate evidence until a workspace member confirms it; manual catalog additions are supported and unknown providers are returned as unsupported. Optional dependency context and notification preferences are persisted before an owner/admin activates protection. Activation enables workspace monitoring relationships and queues missing global baselines once per source; it never copies source snapshots into tenant tables. See [onboarding backend and activation](onboarding.md) for state transitions, API contracts, coverage, authorization, and retries.
+
 ## Monitoring behavior
 
 The `scan-source` Trigger.dev task loads one enabled catalog source with a server-only Supabase client, fetches and normalizes it, then submits the result to a database RPC. The RPC locks the source row, checks the latest snapshot inside the same transaction, and writes a baseline, unchanged run, not-modified run, or one changed snapshot and change. Stable Trigger run/attempt identifiers make retries replay-safe. A stale concurrent result is diffed against the locked latest snapshot before it can be saved.
@@ -44,7 +46,7 @@ The fetcher blocks common private, local, link-local, documentation, multicast, 
 
 ## Privilege boundaries
 
-- Tenant APIs rely on explicit grants and RLS policies; clients cannot read global scan evidence or write catalog/monitoring data.
+- Tenant APIs rely on explicit grants, membership-checked RPCs, and RLS policies; onboarding routes use a user-scoped publishable-key client, while clients cannot write global catalog/monitoring data or bypass tenant authorization.
 - `SUPABASE_SECRET_KEY` (or the compatibility service-role variable) is used only by server-only monitoring/classification repositories.
 - `OPENAI_API_KEY` is optional, server-only, and read only by the semantic classifier. `AUTERIM_CLASSIFIER_MODEL` must be set explicitly for live calls. External page content and catalog text are untrusted data, have no tool access, and are never mixed with tenant/company context.
 - External source HTML is untrusted data and is parsed as inert text; no page scripts run.

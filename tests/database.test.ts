@@ -37,6 +37,15 @@ const discoveryMigration = await readFile(
   ),
   "utf8",
 );
+const onboardingMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261004030000_onboarding_activation_backend.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase() {
   const db = new PGlite();
@@ -56,6 +65,7 @@ async function makeDatabase() {
   await db.exec(classificationMigration);
   await db.exec(impactMigration);
   await db.exec(discoveryMigration);
+  await db.exec(onboardingMigration);
   return db;
 }
 
@@ -583,7 +593,7 @@ describe("Auterim migration and monitoring transaction", () => {
 
     await db.exec("set role service_role");
     const workspaceDependencyA = await db.query<{ id: string }>(
-      "insert into public.workspace_dependencies (workspace_id,dependency_id,selected_by) values ($1,$2,$3) returning id",
+      "insert into public.workspace_dependencies (workspace_id,dependency_id,selected_by,protection_started_at) values ($1,$2,$3,'epoch') returning id",
       [workspaceA.rows[0]!.id, dependency.rows[0]!.dependency_id, userA],
     );
     const workspaceB = await db.query<{ id: string }>(
@@ -595,7 +605,7 @@ describe("Auterim migration and monitoring transaction", () => {
       [workspaceB.rows[0]!.id, userB],
     );
     const workspaceDependencyB = await db.query<{ id: string }>(
-      "insert into public.workspace_dependencies (workspace_id,dependency_id,selected_by) values ($1,$2,$3) returning id",
+      "insert into public.workspace_dependencies (workspace_id,dependency_id,selected_by,protection_started_at) values ($1,$2,$3,'epoch') returning id",
       [workspaceB.rows[0]!.id, dependency.rows[0]!.dependency_id, userB],
     );
     await db.query(
