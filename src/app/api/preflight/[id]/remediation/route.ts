@@ -1,6 +1,7 @@
 import { authenticateOnboardingRequest, onboardingError } from "@/lib/onboarding/auth";
 import { buildRemediationGuidance } from "@/lib/preflight/remediation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { resolveWorkspaceEntitlementsForMember } from "@/lib/billing/server";
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   const auth = await authenticateOnboardingRequest(request);
@@ -15,6 +16,15 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     .maybeSingle();
   if (runError) return Response.json({ error: "preflight_unavailable" }, { status: 503 });
   if (!run) return Response.json({ error: "not_found" }, { status: 404 });
+  try {
+    const entitlements = await resolveWorkspaceEntitlementsForMember(auth.client, run.workspace_id);
+    if (!entitlements.capabilities.generateFix)
+      return Response.json({ error: "pro_plan_required" }, { status: 402 });
+    if (entitlements.usage.remediationRuns >= entitlements.limits.remediationRuns)
+      return Response.json({ error: "plan_usage_limit_reached" }, { status: 429 });
+  } catch {
+    return Response.json({ error: "billing_state_unavailable" }, { status: 503 });
+  }
   if (run.status !== "completed" || run.verified_impact !== "verified") {
     return Response.json({ error: "verified_impact_required" }, { status: 409 });
   }

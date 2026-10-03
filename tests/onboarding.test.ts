@@ -9,6 +9,9 @@ const migrationPaths = [
   "20261004010000_customer_impact_intelligence.sql",
   "20261004020000_url_dependency_discovery.sql",
   "20261004030000_onboarding_activation_backend.sql",
+  "20261005000000_preflight_breakage_prevention.sql",
+  "20261005010000_preflight_claim_privilege_hardening.sql",
+  "20261006000000_auth_accounts_billing_entitlements.sql",
 ];
 const migrations = await Promise.all(
   migrationPaths.map((name) =>
@@ -107,6 +110,14 @@ describe("onboarding activation backend", () => {
     const started = await start(db);
     const workspaceId = String(started.workspaceId);
     const companyId = String(started.companyId);
+    expect(
+      (
+        await db.query<{ count: number }>(
+          "select count(*)::int as count from public.workspace_subscriptions where workspace_id=$1",
+          [workspaceId],
+        )
+      ).rows[0]!.count,
+    ).toBe(0);
     const replay = await start(db);
     expect(replay.workspaceId).toBe(workspaceId);
     expect(replay.companyId).toBe(companyId);
@@ -159,6 +170,14 @@ describe("onboarding activation backend", () => {
     await expect(
       db.query("select public.activate_workspace_protection($1)", [workspaceId]),
     ).rejects.toThrow();
+    expect(
+      (
+        await db.query<{ count: number }>(
+          "select count(*)::int as count from public.workspace_subscriptions where workspace_id=$1",
+          [workspaceId],
+        )
+      ).rows[0]!.count,
+    ).toBe(0);
 
     await asUser(db, ownerId);
     const confirmed = await db.query<{ value: Record<string, unknown> }>(
@@ -299,6 +318,114 @@ describe("onboarding activation backend", () => {
       [workspaceId],
     );
     expect(activeAgain.rows[0]!.value.activatedAt).toBe(active.rows[0]!.value.activatedAt);
+    const trial = await db.query<{
+      plan: string;
+      status: string;
+      trial_started_at: string;
+      trial_ends_at: string;
+    }>(
+      "select plan,status,trial_started_at,trial_ends_at from public.workspace_subscriptions where workspace_id=$1",
+      [workspaceId],
+    );
+    expect(trial.rows).toHaveLength(1);
+    expect(trial.rows[0]!.plan).toBe("pro");
+    expect(trial.rows[0]!.status).toBe("trialing");
+    expect(
+      Date.parse(trial.rows[0]!.trial_ends_at) - Date.parse(trial.rows[0]!.trial_started_at),
+    ).toBe(5 * 24 * 60 * 60 * 1000);
+    expect(
+      (
+        await db.query<{ count: number }>(
+          "select count(*)::int as count from public.workspace_initial_assessments where workspace_id=$1",
+          [workspaceId],
+        )
+      ).rows[0]!.count,
+    ).toBe(1);
+    await db.query("select public.attach_workspace_dodo_customer($1,'cus_auterim_test')", [
+      workspaceId,
+    ]);
+    const providerEventAt = "2030-01-01T00:00:00Z";
+    const providerPeriodStart = "2029-12-01T00:00:00Z";
+    const providerPeriodEnd = "2030-02-01T00:00:00Z";
+    const appliedWebhook = await db.query<{ value: string }>(
+      "select public.process_dodo_subscription_event('evt_m8_001','subscription.active','cus_auterim_test','sub_auterim_test','prod_auterim_pro','pro','active',$1,$2,false,$3) as value",
+      [providerPeriodStart, providerPeriodEnd, providerEventAt],
+    );
+    expect(appliedWebhook.rows[0]!.value).toBe("processed");
+    expect(
+      (
+        await db.query<{ allowed: boolean }>(
+          "select private.workspace_can_run_preflight($1) as allowed",
+          [workspaceId],
+        )
+      ).rows[0]!.allowed,
+    ).toBe(true);
+    await db.query(
+      "update public.workspace_subscriptions set status='past_due' where workspace_id=$1",
+      [workspaceId],
+    );
+    expect(
+      (
+        await db.query<{ allowed: boolean }>(
+          "select private.workspace_can_run_preflight($1) as allowed",
+          [workspaceId],
+        )
+      ).rows[0]!.allowed,
+    ).toBe(false);
+    await db.query(
+      "update public.workspace_subscriptions set status='active' where workspace_id=$1",
+      [workspaceId],
+    );
+    const duplicateWebhook = await db.query<{ value: string }>(
+      "select public.process_dodo_subscription_event('evt_m8_001','subscription.active','cus_auterim_test','sub_auterim_test','prod_auterim_pro','pro','active',$1,$2,false,$3) as value",
+      [providerPeriodStart, providerPeriodEnd, providerEventAt],
+    );
+    expect(duplicateWebhook.rows[0]!.value).toBe("duplicate");
+    const staleWebhook = await db.query<{ value: string }>(
+      "select public.process_dodo_subscription_event('evt_m8_000','subscription.cancelled','cus_auterim_test','sub_auterim_test','prod_auterim_core','core','cancelled',$1,$2,false,'2029-12-31T23:59:59Z') as value",
+      [providerPeriodStart, providerPeriodEnd],
+    );
+    expect(staleWebhook.rows[0]!.value).toBe("stale");
+    const unknownProduct = await db.query<{ value: string }>(
+      "select public.process_dodo_subscription_event('evt_m8_002','subscription.active','cus_auterim_test','sub_other','prod_unknown',null,'active',$1,$2,false,'2030-01-02T00:00:00Z') as value",
+      [providerPeriodStart, providerPeriodEnd],
+    );
+    expect(unknownProduct.rows[0]!.value).toBe("ignored");
+    expect(
+      (
+        await db.query<{ count: number }>(
+          "select count(*)::int as count from public.workspace_subscriptions where workspace_id=$1",
+          [workspaceId],
+        )
+      ).rows[0]!.count,
+    ).toBe(1);
+    expect(
+      (
+        await db.query<{ plan: string; status: string }>(
+          "select plan,status from public.workspace_subscriptions where workspace_id=$1",
+          [workspaceId],
+        )
+      ).rows[0],
+    ).toEqual({ plan: "pro", status: "active" });
+    await asUser(db, otherId);
+    await db.exec("set role authenticated");
+    expect(
+      (
+        await db.query<{ count: number }>(
+          "select count(*)::int as count from public.workspace_subscriptions where workspace_id=$1",
+          [workspaceId],
+        )
+      ).rows[0]!.count,
+    ).toBe(0);
+    await expect(
+      db.query("select public.attach_workspace_dodo_customer($1,'cus_forged')", [workspaceId]),
+    ).rejects.toThrow();
+    await expect(
+      db.query("update public.workspace_subscriptions set plan='business' where workspace_id=$1", [
+        workspaceId,
+      ]),
+    ).rejects.toThrow();
+    await db.exec("reset role");
     const activeResume = await db.query<{ value: Record<string, unknown> }>(
       `select public.start_workspace_onboarding(
         $1,'Example workspace','Changed Inc','https://example.com/','example.com','onboarding-request-0005',$2

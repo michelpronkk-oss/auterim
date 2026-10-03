@@ -13,6 +13,15 @@ export const environmentSchema = z
     SUPABASE_SERVICE_ROLE_KEY: optionalSecret,
     TRIGGER_SECRET_KEY: optionalSecret,
     RESEND_API_KEY: optionalSecret,
+    DODO_PAYMENTS_API_KEY: optionalSecret,
+    DODO_PAYMENTS_WEBHOOK_KEY: optionalSecret,
+    DODO_PAYMENTS_ENVIRONMENT: z.preprocess(
+      emptyToUndefined,
+      z.enum(["test_mode", "live_mode"]).default("test_mode"),
+    ),
+    DODO_PRODUCT_CORE_MONTHLY: optionalSecret,
+    DODO_PRODUCT_PRO_MONTHLY: optionalSecret,
+    DODO_PRODUCT_BUSINESS_MONTHLY: optionalSecret,
     GITHUB_APP_ID: z.preprocess(emptyToUndefined, z.string().trim().regex(/^\d+$/).optional()),
     GITHUB_APP_SLUG: z.preprocess(
       emptyToUndefined,
@@ -101,7 +110,7 @@ export function getSupabasePublicConfig(environment: AppEnvironment = getEnviron
 }
 
 export function isIntegrationConfigured(
-  name: "supabase" | "trigger" | "resend" | "classifier" | "githubApp",
+  name: "supabase" | "trigger" | "resend" | "classifier" | "githubApp" | "dodo",
   environment: AppEnvironment,
 ) {
   if (name === "supabase") {
@@ -126,6 +135,16 @@ export function isIntegrationConfigured(
       environment.GITHUB_APP_CLIENT_SECRET &&
       environment.GITHUB_APP_PRIVATE_KEY &&
       environment.GITHUB_APP_WEBHOOK_SECRET,
+    );
+  }
+
+  if (name === "dodo") {
+    return Boolean(
+      environment.DODO_PAYMENTS_API_KEY &&
+      environment.DODO_PAYMENTS_WEBHOOK_KEY &&
+      environment.DODO_PRODUCT_CORE_MONTHLY &&
+      environment.DODO_PRODUCT_PRO_MONTHLY &&
+      environment.DODO_PRODUCT_BUSINESS_MONTHLY,
     );
   }
 

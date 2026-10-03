@@ -10,9 +10,14 @@ export default function Home() {
           </span>
           auterim
         </Link>
-        <Link className="nav-link" href="/app">
-          Product preview <span aria-hidden="true">↗</span>
-        </Link>
+        <nav className="account-nav">
+          <Link className="nav-link" href="/login">
+            Sign in
+          </Link>
+          <Link className="nav-link" href="/signup">
+            Create account
+          </Link>
+        </nav>
       </header>
 
       <section className="hero" aria-labelledby="hero-title">
@@ -24,8 +29,8 @@ export default function Home() {
           Auterim monitors the external services your company relies on and surfaces only the
           changes that matter—before they become your problem.
         </p>
-        <Link className="primary-link" href="/app">
-          Explore the product shell <span aria-hidden="true">→</span>
+        <Link className="primary-link" href="/signup">
+          Protect your workspace <span aria-hidden="true">→</span>
         </Link>
       </section>
 

@@ -64,6 +64,15 @@ const preflightPrivilegeMigration = await readFile(
   ),
   "utf8",
 );
+const billingMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261006000000_auth_accounts_billing_entitlements.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase() {
   const db = new PGlite();
@@ -86,6 +95,7 @@ async function makeDatabase() {
   await db.exec(onboardingMigration);
   await db.exec(preflightMigration);
   await db.exec(preflightPrivilegeMigration);
+  await db.exec(billingMigration);
   return db;
 }
 
@@ -261,6 +271,11 @@ describe("Auterim migration and monitoring transaction", () => {
     const workspaceId = workspace.rows[0]!.id;
     await m7db.exec("reset role");
     await m7db.exec("set role service_role");
+    await m7db.query(
+      `insert into public.workspace_subscriptions(workspace_id,plan,status,current_period_start,current_period_end)
+       values ($1,'pro','active',now(),now()+interval '30 days')`,
+      [workspaceId],
+    );
     const connection = await m7db.query<{ id: string }>(
       `insert into public.repository_connections(workspace_id,installation_id,account_login,connected_by)
        values ($1,9001,'auterim-fixture',$2) returning id`,

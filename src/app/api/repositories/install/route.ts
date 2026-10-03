@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { authenticateOnboardingRequest, parseJsonBody } from "@/lib/onboarding/auth";
 import { getEnvironment, isIntegrationConfigured } from "@/lib/env/schema";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getWorkspaceRole, resolveWorkspaceEntitlementsForMember } from "@/lib/billing/server";
 import { z } from "zod";
 
 const inputSchema = z.object({ workspaceId: z.string().uuid() });
@@ -15,15 +16,24 @@ export async function POST(request: Request) {
   } catch {
     return Response.json({ error: "invalid_request" }, { status: 400 });
   }
-  const membership = await auth.client
-    .from("workspace_members")
-    .select("workspace_id")
-    .eq("workspace_id", input.workspaceId)
-    .eq("user_id", auth.user.id)
-    .maybeSingle();
-  if (membership.error)
+  let role: Awaited<ReturnType<typeof getWorkspaceRole>>;
+  try {
+    role = await getWorkspaceRole(auth.client, input.workspaceId, auth.user.id);
+  } catch {
     return Response.json({ error: "workspace_access_unavailable" }, { status: 503 });
-  if (!membership.data) return Response.json({ error: "forbidden" }, { status: 403 });
+  }
+  if (role !== "owner" && role !== "admin")
+    return Response.json({ error: "forbidden" }, { status: 403 });
+  try {
+    const entitlements = await resolveWorkspaceEntitlementsForMember(
+      auth.client,
+      input.workspaceId,
+    );
+    if (!entitlements.capabilities.repositoryConnections)
+      return Response.json({ error: "pro_plan_required" }, { status: 402 });
+  } catch {
+    return Response.json({ error: "billing_state_unavailable" }, { status: 503 });
+  }
   const environment = getEnvironment();
   if (!isIntegrationConfigured("githubApp", environment))
     return Response.json({ error: "github_app_not_configured" }, { status: 503 });

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { getEnvironment, isIntegrationConfigured } from "@/lib/env/schema";
 import { GitHubAppRepositoryProvider } from "@/lib/preflight/github-provider";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getWorkspaceRole, resolveWorkspaceEntitlementsForService } from "@/lib/billing/server";
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -42,6 +43,16 @@ export async function GET(request: Request) {
     .maybeSingle();
   if (membershipError || !membership)
     return Response.json({ error: "workspace_access_revoked" }, { status: 403 });
+  const role = await getWorkspaceRole(service, stateRow.workspace_id, stateRow.actor_user_id);
+  if (role !== "owner" && role !== "admin")
+    return Response.json({ error: "workspace_access_revoked" }, { status: 403 });
+  try {
+    const entitlements = await resolveWorkspaceEntitlementsForService(stateRow.workspace_id);
+    if (!entitlements.capabilities.repositoryConnections)
+      return Response.json({ error: "pro_plan_required" }, { status: 402 });
+  } catch {
+    return Response.json({ error: "billing_state_unavailable" }, { status: 503 });
+  }
   let accountLogin: string;
   let repositories: Awaited<
     ReturnType<GitHubAppRepositoryProvider["listInstallationRepositories"]>

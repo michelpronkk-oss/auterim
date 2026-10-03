@@ -1,6 +1,6 @@
 # Preflight and prevent breakage
 
-Milestone 7 adds a backend read model for repository-specific impact and a safe remediation proposal flow. It does not add a visual screen, customer-code execution, automatic writes, or plan gates.
+Milestone 7 adds a backend read model for repository-specific impact and a safe remediation proposal flow. It does not add a visual screen, customer-code execution, or automatic writes.
 
 ## Repository authorization and connection
 
@@ -46,6 +46,6 @@ The database records deduplicated `automatic_preflight_started` when a worker cl
 
 `npm run eval:preflight` runs deterministic fixtures and local PostgreSQL migration/RLS tests. `npm run eval:preflight:live` is opt-in with `AUTERIM_PREFLIGHT_LIVE=1` and requires the GitHub App plus a specifically named fixture repository owned by `michelpronkk-oss` whose name begins `auterim-preflight-fixture`, with repository/installation IDs, branch, and one known marker configured locally. It performs at most one repository search on that one fixture; it makes no OpenAI call and writes no database data. If no such dedicated fixture is configured, the live test is skipped. Never point it at customer repositories.
 
-## Next plan boundaries
+## Plan boundary
 
-The engine contains no plan or billing checks. A later entitlement layer can expose Preflight and manual safe proposal generation to Pro, and business automation to Business. CORE/PRO/BUSINESS rules and pricing are not hardcoded here. No autonomous patching, CI execution, auto-merge, or production deployment is enabled.
+Milestone 8 gates repository connection, repository protection, automatic Preflight, and safe Generate Fix proposal creation through the centralized workspace entitlement service. Database enqueue, dispatch, claim, and result persistence checks prevent stale queued work from bypassing expired or downgraded access. Business can request automated remediation and Draft PR preparation, but this milestone does not implement those execution paths. No autonomous patching, CI execution, auto-merge, or production deployment is enabled.

@@ -25,11 +25,15 @@ export const dispatchPreflightQueueTask = schedules.task({
         p_queue_id: item.queue_id,
         p_status: "dispatched",
       });
-      if (markError || typeof attempt !== "number") continue;
+      if (markError || typeof attempt !== "number" || attempt <= 0) continue;
       try {
         await tasks.trigger<typeof runPreflightTask>(
           "run-preflight",
-          { queueId: item.queue_id, impactAssessmentId: item.impact_assessment_id },
+          {
+            queueId: item.queue_id,
+            workspaceId: item.workspace_id,
+            impactAssessmentId: item.impact_assessment_id,
+          },
           { idempotencyKey: `preflight:${item.queue_id}:${attempt}` },
         );
         dispatched++;

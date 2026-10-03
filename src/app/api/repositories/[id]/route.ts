@@ -1,4 +1,5 @@
 import { authenticateOnboardingRequest, parseJsonBody } from "@/lib/onboarding/auth";
+import { getWorkspaceRole, resolveWorkspaceEntitlementsForMember } from "@/lib/billing/server";
 import { z } from "zod";
 
 const selectionSchema = z.object({
@@ -23,6 +24,22 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     .maybeSingle();
   if (repositoryError) return Response.json({ error: "repository_unavailable" }, { status: 503 });
   if (!repository) return Response.json({ error: "not_found" }, { status: 404 });
+  const role = await getWorkspaceRole(auth.client, repository.workspace_id, auth.user.id);
+  if (!role) return Response.json({ error: "forbidden" }, { status: 403 });
+  if (input.selectedForProtection) {
+    if (role !== "owner" && role !== "admin")
+      return Response.json({ error: "forbidden" }, { status: 403 });
+    try {
+      const entitlements = await resolveWorkspaceEntitlementsForMember(
+        auth.client,
+        repository.workspace_id,
+      );
+      if (!entitlements.capabilities.automaticPreflight)
+        return Response.json({ error: "pro_plan_required" }, { status: 402 });
+    } catch {
+      return Response.json({ error: "billing_state_unavailable" }, { status: 503 });
+    }
+  }
   if (
     input.selectedForProtection &&
     (repository.status !== "available" || input.dependencyIds.length === 0)

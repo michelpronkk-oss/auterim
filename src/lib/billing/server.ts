@@ -1,0 +1,124 @@
+import "server-only";
+import DodoPayments from "dodopayments";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getEnvironment } from "@/lib/env/schema";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
+import {
+  planProductIds,
+  resolveWorkspaceEntitlements as resolveFromSnapshot,
+  type BillingSnapshot,
+  type WorkspaceEntitlements,
+} from "./plan-catalog";
+
+export function createDodoClient() {
+  const environment = getEnvironment();
+  if (!environment.DODO_PAYMENTS_API_KEY) throw new Error("dodo_not_configured");
+  return new DodoPayments({
+    bearerToken: environment.DODO_PAYMENTS_API_KEY,
+    webhookKey: environment.DODO_PAYMENTS_WEBHOOK_KEY,
+    environment: environment.DODO_PAYMENTS_ENVIRONMENT,
+  });
+}
+
+export async function getWorkspaceRole(
+  client: SupabaseClient,
+  workspaceId: string,
+  userId: string,
+) {
+  const { data, error } = await client
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) throw new Error("workspace_access_check_failed");
+  return (data?.role as "owner" | "admin" | "member" | undefined) ?? null;
+}
+
+async function usageSnapshot(client: SupabaseClient, workspaceId: string, periodStart: string) {
+  const [dependencies, repositories, preflightRuns, remediationRuns] = await Promise.all([
+    client
+      .from("workspace_dependencies")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId),
+    client
+      .from("repositories")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .eq("selected_for_protection", true),
+    client
+      .from("preflight_runs")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .gte("created_at", periodStart),
+    client
+      .from("remediation_proposals")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .gte("created_at", periodStart),
+  ]);
+  if (
+    [dependencies.error, repositories.error, preflightRuns.error, remediationRuns.error].some(
+      Boolean,
+    )
+  ) {
+    throw new Error("billing_usage_unavailable");
+  }
+  return {
+    protectedDependencies: dependencies.count ?? 0,
+    repositories: repositories.count ?? 0,
+    preflightRuns: preflightRuns.count ?? 0,
+    remediationRuns: remediationRuns.count ?? 0,
+  };
+}
+
+export async function resolveWorkspaceEntitlementsForMember(
+  client: SupabaseClient,
+  workspaceId: string,
+): Promise<WorkspaceEntitlements> {
+  const { data, error } = await client.rpc("get_workspace_billing_snapshot", {
+    p_workspace_id: workspaceId,
+  });
+  if (error) throw new Error("billing_state_unavailable");
+  const snapshot = data as BillingSnapshot;
+  const periodStart =
+    snapshot.subscription?.currentPeriodStart ??
+    snapshot.subscription?.trialStartedAt ??
+    new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
+  const usage = await usageSnapshot(client, workspaceId, periodStart);
+  return resolveFromSnapshot({ snapshot, usage });
+}
+
+export async function resolveWorkspaceEntitlementsForService(workspaceId: string) {
+  const client = createSupabaseServerClient();
+  const { data, error } = await client.rpc("get_workspace_billing_snapshot_service", {
+    p_workspace_id: workspaceId,
+  });
+  if (error) throw new Error("billing_state_unavailable");
+  const snapshot = data as BillingSnapshot;
+  const periodStart =
+    snapshot.subscription?.currentPeriodStart ??
+    snapshot.subscription?.trialStartedAt ??
+    new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
+  const usage = await usageSnapshot(client, workspaceId, periodStart);
+  return resolveFromSnapshot({ snapshot, usage });
+}
+
+export function configuredDodoProducts() {
+  return planProductIds(getEnvironment());
+}
+
+export function normalizeDodoStatus(eventType: string, status: unknown) {
+  if (eventType === "subscription.cancelled") return "cancelled" as const;
+  if (eventType === "subscription.expired") return "expired" as const;
+  if (eventType === "subscription.failed") return "past_due" as const;
+  if (eventType === "subscription.on_hold") return "on_hold" as const;
+  if (status === "active") return "active" as const;
+  if (status === "failed" || status === "past_due") return "past_due" as const;
+  if (status === "on_hold") return "on_hold" as const;
+  if (status === "cancelled") return "cancelled" as const;
+  if (status === "expired") return "expired" as const;
+  return null;
+}
+
+export type { WorkspaceEntitlements };

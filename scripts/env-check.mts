@@ -43,6 +43,7 @@ try {
   const supabaseConfigured = isIntegrationConfigured("supabase", environment);
   const classifierConfigured = isIntegrationConfigured("classifier", environment);
   const githubAppConfigured = isIntegrationConfigured("githubApp", environment);
+  const dodoConfigured = isIntegrationConfigured("dodo", environment);
   const preflightFixtureConfigured =
     environment.AUTERIM_PREFLIGHT_LIVE === "1" &&
     githubAppConfigured &&
@@ -72,6 +73,8 @@ try {
   console.log(
     `Resend: ${isIntegrationConfigured("resend", environment) ? "configured" : "not configured"}`,
   );
+  console.log(`Dodo Payments: ${dodoConfigured ? "configured" : "not configured"}`);
+  console.log(`  Environment: ${environment.DODO_PAYMENTS_ENVIRONMENT}`);
   console.log(`OpenAI classification: ${classifierConfigured ? "configured" : "not configured"}`);
   console.log(`  Provider: ${environment.AUTERIM_CLASSIFIER_PROVIDER}`);
   console.log(`  Model: ${environment.AUTERIM_CLASSIFIER_MODEL ?? "not set"}`);
