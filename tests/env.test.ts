@@ -24,6 +24,21 @@ describe("environment validation", () => {
     expect(configured).not.toHaveProperty("AI_GATEWAY_API_KEY");
   });
 
+  it("keeps GitHub App configuration server-side and distinguishes fixture opt-in", () => {
+    const unconfigured = parseEnvironment({});
+    expect(isIntegrationConfigured("githubApp", unconfigured)).toBe(false);
+    const configured = parseEnvironment({
+      GITHUB_APP_ID: "12345",
+      GITHUB_APP_SLUG: "auterim",
+      GITHUB_APP_CLIENT_ID: "fixture-client-id",
+      GITHUB_APP_CLIENT_SECRET: "fixture-client-secret",
+      GITHUB_APP_PRIVATE_KEY: "fixture-private-key",
+      GITHUB_APP_WEBHOOK_SECRET: "fixture-webhook-secret",
+    });
+    expect(isIntegrationConfigured("githubApp", configured)).toBe(true);
+    expect(configured).not.toHaveProperty("NEXT_PUBLIC_GITHUB_APP_PRIVATE_KEY");
+  });
+
   it("treats blank placeholders as unconfigured", () => {
     expect(
       parseEnvironment({

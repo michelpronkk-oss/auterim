@@ -4,6 +4,8 @@
 
 Tenant tables are protected by workspace membership policies; global dependency catalogs, scan runs, snapshots, changes, and semantic classifications contain no tenant context and have no grants to `anon` or `authenticated`. RLS is enabled on the classification table. Its persistence/queue RPCs are revoked from client roles and granted only to `service_role`. Privileged Supabase access is server-only and reads the dedicated Auterim URL and server secret from this repository's environment.
 
+M7 repository connections, repositories, dependency links, Preflight runs/findings, remediation proposals, and value events are workspace-scoped with member-only RLS. Installation states, GitHub webhook deliveries, and dispatch queues are inaccessible to client roles. Repository protection mutations run through a narrowly granted membership-checking function; tenant identity is derived from `auth.uid()`. GitHub installation/OAuth tokens are ephemeral and never stored. The webhook validates HMAC signatures and deduplicates delivery IDs. Repository inspection excludes credential files, redacts secret-shaped values before evidence hashing, and never persists source file bodies. No repository source is sent to OpenAI in this milestone.
+
 ## Source and AI input
 
 Fetched HTML is parsed as inert text; scripts do not run. The fetcher limits protocols, DNS destinations, redirects, time, content type, and body size to reduce SSRF and resource-exhaustion risk. Raw bodies and request headers are not persisted. The classifier receives a bounded diff packet without customer/tenant data. URL credentials, path, query, and fragment are removed before provider submission.

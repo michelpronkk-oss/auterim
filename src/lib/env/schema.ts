@@ -13,6 +13,35 @@ export const environmentSchema = z
     SUPABASE_SERVICE_ROLE_KEY: optionalSecret,
     TRIGGER_SECRET_KEY: optionalSecret,
     RESEND_API_KEY: optionalSecret,
+    GITHUB_APP_ID: z.preprocess(emptyToUndefined, z.string().trim().regex(/^\d+$/).optional()),
+    GITHUB_APP_SLUG: z.preprocess(
+      emptyToUndefined,
+      z
+        .string()
+        .trim()
+        .regex(/^[a-z0-9-]+$/)
+        .optional(),
+    ),
+    GITHUB_APP_CLIENT_ID: optionalSecret,
+    GITHUB_APP_CLIENT_SECRET: optionalSecret,
+    GITHUB_APP_PRIVATE_KEY: optionalSecret,
+    GITHUB_APP_WEBHOOK_SECRET: optionalSecret,
+    AUTERIM_PREFLIGHT_LIVE: z.preprocess(emptyToUndefined, z.enum(["0", "1"]).default("0")),
+    AUTERIM_PREFLIGHT_FIXTURE_OWNER: z.preprocess(emptyToUndefined, z.string().trim().optional()),
+    AUTERIM_PREFLIGHT_FIXTURE_REPOSITORY: z.preprocess(
+      emptyToUndefined,
+      z.string().trim().optional(),
+    ),
+    AUTERIM_PREFLIGHT_FIXTURE_INSTALLATION_ID: z.preprocess(
+      emptyToUndefined,
+      z.coerce.number().int().positive().optional(),
+    ),
+    AUTERIM_PREFLIGHT_FIXTURE_REPOSITORY_ID: z.preprocess(
+      emptyToUndefined,
+      z.coerce.number().int().positive().optional(),
+    ),
+    AUTERIM_PREFLIGHT_FIXTURE_BRANCH: z.preprocess(emptyToUndefined, z.string().trim().optional()),
+    AUTERIM_PREFLIGHT_FIXTURE_ENTITY: z.preprocess(emptyToUndefined, z.string().trim().optional()),
     OPENAI_API_KEY: optionalSecret,
     AUTERIM_CLASSIFIER_PROVIDER: z.preprocess(
       emptyToUndefined,
@@ -72,7 +101,7 @@ export function getSupabasePublicConfig(environment: AppEnvironment = getEnviron
 }
 
 export function isIntegrationConfigured(
-  name: "supabase" | "trigger" | "resend" | "classifier",
+  name: "supabase" | "trigger" | "resend" | "classifier" | "githubApp",
   environment: AppEnvironment,
 ) {
   if (name === "supabase") {
@@ -86,6 +115,17 @@ export function isIntegrationConfigured(
       environment.AUTERIM_CLASSIFIER_PROVIDER === "openai" &&
       environment.OPENAI_API_KEY &&
       environment.AUTERIM_CLASSIFIER_MODEL,
+    );
+  }
+
+  if (name === "githubApp") {
+    return Boolean(
+      environment.GITHUB_APP_ID &&
+      environment.GITHUB_APP_SLUG &&
+      environment.GITHUB_APP_CLIENT_ID &&
+      environment.GITHUB_APP_CLIENT_SECRET &&
+      environment.GITHUB_APP_PRIVATE_KEY &&
+      environment.GITHUB_APP_WEBHOOK_SECRET,
     );
   }
 

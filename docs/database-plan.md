@@ -12,6 +12,8 @@ Tenant scope: `workspaces`, `workspace_members`, `companies`, `company_context`,
 
 Global scope: `dependency_catalog`, `source_catalog`, `scan_runs`, `source_snapshots`, `source_changes`, `source_change_classifications`, and the per-source `baseline_scan_queue` with bounded dispatch claims. Activation creates one global queue row per enabled source that needs its first baseline; it does not create tenant copies of snapshots or scan work.
 
+M7 adds tenant-scoped `repository_connections`, `repositories`, `workspace_repository_access`, `preflight_runs`, `preflight_findings`, `remediation_proposals`, `protection_value_events`, and a durable `preflight_dispatch_queue`. One-time installation states and GitHub webhook delivery IDs are server-only. Composite foreign keys preserve workspace identity across impact/run/finding/proposal/event relationships. Findings store commit/path/line/fingerprint metadata; repository source files are not stored wholesale.
+
 Tenant tables have workspace membership policies. Authenticated users may select enabled catalog rows. Onboarding writes occur through authenticated RPCs with explicit `auth.uid()` membership checks; onboarding tables have no direct authenticated write grants. The baseline queue is not readable or writable by tenant roles. Global monitoring evidence has no authenticated grants; the service role is the only application role allowed to manage it. Snapshots and changes are immutable by trigger as well as privilege boundary.
 
 ## Integrity and concurrency

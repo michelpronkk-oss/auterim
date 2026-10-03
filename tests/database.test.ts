@@ -46,6 +46,24 @@ const onboardingMigration = await readFile(
   ),
   "utf8",
 );
+const preflightMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261005000000_preflight_breakage_prevention.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
+const preflightPrivilegeMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261005010000_preflight_claim_privilege_hardening.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase() {
   const db = new PGlite();
@@ -66,6 +84,8 @@ async function makeDatabase() {
   await db.exec(impactMigration);
   await db.exec(discoveryMigration);
   await db.exec(onboardingMigration);
+  await db.exec(preflightMigration);
+  await db.exec(preflightPrivilegeMigration);
   return db;
 }
 
@@ -226,6 +246,85 @@ describe("Auterim migration and monitoring transaction", () => {
     await db.exec("set role anon");
     await expect(db.query("select * from public.workspaces")).rejects.toBeTruthy();
     await db.exec("reset role");
+  });
+
+  it("isolates GitHub installations and repositories and updates protection links atomically", async () => {
+    const m7db = await makeDatabase();
+    const owner = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const unrelated = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    await m7db.query("insert into auth.users (id) values ($1),($2)", [owner, unrelated]);
+    await m7db.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    await m7db.exec("set role authenticated");
+    const workspace = await m7db.query<{ id: string }>(
+      "select public.create_workspace('Repository tenant') as id",
+    );
+    const workspaceId = workspace.rows[0]!.id;
+    await m7db.exec("reset role");
+    await m7db.exec("set role service_role");
+    const connection = await m7db.query<{ id: string }>(
+      `insert into public.repository_connections(workspace_id,installation_id,account_login,connected_by)
+       values ($1,9001,'auterim-fixture',$2) returning id`,
+      [workspaceId, owner],
+    );
+    const dependency = await m7db.query<{ id: string }>(
+      "select id from public.dependency_catalog where slug='openai'",
+    );
+    const workspaceDependency = await m7db.query<{ id: string }>(
+      `insert into public.workspace_dependencies(workspace_id,dependency_id,selected_by)
+       values ($1,$2,$3) returning id`,
+      [workspaceId, dependency.rows[0]!.id, owner],
+    );
+    const repository = await m7db.query<{ id: string }>(
+      `insert into public.repositories(workspace_id,connection_id,external_id,owner,name,default_branch)
+       values ($1,$2,9002,'auterim-fixture','sample-app','main') returning id`,
+      [workspaceId, connection.rows[0]!.id],
+    );
+    await m7db.exec("reset role");
+
+    await m7db.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    await m7db.exec("set role authenticated");
+    const linked = await m7db.query<{
+      value: { selectedForProtection: boolean; dependencyCount: number };
+    }>("select public.set_repository_protection($1,true,array[$2::uuid]) as value", [
+      repository.rows[0]!.id,
+      workspaceDependency.rows[0]!.id,
+    ]);
+    expect(linked.rows[0]!.value).toMatchObject({
+      selectedForProtection: true,
+      dependencyCount: 1,
+    });
+    expect(
+      (
+        await m7db.query(
+          "select * from public.workspace_repository_access where repository_id=$1",
+          [repository.rows[0]!.id],
+        )
+      ).rows,
+    ).toHaveLength(1);
+    await m7db.exec("reset role");
+
+    await m7db.query("select set_config('request.jwt.claim.sub',$1,false)", [unrelated]);
+    await m7db.exec("set role authenticated");
+    expect(
+      (await m7db.query("select * from public.repositories where id=$1", [repository.rows[0]!.id]))
+        .rows,
+    ).toHaveLength(0);
+    expect(
+      (
+        await m7db.query("select * from public.repository_connections where id=$1", [
+          connection.rows[0]!.id,
+        ])
+      ).rows,
+    ).toHaveLength(0);
+    await expect(
+      m7db.query("select public.set_repository_protection($1,false,array[]::uuid[])", [
+        repository.rows[0]!.id,
+      ]),
+    ).rejects.toBeTruthy();
+    await expect(
+      m7db.query("select * from public.repository_installation_states"),
+    ).rejects.toBeTruthy();
+    await m7db.exec("reset role");
   });
 
   it("isolates discovery evidence by workspace and preserves confirmed dependency decisions", async () => {

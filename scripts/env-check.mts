@@ -42,6 +42,20 @@ try {
   const environment = parseEnvironment(readLocalEnvironmentFile());
   const supabaseConfigured = isIntegrationConfigured("supabase", environment);
   const classifierConfigured = isIntegrationConfigured("classifier", environment);
+  const githubAppConfigured = isIntegrationConfigured("githubApp", environment);
+  const preflightFixtureConfigured =
+    environment.AUTERIM_PREFLIGHT_LIVE === "1" &&
+    githubAppConfigured &&
+    environment.AUTERIM_PREFLIGHT_FIXTURE_OWNER === "michelpronkk-oss" &&
+    Boolean(
+      environment.AUTERIM_PREFLIGHT_FIXTURE_REPOSITORY?.startsWith("auterim-preflight-fixture"),
+    ) &&
+    Boolean(
+      environment.AUTERIM_PREFLIGHT_FIXTURE_INSTALLATION_ID &&
+      environment.AUTERIM_PREFLIGHT_FIXTURE_REPOSITORY_ID &&
+      environment.AUTERIM_PREFLIGHT_FIXTURE_BRANCH &&
+      environment.AUTERIM_PREFLIGHT_FIXTURE_ENTITY,
+    );
 
   console.log("Auterim environment check");
   console.log(
@@ -61,6 +75,13 @@ try {
   console.log(`OpenAI classification: ${classifierConfigured ? "configured" : "not configured"}`);
   console.log(`  Provider: ${environment.AUTERIM_CLASSIFIER_PROVIDER}`);
   console.log(`  Model: ${environment.AUTERIM_CLASSIFIER_MODEL ?? "not set"}`);
+  console.log(`GitHub App: ${githubAppConfigured ? "configured" : "not configured"}`);
+  console.log(
+    "  Required server-side settings: App ID, slug, OAuth client ID/secret, private key, webhook secret",
+  );
+  console.log(
+    `Preflight live fixture: ${preflightFixtureConfigured ? "enabled and scoped to the Auterim fixture allowlist" : "not configured"}`,
+  );
   console.log("No secrets were printed. No project discovery or network calls were made.");
 } catch (error) {
   console.error("Environment validation failed:");
