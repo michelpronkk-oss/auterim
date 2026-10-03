@@ -82,6 +82,21 @@ const protectionMigration = await readFile(
   ),
   "utf8",
 );
+const growthMigration = await readFile(
+  fileURLToPath(
+    new URL("../supabase/migrations/20261008000000_growth_engine_core.sql", import.meta.url),
+  ),
+  "utf8",
+);
+const growthBoundsMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261008010000_growth_engine_query_bounds.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase() {
   const db = new PGlite();
@@ -106,6 +121,8 @@ async function makeDatabase() {
   await db.exec(preflightPrivilegeMigration);
   await db.exec(billingMigration);
   await db.exec(protectionMigration);
+  await db.exec(growthMigration);
+  await db.exec(growthBoundsMigration);
   return db;
 }
 
@@ -988,6 +1005,164 @@ describe("Auterim migration and monitoring transaction", () => {
     await db.exec("reset role");
     await db.exec("set role anon");
     await expect(db.query("select * from public.impact_assessments")).rejects.toBeTruthy();
+    await db.exec("reset role");
+  });
+
+  it("keeps Growth Engine records and queue RPCs server-only with bounded claims", async () => {
+    const tables = [
+      "growth_topics",
+      "growth_opportunities",
+      "growth_opportunity_evaluations",
+      "growth_opportunity_evidence",
+      "growth_distribution_candidates",
+      "growth_evaluation_queue",
+    ];
+    await db.exec("set role anon");
+    for (const table of tables)
+      await expect(db.query(`select * from public.${table}`)).rejects.toBeTruthy();
+    await expect(
+      db.query("select * from public.claim_growth_evaluation_batch(1)"),
+    ).rejects.toBeTruthy();
+    await db.exec("reset role; set role authenticated");
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [
+      "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    ]);
+    for (const table of tables)
+      await expect(db.query(`select * from public.${table}`)).rejects.toBeTruthy();
+    await expect(
+      db.query("select * from public.claim_growth_evaluation_batch(1)"),
+    ).rejects.toBeTruthy();
+    await db.exec("reset role; set role service_role");
+    await expect(
+      db.query("select * from public.claim_growth_evaluation_batch(101)"),
+    ).rejects.toBeTruthy();
+    const rls = await db.query<{ relrowsecurity: boolean }>(
+      "select relrowsecurity from pg_class where oid=any($1::regclass[])",
+      [tables.map((table) => `public.${table}`)],
+    );
+    expect(rls.rows).toHaveLength(tables.length);
+    expect(rls.rows.every((row) => row.relrowsecurity)).toBe(true);
+    await db.exec("reset role");
+  });
+
+  it("only persists evidence excerpts that match public classified evidence and deduplicates retries", async () => {
+    const available = await db.query<{
+      change_id: string;
+      source_id: string;
+      classification_id: string;
+      provider_slug: string;
+      category: string;
+      source_url: string;
+      evidence: { type: "added" | "removed" | "changed"; excerpt: string }[];
+      affected_entities: string[];
+      confidence: number;
+    }>(`
+      select change.id as change_id,source.id as source_id,classification.id as classification_id,
+        provider.slug as provider_slug,classification.category,source.url as source_url,
+        classification.evidence,classification.affected_entities,classification.confidence
+      from public.source_change_classifications classification
+      join public.source_changes change on change.id=classification.change_id
+      join public.source_catalog source on source.id=change.source_id and source.enabled
+      join public.dependency_catalog provider on provider.id=source.dependency_id and provider.enabled
+      where classification.status='classified' and classification.material
+        and jsonb_array_length(classification.evidence)>0
+      order by classification.classified_at desc,classification.id desc limit 1
+    `);
+    expect(available.rows).toHaveLength(1);
+    const sample = available.rows[0]!;
+    const firstEvidence = sample.evidence[0]!;
+    const entity = `evidence-${sample.change_id.slice(0, 8)}`;
+    const payload = {
+      providerSlug: sample.provider_slug,
+      topicKey: sample.category,
+      entityKey: entity,
+      topicLabel: `${sample.provider_slug} verified public evidence`,
+      canonicalSlug: `verified-evidence-${sample.change_id.slice(0, 12)}`,
+      sourceChangeId: sample.change_id,
+      classificationId: sample.classification_id,
+      evaluatorVersion: "growth-test-v1",
+      packetSchemaVersion: 1,
+      policyVersion: "growth-test-policy-v1",
+      evidenceFingerprint: "a".repeat(64),
+      decision: "HUB_UPDATE",
+      status: "candidate",
+      recommendedSurface: "PROVIDER_HUB",
+      publicationReady: true,
+      indexable: false,
+      headline: "A verified provider update",
+      publicSummary:
+        "A material public provider update is retained for its evidence-backed provider hub.",
+      generalImpact:
+        "Applications relying on this provider should review the authoritative published requirements.",
+      affectedPublicEntities: sample.affected_entities,
+      reasons: ["material_change"],
+      blockers: [],
+      factors: { evidenceQuality: "authoritative" },
+      confidence: sample.confidence,
+      freshness: "current",
+      announcedAt: null,
+      effectiveAt: null,
+      publicSafetyVersion: "public-safety-test-v1",
+      distributionTypes: [],
+      suggestedAngle: "Review the public provider update and its source evidence.",
+      safeClaimBoundaries: ["public_provider_evidence_only"],
+      freeToolType: null,
+      ctaTypes: ["CHECK_MY_STACK"],
+      evidence: [
+        {
+          sourceId: sample.source_id,
+          sourceChangeId: sample.change_id,
+          classificationId: sample.classification_id,
+          sourceUrl: sample.source_url,
+          type: firstEvidence.type,
+          excerpt: firstEvidence.excerpt,
+        },
+      ],
+    };
+    await db.exec("set role service_role");
+    await expect(
+      db.query("select public.record_growth_evaluation($1::jsonb)", [
+        JSON.stringify({
+          ...payload,
+          evidence: [
+            {
+              ...payload.evidence[0],
+              excerpt: "invented excerpt not present in the classifier evidence",
+            },
+          ],
+        }),
+      ]),
+    ).rejects.toBeTruthy();
+    const first = await db.query<{ value: { opportunityId: string; evaluationId: string } }>(
+      "select public.record_growth_evaluation($1::jsonb) as value",
+      [JSON.stringify(payload)],
+    );
+    const retry = await db.query<{ value: { opportunityId: string; evaluationId: string } }>(
+      "select public.record_growth_evaluation($1::jsonb) as value",
+      [JSON.stringify(payload)],
+    );
+    expect(retry.rows[0]!.value).toMatchObject({
+      opportunityId: first.rows[0]!.value.opportunityId,
+      evaluationId: first.rows[0]!.value.evaluationId,
+    });
+    const counts = await db.query<{
+      topics: number;
+      opportunities: number;
+      evaluations: number;
+      evidence: number;
+    }>(
+      `select
+        (select count(*)::int from public.growth_topics where canonical_slug=$1) topics,
+        (select count(*)::int from public.growth_opportunities where id=$2::uuid) opportunities,
+        (select count(*)::int from public.growth_opportunity_evaluations where id=$3::uuid) evaluations,
+        (select count(*)::int from public.growth_opportunity_evidence where opportunity_id=$2::uuid) evidence`,
+      [
+        payload.canonicalSlug,
+        first.rows[0]!.value.opportunityId,
+        first.rows[0]!.value.evaluationId,
+      ],
+    );
+    expect(counts.rows[0]).toEqual({ topics: 1, opportunities: 1, evaluations: 1, evidence: 1 });
     await db.exec("reset role");
   });
 });

@@ -19,6 +19,8 @@ const versions = [
   "20261006000000_auth_accounts_billing_entitlements.sql",
   "20261007000000_protection_value_notifications.sql",
   "20261007100000_protection_deadline_read_model.sql",
+  "20261008000000_growth_engine_core.sql",
+  "20261008010000_growth_engine_query_bounds.sql",
 ];
 const migrations = await Promise.all(
   versions.map((version) =>
