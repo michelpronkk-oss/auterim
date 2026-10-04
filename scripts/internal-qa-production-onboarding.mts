@@ -48,9 +48,10 @@ async function requestApi<T = Record<string, unknown>>(
 }
 
 async function countRows(client: QaSupabaseClient, table: string, column: string, value: string) {
+  const countColumn = table === "workspace_onboarding" ? "workspace_id" : "id";
   const { count, error } = await client
     .from(table)
-    .select("id", { count: "exact", head: true })
+    .select(countColumn, { count: "exact", head: true })
     .eq(column, value);
   if (error) throw new Error("verification_query_failed");
   return count ?? 0;
@@ -165,6 +166,7 @@ async function main() {
   workspaceId = started.body.workspaceId;
   companyId = started.body.companyId;
 
+  safeRun.step = "company_persisted_verification";
   const firstCounts = await countsForWorkspace(admin, userId, workspaceId);
   assert(
     firstCounts.workspaces === 1 &&
@@ -277,7 +279,10 @@ async function main() {
   if (onboardingError || !onboardingRow) throw new Error("onboarding_state_verification_failed");
   const coverage = (run.coverage ?? {}) as Record<string, unknown>;
   const runtime = (coverage.runtime ?? {}) as Record<string, unknown>;
-  assert(Boolean(onboardingRow.discovery_task_id), "trigger_task_id_missing");
+  assert(
+    typeof run.trigger_run_id === "string" && run.trigger_run_id.length > 0,
+    "trigger_run_id_missing",
+  );
 
   const { data: candidateRows, error: candidateError } = await admin
     .from("discovered_dependencies")
@@ -425,7 +430,7 @@ async function main() {
     "protection_read_model_failed",
   );
   const browser = await chromium.launch({ headless: true });
-  let dashboard: { bodyTextLength: number; workspaceSelected: boolean };
+  let dashboard: { bodyTextLength: number; workspaceSelected: boolean; selectorCount: number };
   try {
     const page = await browser.newPage();
     const login = await page.goto(`${productionOrigin}/login`, {
@@ -437,17 +442,23 @@ async function main() {
     await page.locator('input[name="password"]').fill(password);
     await page.getByRole("button", { name: /sign in/i }).click();
     await page.waitForURL((url) => url.pathname === "/app", { timeout: 20_000 });
-    await page
-      .getByText("Auterim Internal QA", { exact: false })
-      .first()
-      .waitFor({ timeout: 20_000 });
+    await page.getByRole("heading", { name: "Today", exact: true }).waitFor({ timeout: 20_000 });
+    await page.getByText("Auterim Internal QA", { exact: true }).waitFor({ timeout: 20_000 });
     const selectedWorkspace = await page.evaluate(() =>
       window.localStorage.getItem("auterim-workspace-id"),
     );
     assert(selectedWorkspace === workspaceId, "dashboard_workspace_selection_failed");
+    const workspaceSelector = page.locator('select[aria-label="Select workspace"]');
+    const selectorCount = await workspaceSelector.count();
+    assert(selectorCount > 0, "dashboard_workspace_selector_missing");
+    assert(
+      (await workspaceSelector.first().inputValue()) === workspaceId,
+      "dashboard_selector_value_mismatch",
+    );
     dashboard = {
       bodyTextLength: await page.locator("body").evaluate((body) => body.textContent?.length ?? 0),
       workspaceSelected: true,
+      selectorCount,
     };
     assert(dashboard.bodyTextLength > 0, "dashboard_empty");
   } finally {
@@ -466,7 +477,7 @@ async function main() {
       onboardingState: onboardingRow.state,
       discovery: {
         runId: run.id,
-        triggerRunId: onboardingRow.discovery_task_id,
+        triggerRunId: run.trigger_run_id,
         status: run.status,
         candidateCount: run.candidate_count,
         evidenceCount: run.evidence_count,
@@ -492,7 +503,11 @@ async function main() {
   );
 }
 
-main().catch(() => {
+main().catch((caught: unknown) => {
+  const candidateCode = caught instanceof Error ? caught.message : "";
+  const safeError = /^[a-z][a-z0-9_]{0,80}$/.test(candidateCode)
+    ? candidateCode
+    : "details_suppressed_to_protect_credentials_and_provider_payloads";
   console.error(
     JSON.stringify({
       status: "failed",
@@ -500,7 +515,7 @@ main().catch(() => {
       userId,
       workspaceId,
       companyId,
-      error: "details_suppressed_to_protect_credentials_and_provider_payloads",
+      error: safeError,
     }),
   );
   process.exitCode = 1;
