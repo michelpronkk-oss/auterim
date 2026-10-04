@@ -316,8 +316,8 @@ export function CoverageCatalog() {
       <div id="coverage-panel" role="tabpanel" className={s.catalogTable}>
         <div className={s.catalogHead}>
           <span>PROVIDER</span>
-          <span>WATCHED SOURCES</span>
-          <span>STATUS</span>
+          <span className={s.catalogSrcsHead}>SOURCE TYPES</span>
+          <span>COVERAGE</span>
         </div>
         {rows.map((p) => (
           <div key={`${category}-${p}`} className={s.catalogRow}>
@@ -331,7 +331,7 @@ export function CoverageCatalog() {
             <span className={s.catalogSrcs}>
               {catalog[p][1].map((src) => src[0].toLowerCase()).join(" · ")}
             </span>
-            <span className={s.catalogN}>{catalog[p][1].length} sources</span>
+            <span className={s.catalogN}>{catalog[p][1].length} types</span>
           </div>
         ))}
       </div>

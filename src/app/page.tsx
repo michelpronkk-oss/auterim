@@ -463,8 +463,9 @@ export default function Home() {
           </div>
           <CoverageCatalog />
           <p className={s.disclaimer}>
-            Provider names and marks are shown for illustrative identification only. Auterim is not
-            affiliated with or endorsed by these providers.
+            Example source types per provider. The exact sources Auterim monitors are confirmed for
+            each dependency during setup. Provider names and marks are shown for illustrative
+            identification only. Auterim is not affiliated with or endorsed by these providers.
           </p>
         </section>
 

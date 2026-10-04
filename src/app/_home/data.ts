@@ -147,9 +147,9 @@ export function catalogEntry(name: string): readonly [string, CatalogEntry] | nu
 }
 
 export const demoDefs = [
-  ["Vercel", "high", "hosting headers"],
+  ["Vercel", "high", "response headers"],
   ["Supabase", "high", "API endpoint"],
-  ["Resend", "possible", "email DNS records"],
+  ["Resend", "possible", "embedded URL"],
   ["OpenAI", "possible", "not publicly visible"],
 ] as const;
 
@@ -194,10 +194,10 @@ export const surfaced = [
 ] as const;
 
 export const publicSignals = [
-  { k: "DNS records", v: "MX → resend · CNAME → vercel", delay: "0s" },
-  { k: "Response headers", v: "server: Vercel · cf-ray", delay: ".6s" },
-  { k: "Script sources", v: "us.posthog.com/static", delay: "1.2s" },
-  { k: "Public metadata", v: "supabase.co endpoint", delay: "1.8s" },
+  { k: "Response headers", v: "server: Vercel · cf-ray", delay: "0s" },
+  { k: "Script sources", v: "us.posthog.com/static", delay: ".6s" },
+  { k: "Embedded URLs", v: "*.supabase.co endpoint", delay: "1.2s" },
+  { k: "Security policy", v: "connect-src api.stripe.com", delay: "1.8s" },
 ];
 
 export const discoverTable = [

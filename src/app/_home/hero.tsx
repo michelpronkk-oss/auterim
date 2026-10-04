@@ -17,6 +17,7 @@ const HERO_INPUT_ID = "hero-url";
 type Stage = "idle" | "analyzing" | "found" | "confirm" | "coverage" | "error";
 
 type ScanResponse = {
+  status: "completed" | "partial" | "failed";
   candidates: Array<{
     provider: string;
     confidenceLabel: "low" | "medium" | "high";
@@ -47,6 +48,10 @@ const checkLabels = [
 ];
 
 const CHECK_STEP_MS = 520;
+const SCAN_FALLBACK_MESSAGE = "This public website could not be scanned safely.";
+
+/** Only messages the scan API wrote for people are shown; transport errors get a plain fallback. */
+class ScanError extends Error {}
 
 function attribution() {
   return readPublicAttribution(
@@ -124,6 +129,7 @@ export function HeroAnalyzer() {
   const [url, setUrl] = useState("");
   const [formError, setFormError] = useState("");
   const [scanError, setScanError] = useState("");
+  const [partial, setPartial] = useState(false);
   const [domain, setDomain] = useState("");
   const [websiteUrl, setWebsiteUrl] = useState("");
   const [check, setCheck] = useState(0);
@@ -163,6 +169,7 @@ export function HeroAnalyzer() {
     setWebsiteUrl(canonical);
     setCheck(0);
     setFound([]);
+    setPartial(false);
     setSelected([]);
     setExtra([]);
     setSearch("");
@@ -180,9 +187,10 @@ export function HeroAnalyzer() {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ websiteUrl: canonical }),
         }).then(async (response) => {
-          const json = (await response.json()) as ScanResponse;
-          if (!response.ok)
-            throw new Error(json.message || "This public website could not be scanned safely.");
+          const json = (await response.json().catch(() => null)) as ScanResponse | null;
+          if (!response.ok || !json) throw new ScanError(json?.message || SCAN_FALLBACK_MESSAGE);
+          if (json.status === "failed" && json.candidates.length === 0)
+            throw new ScanError("Its public pages could not be reached or inspected.");
           return json;
         }),
         minimum,
@@ -205,17 +213,14 @@ export function HeroAnalyzer() {
         (item, index) => results.findIndex((other) => other.name === item.name) === index,
       );
       setCheck(4);
+      setPartial(body.status !== "completed");
       setFound(unique);
       setSelected(unique.filter((item) => item.high).map((item) => item.name));
       setStage("found");
       emitPublicConversionEvent("stack_scan_completed", attr);
     } catch (error) {
       if (id !== runId.current) return;
-      setScanError(
-        error instanceof Error && error.message
-          ? error.message
-          : "This public website could not be scanned safely.",
-      );
+      setScanError(error instanceof ScanError ? error.message : SCAN_FALLBACK_MESSAGE);
       setStage("error");
     }
   }
@@ -381,7 +386,7 @@ export function HeroAnalyzer() {
           {stage === "error" ? (
             <div className={s.stageCol}>
               <div className={s.stageHead}>
-                <span className={s.stageTitle}>We couldn&apos;t read {domain} safely.</span>
+                <span className={s.stageTitle}>We couldn&apos;t scan {domain} right now.</span>
                 <span className={s.stageSub}>{scanError}</span>
               </div>
               <div className={s.stageFoot}>
@@ -407,6 +412,9 @@ export function HeroAnalyzer() {
                   {found.length
                     ? `Each one is based on a public signal from ${domain}.`
                     : `That doesn't mean ${domain} has no dependencies. Many are not publicly visible.`}
+                  {partial
+                    ? " The scan reached an inspection limit, so results may be incomplete."
+                    : ""}
                 </span>
               </div>
               {found.length ? (
@@ -516,8 +524,8 @@ export function HeroAnalyzer() {
               </div>
               <div className={s.stageFoot}>
                 <span className={s.selSummary}>
-                  <strong>{selected.length} selected</strong> · {selectedSources.length}{" "}
-                  authoritative sources
+                  <strong>{selected.length} selected</strong> · {selectedSources.length} source
+                  types to watch
                 </span>
                 <button
                   type="button"
@@ -541,7 +549,7 @@ export function HeroAnalyzer() {
                 </div>
                 <div className={s.statCol}>
                   <span className={s.bigNum}>{selectedSources.length}</span>
-                  <span className={s.statLabel}>authoritative sources</span>
+                  <span className={s.statLabel}>source types to watch</span>
                 </div>
               </div>
               <div className={s.coverageGrid}>
@@ -585,7 +593,9 @@ export function HeroAnalyzer() {
                 </div>
               </div>
               <div className={s.convertBar}>
-                <span>Create your workspace and Auterim starts watching these sources.</span>
+                <span>
+                  Create your workspace to confirm the exact sources and start monitoring.
+                </span>
                 <Link
                   className={s.btnBlue}
                   href={`/signup?${continueParams}`}
@@ -626,7 +636,7 @@ function IdleDemo({ dt, dPhase }: { dt: number; dPhase: number }) {
         : `${coveredSources} sources · watching`;
   const foot =
     dPhase === 0
-      ? "Reading hosting headers, DNS records and script sources."
+      ? "Reading response headers, page markup and script sources."
       : dPhase === 1
         ? "OpenAI isn't visible publicly. You add what Auterim can't see."
         : "Each dependency expands into the sources Auterim will watch.";
