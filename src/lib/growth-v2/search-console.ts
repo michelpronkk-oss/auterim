@@ -41,6 +41,33 @@ export class SearchConsoleError extends Error {
   }
 }
 
+export class SearchConsoleOAuthExchangeError extends Error {
+  constructor(
+    readonly category:
+      | "TOKEN_EXCHANGE_400"
+      | "TOKEN_EXCHANGE_401"
+      | "TOKEN_EXCHANGE_OTHER"
+      | "REFRESH_CREDENTIAL_MISSING"
+      | "TOKEN_SCOPE_INVALID",
+  ) {
+    super(category);
+    this.name = "SearchConsoleOAuthExchangeError";
+  }
+}
+
+export class SearchConsolePropertyError extends Error {
+  constructor(
+    readonly category:
+      | "PROPERTY_ACCESS_DENIED"
+      | "PROPERTY_NOT_FOUND"
+      | "PROPERTY_VALIDATION_FAILED"
+      | "GOOGLE_API_ERROR",
+  ) {
+    super(category);
+    this.name = "SearchConsolePropertyError";
+  }
+}
+
 export type GoogleCredential = {
   accessToken: string;
   refreshToken: string;
@@ -138,8 +165,19 @@ export function searchConsoleAuthorizationUrl(input: { state: string; challenge:
 export async function verifySearchConsoleProperty(accessToken: string) {
   const url = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(SEARCH_CONSOLE_PROPERTY)}`;
   const response = await boundedFetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
-  const site = await safeJson(response);
-  if (!hasSearchConsolePropertyAccess(site)) throw new SearchConsoleError("reauth_required", false);
+  if (response.status === 404) throw new SearchConsolePropertyError("PROPERTY_NOT_FOUND");
+  if (response.status === 403) throw new SearchConsolePropertyError("PROPERTY_ACCESS_DENIED");
+  if (response.status >= 500 || response.status === 429)
+    throw new SearchConsolePropertyError("GOOGLE_API_ERROR");
+  if (!response.ok) throw new SearchConsolePropertyError("PROPERTY_VALIDATION_FAILED");
+  let site: Record<string, unknown>;
+  try {
+    site = await readBoundedSearchConsoleJson(response, SEARCH_CONSOLE_JSON_MAX_RESPONSE_BYTES);
+  } catch {
+    throw new SearchConsolePropertyError("PROPERTY_VALIDATION_FAILED");
+  }
+  if (!hasSearchConsolePropertyAccess(site))
+    throw new SearchConsolePropertyError("PROPERTY_ACCESS_DENIED");
 }
 
 export function decryptOAuthActorToken(input: {
@@ -248,21 +286,49 @@ export async function exchangeSearchConsoleCode(input: { code: string; verifier:
     grant_type: "authorization_code",
     code_verifier: input.verifier,
   });
-  const raw = await safeJson(
-    await boundedFetch("https://oauth2.googleapis.com/token", {
+  let response: Response;
+  try {
+    response = await boundedFetch("https://oauth2.googleapis.com/token", {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: form,
-    }),
-  );
+    });
+  } catch {
+    throw new SearchConsoleOAuthExchangeError("TOKEN_EXCHANGE_OTHER");
+  }
+  if (!response.ok) {
+    // Google errors are parsed only as bounded structured fields. Free-form text is
+    // deliberately discarded and never logged, persisted, or returned to clients.
+    const errorBody: Record<string, unknown> = await readBoundedSearchConsoleJson(
+      response,
+      64 * 1024,
+    ).catch(() => ({}));
+    const safeError =
+      typeof errorBody.error === "string"
+        ? errorBody.error.slice(0, 80).replace(/[^a-zA-Z0-9_.-]/g, "")
+        : "";
+    const safeDescription =
+      typeof errorBody.error_description === "string"
+        ? errorBody.error_description.slice(0, 160).replace(/[^\x20-\x7e]/g, "?")
+        : "";
+    void safeError;
+    void safeDescription;
+    throw new SearchConsoleOAuthExchangeError(
+      response.status === 400
+        ? "TOKEN_EXCHANGE_400"
+        : response.status === 401
+          ? "TOKEN_EXCHANGE_401"
+          : "TOKEN_EXCHANGE_OTHER",
+    );
+  }
+  const raw = await safeJson(response);
   const scope = typeof raw.scope === "string" ? raw.scope.split(/\s+/).filter(Boolean) : [];
-  if (
-    typeof raw.access_token !== "string" ||
-    typeof raw.refresh_token !== "string" ||
-    !hasOnlySearchConsoleReadScope(scope) ||
-    typeof raw.expires_in !== "number"
-  )
-    throw new SearchConsoleError("reauth_required", false);
+  if (typeof raw.access_token !== "string" || typeof raw.expires_in !== "number")
+    throw new SearchConsoleOAuthExchangeError("TOKEN_EXCHANGE_OTHER");
+  if (typeof raw.refresh_token !== "string" || !raw.refresh_token)
+    throw new SearchConsoleOAuthExchangeError("REFRESH_CREDENTIAL_MISSING");
+  if (!hasOnlySearchConsoleReadScope(scope))
+    throw new SearchConsoleOAuthExchangeError("TOKEN_SCOPE_INVALID");
   return {
     credential: {
       accessToken: raw.access_token,
@@ -305,8 +371,18 @@ function decryptCredential(row: Record<string, unknown>): GoogleCredential {
 export async function saveSearchConsoleConnection(input: {
   actorUserId: string;
   credential: GoogleCredential;
+  onStage?: (
+    stage:
+      | "CREDENTIAL_ENCRYPTION_STARTED"
+      | "CREDENTIAL_ENCRYPTION_SUCCEEDED"
+      | "CONNECTION_PERSIST_STARTED"
+      | "CONNECTION_PERSIST_SUCCEEDED",
+  ) => void;
 }) {
+  input.onStage?.("CREDENTIAL_ENCRYPTION_STARTED");
   const encrypted = encryptCredential(input.credential);
+  input.onStage?.("CREDENTIAL_ENCRYPTION_SUCCEEDED");
+  input.onStage?.("CONNECTION_PERSIST_STARTED");
   const client = createSupabaseServerClient();
   const { error } = await client.rpc("persist_growth_search_console_connection", {
     p_property: SEARCH_CONSOLE_PROPERTY,
@@ -319,6 +395,7 @@ export async function saveSearchConsoleConnection(input: {
     p_access_expires_at: input.credential.expiresAt,
   });
   if (error) throw new SearchConsoleError("provider_unavailable", true);
+  input.onStage?.("CONNECTION_PERSIST_SUCCEEDED");
 }
 
 async function loadConnection() {

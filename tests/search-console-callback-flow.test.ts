@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SearchConsolePropertyError } from "@/lib/growth-v2/search-console";
 
 const mocks = vi.hoisted(() => ({
   claim: vi.fn(),
@@ -10,16 +11,23 @@ const mocks = vi.hoisted(() => ({
   verifyProperty: vi.fn(),
   save: vi.fn(),
   admins: vi.fn(() => new Set(["admin@auterim.com"])),
+  lookupState: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
   createSupabaseServerClient: () => ({
     rpc: mocks.claim,
+    from: () => ({
+      select: () => ({
+        eq: () => ({ maybeSingle: mocks.lookupState }),
+      }),
+    }),
     auth: { getUser: mocks.getUser },
   }),
 }));
 
-vi.mock("@/lib/growth-v2/search-console", () => ({
+vi.mock("@/lib/growth-v2/search-console", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/growth-v2/search-console")>()),
   decryptOAuthActorToken: mocks.decryptActor,
   decryptOAuthVerifier: mocks.decryptVerifier,
   exchangeSearchConsoleCode: mocks.exchange,
@@ -87,9 +95,18 @@ describe("Search Console OAuth callback acceptance", () => {
     });
     mocks.verifyProperty.mockResolvedValue(undefined);
     mocks.save.mockResolvedValue(undefined);
+    mocks.lookupState.mockResolvedValue({ data: null, error: null });
   });
 
-  afterEach(() => vi.unstubAllEnvs());
+  beforeEach(() => {
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
 
   it("claims bound state once, exchanges with PKCE, verifies the exact property, and persists credentials", async () => {
     const response = await GET(callbackRequest());
@@ -110,12 +127,18 @@ describe("Search Console OAuth callback acceptance", () => {
       credential: expect.objectContaining({
         scope: ["https://www.googleapis.com/auth/webmasters.readonly"],
       }),
+      onStage: expect.any(Function),
     });
     expect(response.status).toBe(303);
     expect(location).toBe("https://auterim.com/app/settings?searchConsole=connected");
     expect(location).not.toContain("access-token-fixture");
     expect(location).not.toContain("refresh-token-fixture");
     expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(JSON.parse(vi.mocked(console.info).mock.calls.at(-1)?.[1] as string)).toMatchObject({
+      stage: "CALLBACK_COMPLETE",
+      property: "sc-domain:auterim.com",
+      actorUserId: "verified-admin-id",
+    });
   });
 
   it("denies unknown, expired, replayed, or browser-mismatched state when the atomic claim returns no row", async () => {
@@ -126,6 +149,65 @@ describe("Search Console OAuth callback acceptance", () => {
     expect(response.headers.get("location")).toContain("searchConsole=denied");
     expect(mocks.getUser).not.toHaveBeenCalled();
     expect(mocks.exchange).not.toHaveBeenCalled();
+  });
+
+  it("surfaces safe callback stage and category without leaking callback secrets", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    mocks.exchange.mockRejectedValueOnce(new Error("google-code-fixture refresh-token-fixture"));
+
+    const response = await GET(callbackRequest());
+    const location = response.headers.get("location") ?? "";
+    const messages = [...info.mock.calls, ...warn.mock.calls]
+      .map((call) => call.join(" "))
+      .join("\n");
+
+    expect(location).toContain("searchConsole=failed");
+    expect(location).toContain("stage=PKCE_READY");
+    expect(location).toContain("reason=TOKEN_EXCHANGE_OTHER");
+    expect(messages).toContain("TOKEN_EXCHANGE_OTHER");
+    expect(messages).not.toContain("google-code-fixture");
+    expect(messages).not.toContain("access-token-fixture");
+    expect(messages).not.toContain("refresh-token-fixture");
+    info.mockRestore();
+    warn.mockRestore();
+  });
+
+  it("reports exact property access denial and never attempts credential persistence", async () => {
+    mocks.verifyProperty.mockRejectedValue(
+      new SearchConsolePropertyError("PROPERTY_ACCESS_DENIED"),
+    );
+
+    const response = await GET(callbackRequest());
+    const location = response.headers.get("location") ?? "";
+
+    expect(location).toContain("stage=CODE_EXCHANGE_SUCCEEDED");
+    expect(location).toContain("reason=PROPERTY_ACCESS_DENIED");
+    expect(mocks.save).not.toHaveBeenCalled();
+  });
+
+  it("reports encryption and persistence failures at their safe stages", async () => {
+    mocks.save.mockImplementationOnce(async (input: { onStage: (stage: string) => void }) => {
+      input.onStage("CREDENTIAL_ENCRYPTION_STARTED");
+      throw new Error("sensitive encryption details");
+    });
+    const encryptionFailure = await GET(callbackRequest());
+    expect(encryptionFailure.headers.get("location")).toContain("stage=PROPERTY_ACCESS_CONFIRMED");
+    expect(encryptionFailure.headers.get("location")).toContain(
+      "reason=CREDENTIAL_ENCRYPTION_FAILED",
+    );
+
+    mocks.save.mockImplementationOnce(async (input: { onStage: (stage: string) => void }) => {
+      input.onStage("CREDENTIAL_ENCRYPTION_STARTED");
+      input.onStage("CREDENTIAL_ENCRYPTION_SUCCEEDED");
+      input.onStage("CONNECTION_PERSIST_STARTED");
+      throw new Error("sensitive database details");
+    });
+    const databaseFailure = await GET(callbackRequest());
+    expect(databaseFailure.headers.get("location")).toContain(
+      "stage=CREDENTIAL_ENCRYPTION_SUCCEEDED",
+    );
+    expect(databaseFailure.headers.get("location")).toContain("reason=DATABASE_PERSIST_FAILED");
   });
 
   it("rejects a callback bound to a different authenticated user", async () => {

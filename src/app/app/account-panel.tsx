@@ -1075,6 +1075,17 @@ export function AccountPanel({
   const loadSequence = useRef(createRequestSequence());
   const authEventReceived = useRef(false);
   const currentUserId = useRef<string | null>(null);
+  const searchConsoleReturnNotice = (() => {
+    if (!growthAdminUserId || typeof window === "undefined") return "";
+    const parameters = new URLSearchParams(window.location.search);
+    const result = parameters.get("searchConsole");
+    if (result === "connected") return "Search Console connection completed successfully.";
+    if (result !== "failed" && result !== "denied") return "";
+    const stage = parameters.get("stage");
+    const reason = parameters.get("reason");
+    if (!stage || !reason) return "Search Console connection was not completed.";
+    return `Search Console connection failed at ${stage.replaceAll("_", " ")}: ${reason.replaceAll("_", " ")}.`;
+  })();
 
   const api = useCallback(
     async (path: string, init?: RequestInit) => {
@@ -1421,9 +1432,9 @@ export function AccountPanel({
             >
               {growthConnectionBusy ? "Connecting…" : "Connect Search Console"}
             </button>
-            {growthConnectionNotice && (
+            {(searchConsoleReturnNotice || growthConnectionNotice) && (
               <p className="auth-message" role="status">
-                {growthConnectionNotice}
+                {searchConsoleReturnNotice || growthConnectionNotice}
               </p>
             )}
           </section>

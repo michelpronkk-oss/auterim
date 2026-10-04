@@ -12,7 +12,7 @@ describe("Search Console OAuth callback", () => {
 
     expect(response.status).toBe(303);
     expect(response.headers.get("location")).toBe(
-      "https://auterim.com/app/settings?searchConsole=denied",
+      "https://auterim.com/app/settings?searchConsole=denied&stage=CALLBACK_RECEIVED&reason=STATE_INVALID",
     );
     expect(response.headers.get("set-cookie")).toContain(
       "auterim_gsc_state=; Path=/api/internal/growth/search-console/callback",
@@ -31,7 +31,7 @@ describe("Search Console OAuth callback", () => {
 
     expect(response.status).toBe(303);
     expect(response.headers.get("location")).toBe(
-      "https://auterim.com/app/settings?searchConsole=denied",
+      "https://auterim.com/app/settings?searchConsole=denied&stage=CALLBACK_RECEIVED&reason=STATE_INVALID",
     );
     expect(response.headers.get("set-cookie")).toContain("Max-Age=0");
   });
