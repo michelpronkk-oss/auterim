@@ -1,3 +1,4 @@
+import { providerLogos } from "./provider-logos";
 import s from "./home.module.css";
 
 const round = (n: number) => +n.toFixed(2);
@@ -57,23 +58,11 @@ export function BrandMark({
   );
 }
 
-/** Neutral monogram tiles. Provider logos are intentionally not reproduced. */
+/** Lettered fallback tints for providers without an openly licensed glyph. */
 const providerTint: Record<string, string> = {
   OpenAI: "#10A37F",
-  Anthropic: "#C96442",
-  Vercel: "#111111",
-  Supabase: "#3ECF8E",
-  "Supabase Auth": "#3ECF8E",
-  Cloudflare: "#F38020",
-  Resend: "#1F1F1F",
   Postmark: "#F5C300",
-  PostHog: "#F54E00",
-  Stripe: "#635BFF",
-  Dodo: "#7B61FF",
-  Clerk: "#6C47FF",
-  GitHub: "#24292F",
   AWS: "#FF9900",
-  "Google APIs": "#4285F4",
 };
 
 function monogram(name: string) {
@@ -81,6 +70,11 @@ function monogram(name: string) {
   if (name === "AWS") return "AW";
   if (words.length > 1) return (words[0][0] + words[1][0]).toUpperCase();
   return name.slice(0, 1).toUpperCase();
+}
+
+function luminance(hex: string) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
 export function ProviderMark({
@@ -92,6 +86,31 @@ export function ProviderMark({
   size: number;
   tone?: "light" | "dark";
 }) {
+  const logo = providerLogos[provider];
+  const radius = Math.round(size * 0.28);
+  if (logo) {
+    const lum = luminance(logo.hex);
+    // Very light brand colours sit on an ink tile; near-black ones flip to cream on dark surfaces.
+    const inkTile = lum > 0.75;
+    const fill = tone === "dark" && lum < 0.15 ? "#F3EEE3" : logo.hex;
+    return (
+      <span
+        aria-hidden="true"
+        className={
+          inkTile
+            ? `${s.logoTile} ${s.logoTileInk}`
+            : tone === "dark"
+              ? `${s.logoTile} ${s.logoTileDark}`
+              : s.logoTile
+        }
+        style={{ width: size, height: size, borderRadius: radius }}
+      >
+        <svg viewBox="0 0 24 24" width={Math.round(size * 0.56)} height={Math.round(size * 0.56)}>
+          <path d={logo.path} fill={fill} />
+        </svg>
+      </span>
+    );
+  }
   const tint = providerTint[provider] ?? "#5A6577";
   return (
     <span
@@ -100,7 +119,7 @@ export function ProviderMark({
       style={{
         width: size,
         height: size,
-        borderRadius: Math.round(size * 0.28),
+        borderRadius: radius,
         fontSize: Math.round(size * (monogram(provider).length > 1 ? 0.36 : 0.46)),
         ["--tint" as string]: tint,
       }}

@@ -181,6 +181,23 @@
   color: color-mix(in srgb, var(--tint) 45%, #f3eee3);
 }
 
+.logoTile {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(14, 27, 46, 0.1);
+}
+.logoTileDark {
+  background: #16263d;
+  box-shadow: inset 0 0 0 1px rgba(143, 163, 194, 0.22);
+}
+.logoTileInk {
+  background: #0e1b2e;
+  box-shadow: none;
+}
+
 /* ---------- Shared type ---------- */
 .h1 {
   margin: 0;
