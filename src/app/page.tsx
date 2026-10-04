@@ -19,6 +19,7 @@ import {
 import { HeaderCta, HeroAnalyzer, HeroClouds } from "@/app/_home/hero";
 import { ChangeInbox, CoverageCatalog, DependencyMap, FinalCtaForm } from "@/app/_home/interactive";
 import { BrandMark, ProviderMark } from "@/app/_home/marks";
+import { RevealOnScroll } from "@/app/_home/reveal";
 import s from "@/app/_home/home.module.css";
 
 const geist = Geist({
@@ -45,6 +46,7 @@ export default function Home() {
   return (
     <div className={`${geist.variable} ${geistMono.variable} ${s.page}`}>
       <PublicPageView event="homepage_view" />
+      <RevealOnScroll />
       <main className={s.frame}>
         <div id="top" className={s.heroWrap}>
           <header className={s.header}>
@@ -69,7 +71,10 @@ export default function Home() {
                 <span>DEPENDENCY INTELLIGENCE</span>
               </span>
               <h1 id="hero-title" className={s.h1}>
-                Know when what your business depends on <span>changes.</span>
+                Know when what your business{" "}
+                <span className={s.h1Keep}>
+                  depends on <span className={s.h1Accent}>changes.</span>
+                </span>
               </h1>
               <p className={s.heroLede}>
                 Auterim watches the software, APIs and infrastructure behind your business, and
@@ -82,7 +87,7 @@ export default function Home() {
 
         {/* 02 Signal vs noise */}
         <section className={s.section} aria-labelledby="problem-title">
-          <div className={s.splitHead}>
+          <div data-reveal className={s.splitHead}>
             <div className={s.headCol}>
               <span className={s.eyebrow}>02 · THE PROBLEM</span>
               <h2 id="problem-title" className={s.h2}>
@@ -97,7 +102,7 @@ export default function Home() {
               <p className={s.problemPunch}>Auterim separates the signal from the noise.</p>
             </div>
           </div>
-          <div className={s.pipe}>
+          <div data-reveal className={s.pipe}>
             <div className={s.pipeIn}>
               <div className={s.laneHead}>
                 <span>INCOMING · EXTERNAL CHANGES</span>
@@ -171,7 +176,7 @@ export default function Home() {
         {/* 03 Discovery */}
         <section id="how" className={s.band} aria-labelledby="discover-title">
           <div className={s.bandInner}>
-            <div className={s.centerHead}>
+            <div data-reveal className={s.centerHead}>
               <span className={s.eyebrow}>03 · DISCOVER</span>
               <h2 id="discover-title" className={s.h2}>
                 Start with your company.
@@ -182,7 +187,7 @@ export default function Home() {
               </p>
             </div>
             <div className={s.discoverGrid}>
-              <div className={s.browserCard}>
+              <div data-reveal className={s.browserCard}>
                 <div className={s.browserBar}>
                   <span />
                   <span />
@@ -199,7 +204,7 @@ export default function Home() {
                   </span>
                 </div>
               </div>
-              <div className={s.signalsCard}>
+              <div data-reveal="1" className={s.signalsCard}>
                 <span className={s.monoBlueLabelDark}>02 · PUBLIC SIGNALS</span>
                 {publicSignals.map((sig) => (
                   <div key={sig.k} className={s.signalRow}>
@@ -209,7 +214,7 @@ export default function Home() {
                   </div>
                 ))}
               </div>
-              <div className={s.discoverTable}>
+              <div data-reveal="2" className={s.discoverTable}>
                 <div className={s.discoverHead}>
                   <span>DEPENDENCY</span>
                   <span>DISCOVERED</span>
@@ -245,7 +250,7 @@ export default function Home() {
 
         {/* 04 Dependencies, not URLs */}
         <section className={`${s.section} ${s.splitSection}`} aria-labelledby="watches-title">
-          <div className={s.watchCopy}>
+          <div data-reveal className={s.watchCopy}>
             <span className={s.eyebrow}>04 · WHAT IT WATCHES</span>
             <h2 id="watches-title" className={s.h2}>
               Dependencies, not URLs.
@@ -269,7 +274,7 @@ export default function Home() {
               </div>
             </div>
           </div>
-          <div className={s.treeCard}>
+          <div data-reveal="1" className={s.treeCard}>
             <div className={s.treeRoot}>
               <ProviderMark provider="OpenAI" size={48} />
               <div className={s.rowText}>
@@ -304,7 +309,7 @@ export default function Home() {
         {/* 05 Change inbox */}
         <section className={s.bandDark} aria-labelledby="inbox-title">
           <div className={s.bandInner}>
-            <div className={s.centerHead}>
+            <div data-reveal className={s.centerHead}>
               <span className={s.eyebrowDark}>05 · CHANGE INTELLIGENCE</span>
               <h2 id="inbox-title" className={s.h2}>
                 Not every change deserves your attention.
@@ -320,14 +325,14 @@ export default function Home() {
 
         {/* 06 Page vs meaning */}
         <section className={s.sectionCenter} aria-labelledby="difference-title">
-          <div className={s.centerHead}>
+          <div data-reveal className={s.centerHead}>
             <span className={s.eyebrow}>06 · THE DIFFERENCE</span>
             <h2 id="difference-title" className={s.h2}>
               Pages change. Dependencies matter.
             </h2>
           </div>
           <div className={s.compare}>
-            <div className={s.genericCard}>
+            <div data-reveal className={s.genericCard}>
               <div className={s.genericBar}>
                 <span>GENERIC MONITOR</span>
                 <span>diff #4821</span>
@@ -343,12 +348,12 @@ export default function Home() {
               </div>
               <div className={s.genericFoot}>14 lines modified · no context</div>
             </div>
-            <div className={s.compareArrow}>
+            <div data-reveal="1" className={s.compareArrow}>
               <span className={s.monoTiny}>PAGE CHANGE</span>
               <span className={s.arrowDot}>→</span>
               <span className={`${s.monoTiny} ${s.blueText}`}>BUSINESS MEANING</span>
             </div>
-            <div className={s.meaningCard}>
+            <div data-reveal="2" className={s.meaningCard}>
               <div className={s.meaningBar}>
                 <span>
                   <BrandMark size={12} tone="dark" />
@@ -387,7 +392,7 @@ export default function Home() {
         {/* 07 Dependency map */}
         <section className={s.bandMap} aria-labelledby="map-title">
           <div className={s.bandInnerLeft}>
-            <div className={s.splitHead}>
+            <div data-reveal className={s.splitHead}>
               <div className={s.headCol}>
                 <span className={s.eyebrow}>07 · DEPENDENCY MAP</span>
                 <h2 id="map-title" className={s.h2}>
@@ -415,14 +420,14 @@ export default function Home() {
 
         {/* 08 Quiet */}
         <section className={s.quiet} aria-labelledby="quiet-title">
-          <span className={s.quietMark}>
+          <span data-reveal className={s.quietMark}>
             <span aria-hidden="true" className={s.quietPulse} />
             <BrandMark size={48} />
           </span>
-          <h2 id="quiet-title" className={s.h2Quiet}>
+          <h2 data-reveal id="quiet-title" className={s.h2Quiet}>
             The best alerts are the ones you never had to look for.
           </h2>
-          <div className={s.quietCopy}>
+          <div data-reveal className={s.quietCopy}>
             <p>
               Auterim works quietly in the background. When nothing important changes, there is
               nothing to do.
@@ -431,7 +436,7 @@ export default function Home() {
               <strong>When something matters, you know.</strong>
             </p>
           </div>
-          <div className={s.quietStatus}>
+          <div data-reveal className={s.quietStatus}>
             <span className={s.stable}>
               <span>●</span>All dependencies stable.
             </span>
@@ -455,7 +460,7 @@ export default function Home() {
 
         {/* 09 Coverage */}
         <section className={s.coverageSection} aria-labelledby="coverage-title">
-          <div className={s.headCol}>
+          <div data-reveal className={s.headCol}>
             <span className={s.eyebrow}>09 · COVERAGE</span>
             <h2 id="coverage-title" className={`${s.h2} ${s.coverageH2}`}>
               One place for the services your business relies on.
@@ -472,14 +477,14 @@ export default function Home() {
         {/* 10 Final CTA */}
         <section className={s.finalCta} aria-labelledby="cta-title">
           <div className={s.finalInner}>
-            <h2 id="cta-title" className={s.h2Final}>
+            <h2 data-reveal id="cta-title" className={s.h2Final}>
               See what your business depends on.
             </h2>
-            <p className={s.ledeDark}>
+            <p data-reveal className={s.ledeDark}>
               Start with your company. Confirm your dependencies. Let Auterim watch the rest.
             </p>
             <FinalCtaForm />
-            <div aria-hidden="true" className={s.ctaPreview}>
+            <div data-reveal aria-hidden="true" className={s.ctaPreview}>
               {ctaPreview.map((p) => (
                 <div key={p.name} className={s.ctaPreviewRow} style={{ animationDelay: p.delay }}>
                   <ProviderMark provider={p.name} size={24} tone="dark" />
