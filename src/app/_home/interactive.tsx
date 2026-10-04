@@ -295,11 +295,9 @@ const orbitSlots = [
 
 export function CoverageCatalog() {
   const [category, setCategory] = useState("All");
-  const [picked, setPicked] = useState<string | null>(null);
   const providers = Object.keys(catalog).filter((n) => coverageCategories.includes(catalog[n][0]));
   const inCategory = (p: string) => category === "All" || catalog[p][0] === category;
   const rows = providers.filter(inCategory);
-  const focus = picked && inCategory(picked) ? picked : rows[0];
   const orbitProviders = providers.slice(0, orbitSlots.length);
   return (
     <div data-reveal className={s.catalog}>
@@ -363,9 +361,7 @@ export function CoverageCatalog() {
                   y1="50"
                   x2={orbitSlots[i].x}
                   y2={orbitSlots[i].y}
-                  className={
-                    p === focus ? s.orbitLineOn : inCategory(p) ? s.orbitLine : s.orbitLineOff
-                  }
+                  className={inCategory(p) ? s.orbitLine : s.orbitLineOff}
                 />
               ))}
             </svg>
@@ -373,47 +369,24 @@ export function CoverageCatalog() {
               <span className={s.pulseRing} />
               <BrandMark size={26} tone="dark" />
             </span>
-            {orbitProviders.map((p, i) => {
-              const active = inCategory(p);
-              return (
-                <button
-                  key={p}
-                  type="button"
-                  aria-label={`${p}, ${catalog[p][0]}, ${catalog[p][1].length} source types`}
-                  aria-pressed={p === focus}
-                  disabled={!active}
-                  className={
-                    p === focus
-                      ? `${s.orbitTile} ${s.orbitTileOn}`
-                      : active
-                        ? s.orbitTile
-                        : `${s.orbitTile} ${s.orbitTileOff}`
-                  }
-                  style={{
-                    left: `${orbitSlots[i].x}%`,
-                    top: `${orbitSlots[i].y}%`,
-                    animationDelay: `${-((i * 0.83) % 6).toFixed(2)}s`,
-                    animationDuration: `${5 + (i % 4) * 0.7}s`,
-                  }}
-                  onClick={() => setPicked(p)}
-                >
-                  <ProviderMark provider={p} size={34} />
-                </button>
-              );
-            })}
+            {orbitProviders.map((p, i) => (
+              <span
+                key={p}
+                role="img"
+                aria-label={inCategory(p) ? p : undefined}
+                aria-hidden={inCategory(p) ? undefined : true}
+                className={inCategory(p) ? s.orbitTile : `${s.orbitTile} ${s.orbitTileOff}`}
+                style={{
+                  left: `${orbitSlots[i].x}%`,
+                  top: `${orbitSlots[i].y}%`,
+                  animationDelay: `${-((i * 0.83) % 6).toFixed(2)}s`,
+                  animationDuration: `${5 + (i % 4) * 0.7}s`,
+                }}
+              >
+                <ProviderMark provider={p} size={34} />
+              </span>
+            ))}
           </div>
-          {focus ? (
-            <div key={focus} className={s.orbitDetail} aria-live="polite">
-              <ProviderMark provider={focus} size={36} />
-              <div className={s.rowText}>
-                <span className={s.orbitName}>{focus}</span>
-                <span className={s.orbitSrcs}>
-                  {catalog[focus][1].map((src) => src[0].toLowerCase()).join(" · ")}
-                </span>
-              </div>
-              <span className={s.catalogN}>{catalog[focus][1].length} types</span>
-            </div>
-          ) : null}
         </div>
         <div className={s.catalogTable}>
           <div className={s.catalogHead}>
