@@ -1068,6 +1068,9 @@ export function AccountPanel({
   const [loadError, setLoadError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [growthAdminUserId, setGrowthAdminUserId] = useState("");
+  const [growthConnectionBusy, setGrowthConnectionBusy] = useState(false);
+  const [growthConnectionNotice, setGrowthConnectionNotice] = useState("");
   const [setupForm, setSetupForm] = useState(() => createInitialSetupForm(initialWebsiteUrl));
   const loadSequence = useRef(createRequestSequence());
   const authEventReceived = useRef(false);
@@ -1091,6 +1094,48 @@ export function AccountPanel({
     },
     [session],
   );
+
+  useEffect(() => {
+    if (!onboardingMode || !session) return;
+    let cancelled = false;
+    void api("/api/internal/growth/feedback")
+      .then(() => {
+        if (!cancelled) setGrowthAdminUserId(session.user.id);
+      })
+      .catch(() => {
+        if (!cancelled) setGrowthAdminUserId("");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, onboardingMode, session]);
+
+  async function connectSearchConsole() {
+    setGrowthConnectionBusy(true);
+    setGrowthConnectionNotice("");
+    try {
+      const result = await api("/api/internal/growth/search-console/oauth", {
+        headers: { accept: "application/json" },
+      });
+      if (
+        !result ||
+        typeof result !== "object" ||
+        !("authorizationUrl" in result) ||
+        typeof result.authorizationUrl !== "string"
+      )
+        throw new Error("Search Console authorization is unavailable.");
+      const authorizationUrl = new URL(result.authorizationUrl);
+      if (
+        authorizationUrl.origin !== "https://accounts.google.com" ||
+        authorizationUrl.pathname !== "/o/oauth2/v2/auth"
+      )
+        throw new Error("Search Console authorization URL is invalid.");
+      window.location.assign(authorizationUrl.toString());
+    } catch {
+      setGrowthConnectionNotice("Search Console connection could not be started.");
+      setGrowthConnectionBusy(false);
+    }
+  }
 
   const load = useCallback(async (token: string, selected?: string) => {
     const request = loadSequence.current.begin();
@@ -1361,6 +1406,28 @@ export function AccountPanel({
               canManageWorkspace={account?.role === "owner" || account?.role === "admin"}
             />
           )}
+        {onboardingMode && session && growthAdminUserId === session.user.id && (
+          <section className="billing-card" aria-labelledby="growth-search-console-title">
+            <div>
+              <p className="card-kicker">INTERNAL VALIDATION</p>
+              <h2 id="growth-search-console-title">Search Console</h2>
+              <p>Connect the allowlisted Auterim property for the M14 live validation.</p>
+            </div>
+            <button
+              className="secondary-link"
+              type="button"
+              disabled={growthConnectionBusy}
+              onClick={() => void connectSearchConsole()}
+            >
+              {growthConnectionBusy ? "Connecting…" : "Connect Search Console"}
+            </button>
+            {growthConnectionNotice && (
+              <p className="auth-message" role="status">
+                {growthConnectionNotice}
+              </p>
+            )}
+          </section>
+        )}
         {shouldShowWorkspaceSelector({
           workspaceCount: workspaces.length,
           selectedWorkspaceActive: Boolean(account?.onboarding.activation),
