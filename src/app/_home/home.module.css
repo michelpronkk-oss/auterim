@@ -687,6 +687,22 @@
     linear-gradient(90deg, rgba(14, 27, 46, 0.035) 1px, transparent 1px);
   background-size: 24px 24px;
 }
+.panelBody {
+  display: grid;
+}
+.panelGhost,
+.panelLayer {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+.panelGhost {
+  visibility: hidden;
+  pointer-events: none;
+}
+.panelGhost * {
+  animation: none !important;
+  transition: none !important;
+}
 .sweep {
   position: absolute;
   top: 0;

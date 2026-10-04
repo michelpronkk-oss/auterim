@@ -351,261 +351,267 @@ export function HeroAnalyzer() {
           </ol>
         </div>
 
-        <div aria-live="polite" className={s.panelBody}>
-          {stage === "idle" ? <IdleDemo dt={dt} dPhase={dPhase} /> : null}
+        <div className={s.panelBody}>
+          {/* Invisible fully expanded demo reserves the panel's height so the page below never shifts. */}
+          <div aria-hidden="true" inert className={s.panelGhost}>
+            <IdleDemo dt={15} dPhase={2} />
+          </div>
+          <div aria-live="polite" className={s.panelLayer}>
+            {stage === "idle" ? <IdleDemo dt={dt} dPhase={dPhase} /> : null}
 
-          {stage === "analyzing" ? (
-            <>
-              <span aria-hidden="true" className={`${s.sweep} ${s.sweepFast}`} />
-              <div className={s.analyzing}>
-                <span className={s.stageTitleLg}>Analyzing {domain}…</span>
-                <div className={s.checkList}>
-                  {checkLabels.map((label, i) => (
-                    <div
-                      key={label}
-                      className={s.checkRow}
-                      style={{ color: check >= i ? "#0E1B2E" : "#7C8697" }}
-                    >
-                      <span className={s.checkIcon}>
-                        {check > i ? (
-                          <span className={s.tick}>✓</span>
-                        ) : check === i ? (
-                          <span className={s.spinner} />
-                        ) : (
-                          <span className={s.pendingDot} />
-                        )}
-                      </span>
-                      {label}
-                    </div>
-                  ))}
+            {stage === "analyzing" ? (
+              <>
+                <span aria-hidden="true" className={`${s.sweep} ${s.sweepFast}`} />
+                <div className={s.analyzing}>
+                  <span className={s.stageTitleLg}>Analyzing {domain}…</span>
+                  <div className={s.checkList}>
+                    {checkLabels.map((label, i) => (
+                      <div
+                        key={label}
+                        className={s.checkRow}
+                        style={{ color: check >= i ? "#0E1B2E" : "#7C8697" }}
+                      >
+                        <span className={s.checkIcon}>
+                          {check > i ? (
+                            <span className={s.tick}>✓</span>
+                          ) : check === i ? (
+                            <span className={s.spinner} />
+                          ) : (
+                            <span className={s.pendingDot} />
+                          )}
+                        </span>
+                        {label}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : null}
+
+            {stage === "error" ? (
+              <div className={s.stageCol}>
+                <div className={s.stageHead}>
+                  <span className={s.stageTitle}>We couldn&apos;t scan {domain} right now.</span>
+                  <span className={s.stageSub}>{scanError}</span>
+                </div>
+                <div className={s.stageFoot}>
+                  <span className={s.footNote}>
+                    You can still choose the services your business depends on.
+                  </span>
+                  <button type="button" className={s.btnInkSm} onClick={() => setStage("confirm")}>
+                    Choose dependencies →
+                  </button>
                 </div>
               </div>
-            </>
-          ) : null}
+            ) : null}
 
-          {stage === "error" ? (
-            <div className={s.stageCol}>
-              <div className={s.stageHead}>
-                <span className={s.stageTitle}>We couldn&apos;t scan {domain} right now.</span>
-                <span className={s.stageSub}>{scanError}</span>
-              </div>
-              <div className={s.stageFoot}>
-                <span className={s.footNote}>
-                  You can still choose the services your business depends on.
-                </span>
-                <button type="button" className={s.btnInkSm} onClick={() => setStage("confirm")}>
-                  Choose dependencies →
-                </button>
-              </div>
-            </div>
-          ) : null}
-
-          {stage === "found" ? (
-            <div className={s.stageCol}>
-              <div className={s.stageHead}>
-                <span className={s.stageTitle}>
-                  {found.length
-                    ? `We found ${found.length} likely ${found.length === 1 ? "dependency" : "dependencies"}.`
-                    : "No public provider markers found."}
-                </span>
-                <span className={s.stageSub}>
-                  {found.length
-                    ? `Each one is based on a public signal from ${domain}.`
-                    : `That doesn't mean ${domain} has no dependencies. Many are not publicly visible.`}
-                  {partial
-                    ? " The scan reached an inspection limit, so results may be incomplete."
-                    : ""}
-                </span>
-              </div>
-              {found.length ? (
-                <div className={s.foundGrid}>
-                  {found.map((item, i) => (
-                    <div
-                      key={item.name}
-                      className={s.foundCard}
-                      style={{ animationDelay: `${i * 80}ms` }}
-                    >
-                      <ProviderMark provider={item.name} size={28} />
-                      <div className={s.rowText}>
-                        <span className={s.rowName}>{item.name}</span>
-                        <span className={s.rowMetaClip}>
-                          {item.category} · {item.signal}
+            {stage === "found" ? (
+              <div className={s.stageCol}>
+                <div className={s.stageHead}>
+                  <span className={s.stageTitle}>
+                    {found.length
+                      ? `We found ${found.length} likely ${found.length === 1 ? "dependency" : "dependencies"}.`
+                      : "No public provider markers found."}
+                  </span>
+                  <span className={s.stageSub}>
+                    {found.length
+                      ? `Each one is based on a public signal from ${domain}.`
+                      : `That doesn't mean ${domain} has no dependencies. Many are not publicly visible.`}
+                    {partial
+                      ? " The scan reached an inspection limit, so results may be incomplete."
+                      : ""}
+                  </span>
+                </div>
+                {found.length ? (
+                  <div className={s.foundGrid}>
+                    {found.map((item, i) => (
+                      <div
+                        key={item.name}
+                        className={s.foundCard}
+                        style={{ animationDelay: `${i * 80}ms` }}
+                      >
+                        <ProviderMark provider={item.name} size={28} />
+                        <div className={s.rowText}>
+                          <span className={s.rowName}>{item.name}</span>
+                          <span className={s.rowMetaClip}>
+                            {item.category} · {item.signal}
+                          </span>
+                        </div>
+                        <span className={item.high ? s.pillHigh : s.pillPossible}>
+                          {item.high ? "High confidence" : "Possible"}
                         </span>
                       </div>
-                      <span className={item.high ? s.pillHigh : s.pillPossible}>
-                        {item.high ? "High confidence" : "Possible"}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-              <div className={s.stageFoot}>
-                <span className={s.footNote}>
-                  Auterim can identify public signals. Confirm what your business actually relies on
-                  to complete your coverage.
-                </span>
-                <button type="button" className={s.btnInkSm} onClick={() => setStage("confirm")}>
-                  Confirm dependencies →
-                </button>
-              </div>
-            </div>
-          ) : null}
-
-          {stage === "confirm" ? (
-            <div className={s.stageCol}>
-              <div className={s.stageHead}>
-                <span className={s.stageTitle}>What does your business actually depend on?</span>
-                <span className={s.stageSub}>
-                  Select services, not URLs. Auterim finds the sources behind each one.
-                </span>
-              </div>
-              <div className={s.searchWrap}>
-                <label htmlFor="dep-search" className={s.srOnly}>
-                  Search software or service
-                </label>
-                <input
-                  id="dep-search"
-                  type="text"
-                  className={s.searchInput}
-                  placeholder="Search software or service…"
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                />
-                {results.length ? (
-                  <div className={s.searchResults}>
-                    {results.map((name) => (
-                      <button
-                        key={name}
-                        type="button"
-                        className={s.searchResult}
-                        onClick={() => {
-                          setExtra((current) => [...current, name]);
-                          setSelected((current) => [...current, name]);
-                          setSearch("");
-                        }}
-                      >
-                        <ProviderMark provider={name} size={22} />
-                        <span className={s.grow}>{name}</span>
-                        <span className={s.monoXs}>{catalog[name][0]} · + Add</span>
-                      </button>
                     ))}
                   </div>
                 ) : null}
+                <div className={s.stageFoot}>
+                  <span className={s.footNote}>
+                    Auterim can identify public signals. Confirm what your business actually relies
+                    on to complete your coverage.
+                  </span>
+                  <button type="button" className={s.btnInkSm} onClick={() => setStage("confirm")}>
+                    Confirm dependencies →
+                  </button>
+                </div>
               </div>
-              <div className={s.optionGrid}>
-                {optionNames.map((name) => {
-                  const on = selected.includes(name);
-                  const item = found.find((f) => f.name === name);
-                  const hint = item
-                    ? item.high
-                      ? "High confidence"
-                      : "Possible"
-                    : extra.includes(name)
-                      ? "Added by you"
-                      : "Not publicly visible";
-                  return (
-                    <button
-                      key={name}
-                      type="button"
-                      role="checkbox"
-                      aria-checked={on}
-                      className={on ? `${s.option} ${s.optionOn}` : s.option}
-                      onClick={() => toggle(name)}
-                    >
-                      <span className={s.optionBox}>{on ? "✓" : ""}</span>
-                      <ProviderMark provider={name} size={22} />
-                      <span className={s.rowText}>
-                        <span className={s.optionName}>{name}</span>
-                        <span className={s.optionHint}>{hint}</span>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-              <div className={s.stageFoot}>
-                <span className={s.selSummary}>
-                  <strong>{selected.length} selected</strong> · {selectedSources.length} source
-                  types to watch
-                </span>
-                <button
-                  type="button"
-                  className={s.btnInkSm}
-                  disabled={selected.length === 0}
-                  onClick={() => setStage("coverage")}
-                >
-                  See my coverage →
-                </button>
-              </div>
-            </div>
-          ) : null}
+            ) : null}
 
-          {stage === "coverage" ? (
-            <div className={s.stageCol}>
-              <div className={s.coverageStats}>
-                <div className={s.statCol}>
-                  <span className={s.eyebrowBlue}>YOUR COVERAGE</span>
-                  <span className={s.bigNum}>{selected.length}</span>
-                  <span className={s.statLabel}>dependencies</span>
+            {stage === "confirm" ? (
+              <div className={s.stageCol}>
+                <div className={s.stageHead}>
+                  <span className={s.stageTitle}>What does your business actually depend on?</span>
+                  <span className={s.stageSub}>
+                    Select services, not URLs. Auterim finds the sources behind each one.
+                  </span>
                 </div>
-                <div className={s.statCol}>
-                  <span className={s.bigNum}>{selectedSources.length}</span>
-                  <span className={s.statLabel}>source types to watch</span>
-                </div>
-              </div>
-              <div className={s.coverageGrid}>
-                <div className={s.breakdown}>
-                  {breakdown.map((b) => (
-                    <div key={b.label} className={s.breakdownRow}>
-                      <span>{b.label}</span>
-                      <span className={s.meter}>
-                        <span style={{ width: `${Math.round((b.n / breakdownMax) * 100)}%` }} />
-                      </span>
-                      <span className={s.breakdownN}>{b.n}</span>
+                <div className={s.searchWrap}>
+                  <label htmlFor="dep-search" className={s.srOnly}>
+                    Search software or service
+                  </label>
+                  <input
+                    id="dep-search"
+                    type="text"
+                    className={s.searchInput}
+                    placeholder="Search software or service…"
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                  />
+                  {results.length ? (
+                    <div className={s.searchResults}>
+                      {results.map((name) => (
+                        <button
+                          key={name}
+                          type="button"
+                          className={s.searchResult}
+                          onClick={() => {
+                            setExtra((current) => [...current, name]);
+                            setSelected((current) => [...current, name]);
+                            setSearch("");
+                          }}
+                        >
+                          <ProviderMark provider={name} size={22} />
+                          <span className={s.grow}>{name}</span>
+                          <span className={s.monoXs}>{catalog[name][0]} · + Add</span>
+                        </button>
+                      ))}
                     </div>
-                  ))}
-                </div>
-                <div className={s.treePreview}>
-                  {selected.slice(0, 2).map((name) => {
-                    const srcs = sourcesFor(name);
-                    return (
-                      <div key={name} className={s.treeItem}>
-                        <div className={s.treeHead}>
-                          <ProviderMark provider={name} size={20} tone="dark" />
-                          <span>{name}</span>
-                        </div>
-                        {srcs.length ? (
-                          srcs.map((src, i) => (
-                            <span key={src[0]} className={s.treeLine}>
-                              <span>{i === srcs.length - 1 ? "└" : "├"}</span> {src[0]}
-                            </span>
-                          ))
-                        ) : (
-                          <span className={s.treeLine}>
-                            <span>└</span> sources mapped during setup
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })}
-                  {selected.length > 2 ? (
-                    <span className={s.treeMore}>+ {selected.length - 2} more dependencies</span>
                   ) : null}
                 </div>
+                <div className={s.optionGrid}>
+                  {optionNames.map((name) => {
+                    const on = selected.includes(name);
+                    const item = found.find((f) => f.name === name);
+                    const hint = item
+                      ? item.high
+                        ? "High confidence"
+                        : "Possible"
+                      : extra.includes(name)
+                        ? "Added by you"
+                        : "Not publicly visible";
+                    return (
+                      <button
+                        key={name}
+                        type="button"
+                        role="checkbox"
+                        aria-checked={on}
+                        className={on ? `${s.option} ${s.optionOn}` : s.option}
+                        onClick={() => toggle(name)}
+                      >
+                        <span className={s.optionBox}>{on ? "✓" : ""}</span>
+                        <ProviderMark provider={name} size={22} />
+                        <span className={s.rowText}>
+                          <span className={s.optionName}>{name}</span>
+                          <span className={s.optionHint}>{hint}</span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className={s.stageFoot}>
+                  <span className={s.selSummary}>
+                    <strong>{selected.length} selected</strong> · {selectedSources.length} source
+                    types to watch
+                  </span>
+                  <button
+                    type="button"
+                    className={s.btnInkSm}
+                    disabled={selected.length === 0}
+                    onClick={() => setStage("coverage")}
+                  >
+                    See my coverage →
+                  </button>
+                </div>
               </div>
-              <div className={s.convertBar}>
-                <span>
-                  Create your workspace to confirm the exact sources and start monitoring.
-                </span>
-                <Link
-                  className={s.btnBlue}
-                  href={`/signup?${continueParams}`}
-                  onClick={() => emitPublicConversionEvent("scan_result_continue", attribution())}
-                >
-                  Protect these dependencies
-                </Link>
+            ) : null}
+
+            {stage === "coverage" ? (
+              <div className={s.stageCol}>
+                <div className={s.coverageStats}>
+                  <div className={s.statCol}>
+                    <span className={s.eyebrowBlue}>YOUR COVERAGE</span>
+                    <span className={s.bigNum}>{selected.length}</span>
+                    <span className={s.statLabel}>dependencies</span>
+                  </div>
+                  <div className={s.statCol}>
+                    <span className={s.bigNum}>{selectedSources.length}</span>
+                    <span className={s.statLabel}>source types to watch</span>
+                  </div>
+                </div>
+                <div className={s.coverageGrid}>
+                  <div className={s.breakdown}>
+                    {breakdown.map((b) => (
+                      <div key={b.label} className={s.breakdownRow}>
+                        <span>{b.label}</span>
+                        <span className={s.meter}>
+                          <span style={{ width: `${Math.round((b.n / breakdownMax) * 100)}%` }} />
+                        </span>
+                        <span className={s.breakdownN}>{b.n}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className={s.treePreview}>
+                    {selected.slice(0, 2).map((name) => {
+                      const srcs = sourcesFor(name);
+                      return (
+                        <div key={name} className={s.treeItem}>
+                          <div className={s.treeHead}>
+                            <ProviderMark provider={name} size={20} tone="dark" />
+                            <span>{name}</span>
+                          </div>
+                          {srcs.length ? (
+                            srcs.map((src, i) => (
+                              <span key={src[0]} className={s.treeLine}>
+                                <span>{i === srcs.length - 1 ? "└" : "├"}</span> {src[0]}
+                              </span>
+                            ))
+                          ) : (
+                            <span className={s.treeLine}>
+                              <span>└</span> sources mapped during setup
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {selected.length > 2 ? (
+                      <span className={s.treeMore}>+ {selected.length - 2} more dependencies</span>
+                    ) : null}
+                  </div>
+                </div>
+                <div className={s.convertBar}>
+                  <span>
+                    Create your workspace to confirm the exact sources and start monitoring.
+                  </span>
+                  <Link
+                    className={s.btnBlue}
+                    href={`/signup?${continueParams}`}
+                    onClick={() => emitPublicConversionEvent("scan_result_continue", attribution())}
+                  >
+                    Protect these dependencies
+                  </Link>
+                </div>
               </div>
-            </div>
-          ) : null}
+            ) : null}
+          </div>
         </div>
       </div>
     </>
