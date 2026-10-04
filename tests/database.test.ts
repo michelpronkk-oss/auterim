@@ -196,6 +196,15 @@ const technologyObservationReasonCodesMigration = await readFile(
   ),
   "utf8",
 );
+const completeTechnologyFingerprintMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261017000000_complete_technology_fingerprint_model.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase(applyCompanySurfaceMigration = true) {
   const db = new PGlite();
@@ -235,6 +244,7 @@ async function makeDatabase(applyCompanySurfaceMigration = true) {
     await db.exec(companySurfaceFinalizeMigration);
     await db.exec(technologyObservationMigration);
     await db.exec(technologyObservationReasonCodesMigration);
+    await db.exec(completeTechnologyFingerprintMigration);
   }
   return db;
 }
@@ -365,6 +375,7 @@ describe("Auterim migration and monitoring transaction", () => {
     await db.exec(companySurfaceFinalizeMigration);
     await db.exec(technologyObservationMigration);
     await db.exec(technologyObservationReasonCodesMigration);
+    await db.exec(completeTechnologyFingerprintMigration);
     const backfilled = await db.query<{ surface_host: string; surface_type: string }>(
       "select surface_host,surface_type from public.dependency_discovery_evidence where run_id=$1 order by signature_key",
       [run.rows[0]!.id],
@@ -670,6 +681,11 @@ describe("Auterim migration and monitoring transaction", () => {
     await db.exec("reset role");
 
     await db.exec("set role service_role");
+    await db.query(
+      `insert into public.workspace_onboarding(workspace_id,company_id,state)
+       values ($1,$2,'company_created')`,
+      [workspaceId, companyId],
+    );
     const run = await db.query<{ id: string }>(
       `insert into public.dependency_discovery_runs (
         workspace_id,company_id,website_url,trigger_run_id,attempt_number
@@ -684,8 +700,8 @@ describe("Auterim migration and monitoring transaction", () => {
         $1,$2,$3,'completed',null,false,0,0,
         '[{"provider_slug":"stripe","signature_key":"stripe-js-v3","signal_type":"script_host","strength":"strong","source_origin":"https://discovery.example","surface_type":"ROOT_MARKETING","surface_host":"discovery.example"}]'::jsonb,
         '[{"provider_slug":"stripe","confidence":0.72,"confidence_label":"medium","evidence_summary":[{"signatureKey":"stripe-js-v3"}]}]'::jsonb,
-        '{"outcome":"complete"}'::jsonb,
-        '[{"technology_slug":"stripe","technology_name":"Stripe","category":"payments","fingerprint_id":"provider-stripe-js-v3","registry_version":"2026-10-04.1","evidence_family":"script_asset","strength":"strong","relationship":"optional_integration","protectability":"protectable","status":"supported","disposition":"suggested","suppression_reason":null,"surface_type":"ROOT_MARKETING","surface_host":"discovery.example","source_host":"discovery.example"}]'::jsonb
+        '{"outcome":"complete","company":{"surfacesObserved":1,"surfacesSelected":1,"surfacesScanned":1,"surfaces":[],"suppressedObservations":[],"providersSuggested":1,"providersSuppressed":0,"technologyObservations":[{"fingerprintId":"internal-fingerprint-must-not-leak","sourceHost":"private.example"}]}}'::jsonb,
+        '[{"technology_slug":"stripe","technology_name":"Stripe","category":"payments","fingerprint_id":"provider-stripe-js-v3","registry_version":"2026-10-04.2","evidence_family":"script_url","strength":"strong","relationship":"provides_service","protectability":"protectable","status":"supported","disposition":"suggested","suppression_reason":null,"surface_type":"ROOT_MARKETING","surface_host":"discovery.example","source_host":"discovery.example"}]'::jsonb
       )`,
       [run.rows[0]!.id, workspaceId, companyId],
     );
@@ -696,7 +712,20 @@ describe("Auterim migration and monitoring transaction", () => {
           [run.rows[0]!.id],
         )
       ).rows,
-    ).toEqual([{ fingerprint_id: "provider-stripe-js-v3", registry_version: "2026-10-04.1" }]);
+    ).toEqual([{ fingerprint_id: "provider-stripe-js-v3", registry_version: "2026-10-04.2" }]);
+    await db.exec("reset role");
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [userA]);
+    await db.exec("set role authenticated");
+    const safeOnboarding = await db.query<{ value: unknown }>(
+      "select public.get_onboarding_status_with_discovery_coverage($1) as value",
+      [workspaceId],
+    );
+    expect(JSON.stringify(safeOnboarding.rows[0]!.value)).not.toContain(
+      "internal-fingerprint-must-not-leak",
+    );
+    expect(JSON.stringify(safeOnboarding.rows[0]!.value)).not.toContain("private.example");
+    expect(JSON.stringify(safeOnboarding.rows[0]!.value)).not.toContain("technologyObservations");
+    await db.exec("reset role");
     for (const [index, signalType] of [
       "resource_host",
       "csp_host",

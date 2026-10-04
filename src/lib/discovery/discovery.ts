@@ -13,6 +13,7 @@ import {
 } from "@/lib/discovery/registry";
 import {
   observeTechnologies,
+  type TechnologyBundle,
   type TechnologyObservation,
   type TechnologySignatureInput,
 } from "@/lib/discovery/technology-registry";
@@ -29,6 +30,11 @@ export const discoveryLimits = {
   maxDeepScripts: 4,
   maxScriptBytes: 96 * 1024,
   maxDeepBytes: 384 * 1024,
+  maxCssFiles: 2,
+  maxCssBytes: 48 * 1024,
+  maxCssAggregateBytes: 96 * 1024,
+  maxCssAnalysisDurationMs: 2_500,
+  maxCssRequestTimeoutMs: 1_250,
   maxParallelDeepAssets: 2,
   maxScanDurationMs: 45_000,
   maxRuntimeDurationMs: 8_000,
@@ -74,6 +80,8 @@ export type RuntimeRequestObservation = {
 
 export type RuntimeDiscoveryResult = {
   requests: RuntimeRequestObservation[];
+  technologyFingerprintIds?: string[];
+  technologyFingerprintEvaluations?: number;
   requestsObserved: number;
   requestsFulfilled?: number;
   requestsBlocked?: number;
@@ -127,6 +135,7 @@ export type UrlDiscoveryResult = {
       staticBytes?: number;
       staticDurationMs?: number;
       scriptBytes?: number;
+      cssBytes?: number;
       runtimeDurationMs?: number;
       runtimeRequests?: number;
     }>;
@@ -159,11 +168,13 @@ export type UrlDiscoveryResult = {
     totalStaticBytes: number;
     totalStaticWireBytes: number;
     totalScriptBytes: number;
+    totalCssBytes?: number;
     totalRuntimeBytes: number;
     totalRuntimeWireBytes: number;
     totalRuntimeDurationMs: number;
     totalRuntimeRequests: number;
     totalRuntimeHosts: number;
+    totalRuntimeFingerprintEvaluations?: number;
   };
   deepPass: {
     requested: boolean;
@@ -214,6 +225,7 @@ export type UrlDiscoveryResult = {
       blockedUnsafeRequests: number;
       status: "skipped" | "complete" | "partial" | "unavailable";
       memoryDeltaBytes: number | null;
+      technologyFingerprintEvaluations?: number;
     };
     headers: { inspected: number };
     csp: { inspected: boolean; hostSources: number };
@@ -226,6 +238,22 @@ export type UrlDiscoveryResult = {
       bytesFetched: number;
       failures: number;
       limitReached: boolean;
+    };
+    css?: {
+      attempted: number;
+      fetched: number;
+      bytesFetched: number;
+      failures: number;
+      limitReached: boolean;
+    };
+    technologyAnalysis?: {
+      javascriptBundlesInspected: number;
+      javascriptBytesInspected: number;
+      cssBundlesInspected: number;
+      cssBytesInspected: number;
+      runtimeFingerprintEvaluations: number;
+      registryMatchDurationMs: number;
+      registryFailure: boolean;
     };
     incompleteReasons: string[];
   };
@@ -393,6 +421,8 @@ function parseContentSecurityPolicy(headers: Record<string, string>) {
 function inspectJavaScript(source: string) {
   const code: string[] = [];
   const urls = new Set<string>();
+  const stringLiterals: string[] = [];
+  let stringLiteralBytes = 0;
   let index = 0;
   let lastSignificantChar = "";
   while (index < source.length && urls.size < 64) {
@@ -467,6 +497,15 @@ function inspectJavaScript(source: string) {
       lastSignificantChar = quote;
       if (!interpolatedTemplate) {
         for (const url of collectEmbeddedUrls(value)) urls.add(url);
+        const literalBytes = Buffer.byteLength(value, "utf8");
+        if (
+          stringLiterals.length < 128 &&
+          literalBytes <= 512 &&
+          stringLiteralBytes + literalBytes <= 16 * 1024
+        ) {
+          stringLiterals.push(value);
+          stringLiteralBytes += literalBytes;
+        }
       }
       continue;
     }
@@ -474,7 +513,7 @@ function inspectJavaScript(source: string) {
     if (current && !/\s/.test(current)) lastSignificantChar = current;
     index += 1;
   }
-  return { code: code.join(""), urls: [...urls] };
+  return { code: code.join(""), urls: [...urls], stringLiterals };
 }
 
 function emptyInspection(redirects = 0) {
@@ -674,6 +713,7 @@ export async function discoverWebsiteDependencies(
     globalDeadlineAt?: number;
     runtimeDeadlineAt?: number;
     runtimeBudget?: DiscoveryRuntimeBudget;
+    technologyObserver?: typeof observeTechnologies;
     runtimeRunner?: (
       url: string,
       options: { deadlineAt: number; signal?: AbortSignal },
@@ -916,6 +956,8 @@ export async function discoverWebsiteDependencies(
     embeddedUrls: [],
     siteOrigin: pageOrigin,
   };
+  const javascriptBundles: TechnologyBundle[] = [];
+  const cssBundles: TechnologyBundle[] = [];
   const seen = new Set<string>();
   const scannedHost = new URL(normalizedUrl).hostname.toLowerCase();
   matchEvidence(
@@ -960,7 +1002,14 @@ export async function discoverWebsiteDependencies(
   let scriptsDiscovered = 0;
   let scriptFailures = 0;
   let scriptTruncated = false;
+  let scriptBytesFetched = 0;
+  let manifestBytesFetched = 0;
   let bytesFetched = 0;
+  let cssFetched = 0;
+  let cssAttempted = 0;
+  let cssFailures = 0;
+  let cssBytesFetched = 0;
+  let cssTruncated = false;
   let manifestsFetched = 0;
   let manifestFailures = 0;
   let manifestTruncated = false;
@@ -995,6 +1044,7 @@ export async function discoverWebsiteDependencies(
         );
         manifestsFetched += 1;
         bytesFetched += manifest.body.byteLength;
+        manifestBytesFetched += manifest.body.byteLength;
         manifestTruncated ||= manifest.bodyTruncated;
         if (manifest.bodyTruncated) manifestFailures += 1;
         parseConfigJson(manifest.body.toString("utf8"), manifestConfigUrls);
@@ -1002,6 +1052,61 @@ export async function discoverWebsiteDependencies(
         // Manifests are optional public metadata and cannot fail the homepage scan.
         manifestFailures += 1;
       }
+    }
+  }
+  throwIfCancelled();
+
+  const sameOriginStylesheets = options.deep
+    ? references.stylesheetUrls.filter((stylesheetUrl) => {
+        try {
+          return new URL(stylesheetUrl).origin === pageOrigin;
+        } catch {
+          return false;
+        }
+      })
+    : [];
+  const cssDeadlineAt = Math.min(
+    deadlineAt,
+    performance.now() + discoveryLimits.maxCssAnalysisDurationMs,
+  );
+  for (const stylesheetUrl of sameOriginStylesheets.slice(0, discoveryLimits.maxCssFiles)) {
+    const cssRemainingMs = Math.floor(cssDeadlineAt - performance.now());
+    if (cssRemainingMs <= 0) break;
+    const remainingCss = Math.min(
+      discoveryLimits.maxCssBytes,
+      discoveryLimits.maxCssAggregateBytes - cssBytesFetched,
+      discoveryLimits.maxDeepBytes - bytesFetched,
+    );
+    if (remainingCss <= 0) break;
+    cssAttempted += 1;
+    try {
+      const stylesheet = await fetcher(
+        stylesheetUrl,
+        {},
+        {
+          allowedOrigins: [pageOrigin],
+          restrictToStandardPorts: true,
+          acceptedContentTypes: ["text/css"],
+          maxResponseBytes: remainingCss,
+          allowTruncatedResponse: true,
+          ...fetchBounds(),
+          timeoutMs: Math.min(discoveryLimits.maxCssRequestTimeoutMs, cssRemainingMs),
+          dnsTimeoutMs: Math.min(750, cssRemainingMs),
+          deadlineAt: cssDeadlineAt,
+        },
+      );
+      if (!stylesheet.contentType?.startsWith("text/css")) {
+        cssFailures += 1;
+        continue;
+      }
+      cssFetched += 1;
+      cssBytesFetched += stylesheet.body.byteLength;
+      bytesFetched += stylesheet.body.byteLength;
+      cssTruncated ||= stylesheet.bodyTruncated;
+      if (stylesheet.bodyTruncated) cssFailures += 1;
+      cssBundles.push({ url: stylesheet.finalUrl, code: stylesheet.body.toString("utf8") });
+    } catch {
+      cssFailures += 1;
     }
   }
   throwIfCancelled();
@@ -1059,9 +1164,15 @@ export async function discoverWebsiteDependencies(
     if (!script) continue;
     scriptsFetched += 1;
     bytesFetched += script.body.byteLength;
+    scriptBytesFetched += script.body.byteLength;
     scriptTruncated ||= script.bodyTruncated;
     if (script.bodyTruncated) scriptFailures += 1;
     const parsed = inspectJavaScript(script.body.toString("utf8"));
+    javascriptBundles.push({
+      url: script.finalUrl,
+      code: parsed.code,
+      stringLiterals: parsed.stringLiterals,
+    });
     const scriptOrigin = sanitizeSourceOrigin(script.finalUrl);
     if (scriptOrigin) {
       matchEvidence(
@@ -1152,6 +1263,7 @@ export async function discoverWebsiteDependencies(
     status: "skipped",
     memoryDeltaBytes: null,
   };
+  let runtimeFingerprintIds: string[] = [];
   if (runtimeRequired && new URL(normalizedUrl).protocol === "https:") {
     const runtimeStartedAt = performance.now();
     runtimeSummary = { ...runtimeSummary, attempted: true, status: "unavailable" };
@@ -1181,6 +1293,7 @@ export async function discoverWebsiteDependencies(
       );
       if (options.signal?.aborted)
         throw new SafeFetchError("timeout", "The discovery task was cancelled.");
+      runtimeFingerprintIds = runtimeResult.technologyFingerprintIds ?? [];
       const requests = [
         ...new Map(
           runtimeResult.requests.map((request) => [
@@ -1218,6 +1331,7 @@ export async function discoverWebsiteDependencies(
         blockedUnsafeRequests: runtimeResult.blockedUnsafeRequests,
         status: runtimeResult.status,
         memoryDeltaBytes: runtimeResult.memoryDeltaBytes,
+        technologyFingerprintEvaluations: runtimeResult.technologyFingerprintEvaluations ?? 0,
       };
       if (runtimeResult.status === "partial") incompleteReasons.push("runtime_partial");
       if (runtimeResult.status === "unavailable") incompleteReasons.push("runtime_unavailable");
@@ -1236,13 +1350,27 @@ export async function discoverWebsiteDependencies(
   throwIfCancelled();
   const partial = incompleteReasons.length > 0;
   const candidates = makeCandidates(evidence);
-  const technologyObservations = observeTechnologies({
-    signatureInput: technologySignatureInput,
-    providerEvidence: evidence,
-    surfaceType,
-    surfaceHost: scannedHost,
-    candidates: new Set(candidates.map(({ providerSlug }) => providerSlug)),
-  });
+  const technologyMatchStartedAt = performance.now();
+  let technologyObservations: TechnologyObservation[] = [];
+  let technologyRegistryFailure = false;
+  try {
+    technologyObservations = (options.technologyObserver ?? observeTechnologies)({
+      signatureInput: {
+        ...technologySignatureInput,
+        javascriptBundles,
+        cssBundles,
+        runtimeFingerprintIds,
+      },
+      providerEvidence: evidence,
+      surfaceType,
+      surfaceHost: scannedHost,
+      candidates: new Set(candidates.map(({ providerSlug }) => providerSlug)),
+    });
+  } catch {
+    // Technology recognition is additive and must not fail deterministic provider discovery.
+    technologyRegistryFailure = true;
+  }
+  const technologyMatchDurationMs = Math.ceil(performance.now() - technologyMatchStartedAt);
   const outcome = partial ? "partial" : candidates.length === 0 ? "empty" : "complete";
   const durationMs = Math.ceil(performance.now() - startedAt);
   return {
@@ -1259,7 +1387,7 @@ export async function discoverWebsiteDependencies(
       scriptsDiscovered,
       scriptsAttempted,
       scriptsFetched,
-      bytesFetched,
+      bytesFetched: scriptBytesFetched + manifestBytesFetched,
       failures: scriptFailures + manifestFailures,
     },
     coverage: {
@@ -1296,9 +1424,25 @@ export async function discoverWebsiteDependencies(
         scriptsDiscovered,
         scriptsAttempted,
         scriptsFetched,
-        bytesFetched,
+        bytesFetched: scriptBytesFetched,
         failures: scriptFailures,
         limitReached: scriptLimitReached,
+      },
+      css: {
+        attempted: cssAttempted,
+        fetched: cssFetched,
+        bytesFetched: cssBytesFetched,
+        failures: cssFailures,
+        limitReached: sameOriginStylesheets.length > discoveryLimits.maxCssFiles || cssTruncated,
+      },
+      technologyAnalysis: {
+        javascriptBundlesInspected: javascriptBundles.length,
+        javascriptBytesInspected: scriptBytesFetched,
+        cssBundlesInspected: cssBundles.length,
+        cssBytesInspected: cssBytesFetched,
+        runtimeFingerprintEvaluations: runtimeSummary.technologyFingerprintEvaluations ?? 0,
+        registryMatchDurationMs: technologyMatchDurationMs,
+        registryFailure: technologyRegistryFailure,
       },
       incompleteReasons,
     },

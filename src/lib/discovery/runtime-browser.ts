@@ -1,6 +1,7 @@
 import "server-only";
 import { chromium, type Browser, type BrowserContext, type Page, type Route } from "playwright";
 import { createServer, type Server, type Socket } from "node:net";
+import { randomBytes } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { fetchHttpSource, SafeFetchError, type FetchResult } from "@/lib/monitoring/fetcher";
 import type {
@@ -8,6 +9,7 @@ import type {
   RuntimeDiscoveryResult,
   RuntimeRequestObservation,
 } from "@/lib/discovery/discovery";
+import { technologyRuntimeFingerprints } from "@/lib/discovery/technology-registry";
 
 export const runtimeDiscoveryLimits = {
   maxDurationMs: 8_000,
@@ -142,6 +144,8 @@ export async function inspectPublicLandingPage(
   const startedAt = performance.now();
   const memoryBefore = process.memoryUsage().rss;
   const observations = new Map<string, RuntimeRequestObservation>();
+  const technologyFingerprintIds = new Set<string>();
+  let technologyFingerprintEvaluations = 0;
   const hosts = new Set<string>();
   let requestsObserved = 0;
   let requestsFulfilled = 0;
@@ -226,6 +230,8 @@ export async function inspectPublicLandingPage(
   };
   const output = (status: RuntimeDiscoveryResult["status"]): RuntimeDiscoveryResult => ({
     requests: [...observations.values()],
+    technologyFingerprintIds: [...technologyFingerprintIds],
+    technologyFingerprintEvaluations,
     requestsObserved,
     requestsFulfilled,
     requestsBlocked,
@@ -466,22 +472,73 @@ export async function inspectPublicLandingPage(
     openedPage = await withDeadline(context.newPage(), (latePage) => latePage.close());
     page = openedPage;
     openedPage.on("popup", (popup) => void popup.close().catch(() => undefined));
+    const probeSpecs = technologyRuntimeFingerprints.map((probe) => ({
+      fingerprintId: probe.fingerprintId,
+      propertyKey: probe.propertyKey,
+      expectedPrimitive: probe.expectedPrimitive,
+      selector: probe.selector,
+      family: probe.family,
+    }));
+    technologyFingerprintEvaluations = probeSpecs.length;
+    const probeKey = `__auterim_probe_${randomBytes(16).toString("hex")}`;
     await withDeadline(
-      openedPage.addInitScript(() => {
-        for (const name of [
-          "RTCPeerConnection",
-          "webkitRTCPeerConnection",
-          "WebTransport",
-          "Worker",
-          "SharedWorker",
-        ]) {
-          try {
-            Object.defineProperty(globalThis, name, { configurable: false, value: undefined });
-          } catch {
-            // The deny proxy is the network boundary if an API cannot be hidden.
+      openedPage.addInitScript(
+        ({ key, probes }) => {
+          // Capture the native operations before untrusted page scripts run. The closure is
+          // immutable and only returns allowlisted fingerprint IDs; it never reads getters.
+          const apply = Reflect.apply;
+          const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+          const defineProperty = Object.defineProperty;
+          const querySelector = Document.prototype.querySelector;
+          const isArray = Array.isArray;
+          const arrayPush = Array.prototype.push;
+          const probe = () => {
+            const hits: string[] = [];
+            for (let index = 0; index < probes.length; index += 1) {
+              const item = probes[index]!;
+              try {
+                if (item.family === "runtime_global" && item.propertyKey) {
+                  const descriptor = getOwnPropertyDescriptor(window, item.propertyKey);
+                  if (!descriptor || !("value" in descriptor)) continue;
+                  const value = descriptor.value;
+                  const matches =
+                    item.expectedPrimitive === "array"
+                      ? isArray(value)
+                      : item.expectedPrimitive === "present"
+                        ? value !== undefined && value !== null
+                        : typeof value === item.expectedPrimitive;
+                  if (matches) apply(arrayPush, hits, [item.fingerprintId]);
+                } else if (item.family === "runtime_dom" && item.selector) {
+                  if (apply(querySelector, document, [item.selector]))
+                    apply(arrayPush, hits, [item.fingerprintId]);
+                }
+              } catch {
+                // A hostile/malformed page probe cannot fail the rest of discovery.
+              }
+            }
+            return hits;
+          };
+          apply(defineProperty, Object, [window, key, { value: probe, configurable: false }]);
+          for (const name of [
+            "RTCPeerConnection",
+            "webkitRTCPeerConnection",
+            "WebTransport",
+            "Worker",
+            "SharedWorker",
+          ]) {
+            try {
+              apply(defineProperty, Object, [
+                globalThis,
+                name,
+                { configurable: false, value: undefined },
+              ]);
+            } catch {
+              // The deny proxy is the network boundary if an API cannot be hidden.
+            }
           }
-        }
-      }),
+        },
+        { key: probeKey, probes: probeSpecs },
+      ),
     );
     const response = await withDeadline(
       openedPage.goto(initialUrl.href, {
@@ -492,6 +549,20 @@ export async function inspectPublicLandingPage(
     if (!response) unavailable = true;
     const settleRemaining = Math.min(runtimeDiscoveryLimits.settleMs, remainingMs());
     if (settleRemaining > 0) await withDeadline(openedPage.waitForTimeout(settleRemaining));
+    let runtimeHits: string[] = [];
+    try {
+      runtimeHits = await withDeadline(
+        openedPage.evaluate((key) => {
+          const probe = (window as unknown as Record<string, unknown>)[key];
+          return typeof probe === "function" ? (probe as () => string[])() : [];
+        }, probeKey),
+      );
+    } catch {
+      // Runtime fingerprinting is additive. A failed probe must not erase successful
+      // mediated request evidence or downgrade the scan by itself.
+      runtimeHits = [];
+    }
+    for (const hit of runtimeHits) technologyFingerprintIds.add(hit);
     if (remainingMs() <= 0) bounded = true;
   } catch {
     unavailable = true;

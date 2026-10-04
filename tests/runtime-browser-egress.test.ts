@@ -435,6 +435,43 @@ describe("application-level Chromium egress isolation", () => {
     }
   }, 25_000);
 
+  it("uses an isolated world for runtime probes against page-poisoned intrinsics and lookalike hosts", async () => {
+    const url = "https://isolated-world.runtime-fixture.test/";
+    const html = `<!doctype html><script>
+      window.Sentry = new Proxy({}, { getOwnPropertyDescriptor() { while (true) {} } });
+      Object.getOwnPropertyDescriptor = () => ({ value: {} });
+      Document.prototype.querySelector = () => { while (true) {} };
+      document.querySelector = () => { while (true) {} };
+      document.querySelectorAll = () => { while (true) {} };
+    </script><iframe src="https://evilgoogle.com/recaptcha/frame"></iframe>`;
+    const started = performance.now();
+    let browser: Browser | undefined;
+    const result = await inspectPublicLandingPage(
+      url,
+      { deadlineAt: started + 7_000 },
+      {
+        launch: async (proxyUrl) => {
+          browser = await launchIsolatedChromium(proxyUrl, 3_000);
+          return browser;
+        },
+        initialDocument: {
+          status: 200,
+          body: Buffer.from(html),
+          bytesRead: Buffer.byteLength(html),
+          wireBytesRead: 0,
+          bodyTruncated: false,
+          contentType: "text/html",
+          finalUrl: url,
+        },
+      },
+    );
+    expect(performance.now() - started).toBeLessThan(4_000);
+    expect(result.status).toBe("complete");
+    expect(result.technologyFingerprintIds).toContain("runtime-sentry-global");
+    expect(result.technologyFingerprintIds).not.toContain("runtime-recaptcha-frame");
+    expect(browser?.isConnected()).toBe(false);
+  }, 25_000);
+
   it("enforces the WebRTC UDP policy even when constructors are left exposed", async () => {
     const udp = createSocket("udp4");
     let udpPackets = 0;

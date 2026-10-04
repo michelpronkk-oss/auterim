@@ -223,6 +223,15 @@ export class StreamingHtmlReferenceExtractor {
         /^wordpress(?:\s|$)/i.test((attrs.content ?? "").trim())
       ) {
         this.markupMarkers.add("wordpress-generator");
+        this.markupMarkers.add("cms-generator-wordpress");
+      }
+      if (key.toLowerCase() === "generator") {
+        const generator = (attrs.content ?? "").trim().toLowerCase();
+        for (const cms of ["drupal", "moodle", "joomla", "ghost", "wix"]) {
+          if (generator === cms || generator.startsWith(`${cms} `)) {
+            this.markupMarkers.add(`cms-generator-${cms}`);
+          }
+        }
       }
       if (attrs.content && CONFIG_META_KEY.test(key.trim())) {
         this.addInlineUrls(attrs.content);

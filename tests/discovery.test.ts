@@ -203,11 +203,11 @@ describe("offline URL dependency evaluation", () => {
     expect(result.technologyObservations).toMatchObject([
       {
         technologySlug: "bootstrap",
-        evidenceFamily: "stylesheet_asset",
+        evidenceFamily: "asset_path",
         strength: "weak",
         protectability: "non_protectable",
         disposition: "suppressed",
-        suppressionReason: "LIBRARY",
+        suppressionReason: "WEAK_EVIDENCE",
       },
     ]);
     expect(result.candidates).toEqual([]);

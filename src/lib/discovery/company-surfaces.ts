@@ -549,7 +549,8 @@ export async function discoverCompanySurfaceDependencies(
     if (!surface) continue;
     surface.staticBytes = result.coverage.html.bytesRead;
     surface.staticDurationMs = result.coverage.staticCoverage.durationMs;
-    surface.scriptBytes = result.deepPass.bytesFetched;
+    surface.scriptBytes = result.coverage.javascript.bytesFetched;
+    surface.cssBytes = result.coverage.css?.bytesFetched ?? 0;
     surface.runtimeDurationMs = result.coverage.runtime.durationMs;
     surface.runtimeRequests = result.coverage.runtime.requestsObserved;
   }
@@ -622,7 +623,11 @@ export async function discoverCompanySurfaceDependencies(
       totalDurationMs: durationMs,
       totalStaticBytes: budget.staticBytes,
       totalStaticWireBytes: budget.staticWireBytes,
-      totalScriptBytes: results.reduce((sum, item) => sum + item.deepPass.bytesFetched, 0),
+      totalScriptBytes: results.reduce(
+        (sum, item) => sum + item.coverage.javascript.bytesFetched,
+        0,
+      ),
+      totalCssBytes: results.reduce((sum, item) => sum + (item.coverage.css?.bytesFetched ?? 0), 0),
       totalRuntimeBytes: budget.runtimeBytes,
       totalRuntimeWireBytes: budget.runtimeWireBytes,
       totalRuntimeDurationMs: results.reduce(
@@ -631,6 +636,10 @@ export async function discoverCompanySurfaceDependencies(
       ),
       totalRuntimeRequests: runtimeBudget.requests,
       totalRuntimeHosts: runtimeBudget.hosts.size,
+      totalRuntimeFingerprintEvaluations: results.reduce(
+        (sum, item) => sum + (item.coverage.runtime.technologyFingerprintEvaluations ?? 0),
+        0,
+      ),
     },
     coverage: {
       ...root.coverage,

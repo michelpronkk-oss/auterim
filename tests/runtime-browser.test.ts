@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Browser } from "playwright";
 import { inspectPublicLandingPage } from "@/lib/discovery/runtime-browser";
+import { technologyRuntimeFingerprints } from "@/lib/discovery/technology-registry";
 import { SafeFetchError, type FetchResult } from "@/lib/monitoring/fetcher";
 
 function response(
@@ -25,6 +26,7 @@ function response(
 
 function browserHarness(
   onGoto: (route: (value: unknown) => Promise<void>, frame: object) => Promise<void>,
+  options: { probeFailure?: boolean } = {},
 ) {
   let routeHandler: ((value: unknown) => Promise<void>) | null = null;
   const lifecycleOrder: string[] = [];
@@ -40,6 +42,11 @@ function browserHarness(
       return { status: () => 200 };
     },
     waitForTimeout: async () => undefined,
+    evaluate: vi.fn(async (...args: unknown[]) => {
+      void args;
+      if (options.probeFailure) throw new Error("fingerprint probe failed");
+      return runtimeHits.value;
+    }),
     close: vi.fn(async (): Promise<void> => undefined),
   };
   const context = {
@@ -82,10 +89,49 @@ function browserHarness(
       fulfilled,
     };
   };
-  return { browser, page, context, frame, makeRoute, lifecycleOrder };
+  const runtimeHits = { value: [] as string[] };
+  return { browser, page, context, frame, makeRoute, lifecycleOrder, runtimeHits };
 }
 
 describe("bounded runtime dependency discovery", () => {
+  it("evaluates only the bounded runtime fingerprint allowlist and returns hit ids only", async () => {
+    const harness = browserHarness(async (route, frame) => {
+      await route(harness.makeRoute("https://company.example/", "document", frame).value);
+    });
+    harness.runtimeHits.value = ["runtime-next-dom-root"];
+    const result = await inspectPublicLandingPage(
+      "https://company.example/",
+      { deadlineAt: performance.now() + 20_000 },
+      {
+        launch: async () => harness.browser as unknown as Browser,
+        fetcher: async (url: string) => response(url, "<html></html>", "text/html"),
+      },
+    );
+    expect(result.technologyFingerprintIds).toEqual(["runtime-next-dom-root"]);
+    expect(result.technologyFingerprintEvaluations).toBe(technologyRuntimeFingerprints.length);
+    expect(JSON.stringify(result)).not.toContain("raw-value");
+  });
+
+  it("keeps successful mediated evidence when isolated fingerprint evaluation fails", async () => {
+    const harness = browserHarness(
+      async (route, frame) => {
+        await route(harness.makeRoute("https://company.example/", "document", frame).value);
+      },
+      { probeFailure: true },
+    );
+    const result = await inspectPublicLandingPage(
+      "https://company.example/",
+      { deadlineAt: performance.now() + 20_000 },
+      {
+        launch: async () => harness.browser as unknown as Browser,
+        fetcher: async (url: string) => response(url, "<html></html>", "text/html"),
+      },
+    );
+    expect(result.status).toBe("complete");
+    expect(result.requestsFulfilled).toBe(1);
+    expect(result.technologyFingerprintIds).toEqual([]);
+  });
+
   it("captures only normalized public request metadata and closes the isolated browser", async () => {
     let capturedQuery = false;
     const harness = browserHarness(async (route, frame) => {
