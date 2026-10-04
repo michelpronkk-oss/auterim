@@ -2820,3 +2820,404 @@
     display: none;
   }
 }
+
+/* ---------- Phones: tighter type scale, calmer spacing and compact visuals ---------- */
+.navCtaShort {
+  display: none;
+}
+@media (max-width: 560px) {
+  .header {
+    top: 8px;
+    padding: 7px 7px 7px 14px;
+    border-radius: 14px;
+  }
+  .logo span {
+    font-size: 17px;
+  }
+  .navCta {
+    min-height: 36px;
+    padding: 0 14px;
+    border-radius: 9px;
+    font-size: 13.5px;
+  }
+  .navCtaLong {
+    display: none;
+  }
+  .navCtaShort {
+    display: inline;
+  }
+
+  .hero {
+    padding: 0 4px 56px;
+  }
+  .heroCopy {
+    gap: 18px;
+    padding-top: 40px;
+  }
+  .heroBadge {
+    font-size: 10.5px;
+  }
+  .h1 {
+    font-size: clamp(34px, 9.6vw, 42px);
+    letter-spacing: -0.042em;
+    line-height: 1.02;
+    text-wrap: pretty;
+  }
+  .heroLede {
+    max-width: 34ch;
+    font-size: 16px;
+    line-height: 1.5;
+  }
+  .heroForm {
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .urlField input,
+  .urlFieldDark input {
+    height: 44px;
+  }
+  .heroMicro {
+    font-size: 13px;
+  }
+
+  /* Hero demo: single-line rows so the reserved panel height stays compact. */
+  .panel {
+    border-radius: 18px;
+  }
+  .panelBar {
+    padding: 10px 12px;
+  }
+  .panelBody {
+    min-height: 0;
+    padding: 14px;
+  }
+  .stageCol {
+    gap: 12px;
+  }
+  .demoTitle {
+    font-size: 15.5px;
+  }
+  .demoRowMain {
+    gap: 10px;
+    padding: 9px 10px;
+  }
+  .demoRowMain .rowName {
+    font-size: 14px;
+  }
+  .demoRowMain .rowMeta {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pillHigh,
+  .pillPossible,
+  .pillConfirmed {
+    padding: 3px 8px;
+    font-size: 11px;
+  }
+  /* Coverage is shown by the row ring and the source count in the header; the chip list
+     would make every phase as tall as the longest one. */
+  .demoSources {
+    display: none;
+  }
+  .footNote {
+    font-size: 12px;
+  }
+
+  /* Section rhythm */
+  .section,
+  .sectionCenter {
+    padding: 64px 20px;
+    gap: 32px;
+  }
+  .bandInner,
+  .bandInnerLeft {
+    padding: 56px 16px;
+    gap: 32px;
+  }
+  .band,
+  .bandDark,
+  .bandMap {
+    border-radius: 20px;
+  }
+  .centerHead {
+    align-items: flex-start;
+    text-align: left;
+    gap: 16px;
+  }
+  .headCol,
+  .watchCopy {
+    gap: 16px;
+  }
+  .h2 {
+    font-size: clamp(30px, 8.6vw, 36px);
+    letter-spacing: -0.032em;
+    line-height: 1.05;
+  }
+  .lede,
+  .ledeDark,
+  .problemCopy {
+    font-size: 16px;
+    line-height: 1.55;
+  }
+  .problemCopy .problemPunch {
+    font-size: 18px;
+    line-height: 1.4;
+  }
+  .splitHead {
+    gap: 16px;
+  }
+
+  /* 02 */
+  .pipe {
+    border-radius: 20px;
+  }
+  .pipeIn {
+    padding: 16px 14px 0;
+  }
+  .streamMask {
+    height: 300px;
+  }
+  .pipeLayer {
+    min-height: 0;
+    padding: 28px 20px;
+  }
+  .filterList {
+    max-width: 260px;
+  }
+  .pipeOut {
+    padding: 16px 14px;
+  }
+  .surfacedAction,
+  .surfacedReview {
+    padding: 14px;
+  }
+
+  /* 03: name and discovery stacked, confirmation on the right */
+  .discoverGrid {
+    gap: 10px;
+  }
+  .discoverHead,
+  .discoverRow {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px 12px;
+    padding: 12px 14px;
+  }
+  .discoverHead > span:nth-child(2) {
+    display: none;
+  }
+  .discoverRow > :nth-child(2) {
+    grid-row: 2;
+    grid-column: 1;
+    padding-left: 36px;
+    font-size: 11.5px;
+  }
+  .discoverRow > :nth-child(3) {
+    grid-row: 1 / span 2;
+    grid-column: 2;
+    white-space: nowrap;
+  }
+  .discoverFoot {
+    padding: 12px 14px;
+  }
+
+  /* 04 */
+  .splitSection {
+    gap: 32px;
+  }
+  .triStats {
+    max-width: none;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .triStats > div {
+    flex-direction: row;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 16px;
+  }
+  .triStats > div > span:first-child {
+    min-width: 30px;
+    font-size: 32px;
+  }
+  .triStats > div > span:last-child {
+    font-size: 14px;
+  }
+  .treeCard {
+    padding: 14px;
+    border-radius: 20px;
+  }
+  .treeRoot {
+    gap: 12px;
+    padding: 14px;
+  }
+  .treeRootName {
+    font-size: 18px;
+  }
+  .treeRoot {
+    flex-wrap: wrap;
+    row-gap: 10px;
+  }
+  .treeRoot .rowText {
+    flex-basis: calc(100% - 62px);
+  }
+  .treeRoot .sourcesPill {
+    margin-left: 62px;
+  }
+  .treeBranches {
+    margin-left: 20px;
+  }
+  .branch {
+    grid-template-columns: 16px minmax(0, 1fr);
+  }
+  .branchLines span:last-child {
+    width: 16px;
+  }
+  .branchCard {
+    grid-template-columns: 28px minmax(0, 1fr) auto;
+    gap: 2px 10px;
+    padding: 10px 12px;
+  }
+  .branchIcon {
+    width: 28px;
+    height: 28px;
+  }
+  .branchLabel {
+    font-size: 13.5px;
+  }
+
+  /* 05: full titles, level and time on their own line */
+  .inbox {
+    border-radius: 18px;
+  }
+  .inboxBar {
+    padding: 12px 14px;
+  }
+  .inboxRow {
+    grid-template-columns: 28px auto minmax(0, 1fr);
+    grid-template-areas:
+      "mark title title"
+      "mark sub sub"
+      "mark pill time";
+    gap: 3px 10px;
+    align-items: start;
+  }
+  .inboxRowMark {
+    grid-area: mark;
+  }
+  .inboxRowTitle {
+    grid-area: title;
+    white-space: normal;
+    line-height: 1.3;
+  }
+  .inboxRowSub {
+    grid-area: sub;
+  }
+  .inboxRow .levelPill {
+    grid-area: pill;
+    margin-top: 5px;
+    justify-self: start;
+  }
+  .inboxRowTime {
+    grid-area: time;
+    align-self: end;
+  }
+  .inboxDetail {
+    gap: 16px;
+    padding: 18px 16px;
+  }
+  .detailTitle {
+    font-size: 20px;
+  }
+  .kvRow {
+    font-size: 13.5px;
+  }
+
+  /* 06 */
+  .compareArrow {
+    min-width: 0;
+  }
+
+  /* 08 */
+  .quiet {
+    padding: 88px 20px 72px;
+    gap: 28px;
+  }
+  .h2Quiet {
+    font-size: clamp(32px, 9vw, 38px);
+    letter-spacing: -0.035em;
+    line-height: 1.05;
+  }
+  .quietCopy {
+    font-size: 16px;
+  }
+  .quietStatus {
+    gap: 16px;
+    padding-top: 8px;
+  }
+  .quietStats {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .quietStats > div {
+    align-items: flex-start;
+    gap: 4px;
+    padding: 14px;
+    border-radius: 14px;
+    background: #ffffff;
+    box-shadow: 0 0 0 1px rgba(14, 27, 46, 0.07);
+    text-align: left;
+  }
+  .quietStats > div > span:first-child {
+    font-size: 22px;
+  }
+
+  /* 09 */
+  .coverageSection {
+    padding: 0 20px 64px;
+    gap: 28px;
+  }
+  .catalog {
+    border-radius: 18px;
+  }
+  .catalogTabs {
+    padding: 10px;
+  }
+  .catalogTab {
+    min-height: 34px;
+    font-size: 13.5px;
+  }
+  .catalogHead,
+  .catalogRow {
+    padding: 10px 16px;
+  }
+  .disclaimer {
+    font-size: 12px;
+    line-height: 1.55;
+  }
+
+  /* 10 */
+  .finalInner {
+    padding: 72px 20px 44px;
+    gap: 20px;
+  }
+  .h2Final {
+    font-size: clamp(34px, 9.6vw, 42px);
+    letter-spacing: -0.035em;
+    line-height: 1.03;
+  }
+  .footer {
+    padding: 28px 22px 30px;
+  }
+}
+@media (max-width: 420px) {
+  .urlPrefix,
+  .urlPrefixDark {
+    display: none;
+  }
+  .urlField input,
+  .urlFieldDark input {
+    padding-left: 10px;
+  }
+}

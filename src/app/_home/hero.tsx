@@ -89,7 +89,8 @@ export function focusHeroInput() {
 export function HeaderCta() {
   return (
     <button type="button" className={s.navCta} onClick={focusHeroInput}>
-      Analyze your company
+      <span className={s.navCtaLong}>Analyze your company</span>
+      <span className={s.navCtaShort}>Analyze</span>
     </button>
   );
 }
@@ -352,10 +353,13 @@ export function HeroAnalyzer() {
         </div>
 
         <div className={s.panelBody}>
-          {/* Invisible fully expanded demo reserves the panel's height so the page below never shifts. */}
-          <div aria-hidden="true" inert className={s.panelGhost}>
-            <IdleDemo dt={15} dPhase={2} />
-          </div>
+          {/* Invisible, fully expanded copies of each demo phase share one grid cell, so the panel
+              always reserves the tallest phase and the page below never shifts. */}
+          {[0, 1, 2].map((phase) => (
+            <div key={phase} aria-hidden="true" inert className={s.panelGhost}>
+              <IdleDemo dt={15} dPhase={phase} />
+            </div>
+          ))}
           <div aria-live="polite" className={s.panelLayer}>
             {stage === "idle" ? <IdleDemo dt={dt} dPhase={dPhase} /> : null}
 
@@ -550,7 +554,9 @@ export function HeroAnalyzer() {
                   <div className={s.statCol}>
                     <span className={s.eyebrowBlue}>YOUR COVERAGE</span>
                     <span className={s.bigNum}>{selected.length}</span>
-                    <span className={s.statLabel}>dependencies</span>
+                    <span className={s.statLabel}>
+                      {selected.length === 1 ? "dependency" : "dependencies"}
+                    </span>
                   </div>
                   <div className={s.statCol}>
                     <span className={s.bigNum}>{selectedSources.length}</span>
@@ -593,7 +599,10 @@ export function HeroAnalyzer() {
                       );
                     })}
                     {selected.length > 2 ? (
-                      <span className={s.treeMore}>+ {selected.length - 2} more dependencies</span>
+                      <span className={s.treeMore}>
+                        + {selected.length - 2} more{" "}
+                        {selected.length === 3 ? "dependency" : "dependencies"}
+                      </span>
                     ) : null}
                   </div>
                 </div>

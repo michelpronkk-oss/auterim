@@ -86,7 +86,7 @@ export function ChangeInbox() {
               <div
                 key={r.p}
                 className={s.inboxCollapse}
-                style={{ maxHeight: hidden ? 0 : 90, opacity: hidden ? 0 : i === 2 ? 0.75 : 1 }}
+                style={{ maxHeight: hidden ? 0 : 160, opacity: hidden ? 0 : i === 2 ? 0.75 : 1 }}
               >
                 <button
                   type="button"
