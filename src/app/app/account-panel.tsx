@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { z } from "zod";
 import type { Session } from "@supabase/supabase-js";
@@ -16,6 +16,14 @@ import {
   canonicalizePublicWebsiteUrl,
   WebsiteUrlInputError,
 } from "@/lib/discovery/normalize-website-url";
+import {
+  createRequestSequence,
+  onboardingStepIndex,
+  onboardingReadModelSchema,
+  resolveOnboardingStep,
+  summarizeCandidateEvidence,
+  type OnboardingReadModel,
+} from "@/lib/onboarding/client-state";
 
 const accountSchema = z
   .object({
@@ -96,69 +104,6 @@ function createInitialSetupForm(websiteUrl: string) {
     return { workspaceName: "", companyName: "", websiteUrl: "" };
   }
 }
-
-const candidateSchema = z.object({
-  candidateId: z.string().uuid(),
-  dependencyId: z.string().uuid(),
-  providerName: z.string(),
-  category: z.string(),
-  confidence: z.number(),
-  confidenceLabel: z.string(),
-  evidenceSummary: z.string(),
-  suggestedStatus: z.enum(["candidate", "confirmed", "rejected"]),
-});
-const dependencySchema = z.object({
-  workspaceDependencyId: z.string().uuid(),
-  dependencyId: z.string().uuid(),
-  providerName: z.string(),
-  category: z.string(),
-  origin: z.string(),
-  criticality: z.enum(["critical", "important", "normal"]),
-  productionCritical: z.boolean(),
-  usedFor: z.array(z.string()),
-  contextNote: z.string(),
-  usageMetadata: z.record(z.string(), z.unknown()),
-});
-const onboardingReadModelSchema = z
-  .object({
-    currentStep: z.string(),
-    company: z.object({
-      id: z.string().uuid(),
-      name: z.string(),
-      websiteUrl: z.string().nullable(),
-    }),
-    discovery: z.object({
-      status: z.enum(["running", "completed", "failed"]).nullable(),
-      candidates: z.array(candidateSchema),
-    }),
-    confirmedDependencies: z.array(dependencySchema),
-    completion: z.object({
-      dependencyReview: z.boolean(),
-      context: z.boolean(),
-      notifications: z.boolean(),
-    }),
-    notificationPreferences: z
-      .object({
-        importantChanges: z.enum(["daily_digest", "instant", "off"]),
-        informational: z.enum(["off", "digest"]),
-        monthlyProtectionReport: z.boolean(),
-      })
-      .nullable(),
-    coveragePreview: z.object({
-      dependenciesConfirmed: z.number(),
-      authoritativeSourcesAvailable: z.number(),
-      criticalDependencies: z.number(),
-      sourcesByType: z.record(z.string(), z.number()),
-    }),
-    activation: z
-      .object({
-        activatedAt: z.string(),
-        baselineStatus: z.enum(["ready", "in_progress", "partial"]),
-      })
-      .nullable(),
-  })
-  .passthrough();
-type OnboardingReadModel = z.infer<typeof onboardingReadModelSchema>;
 
 const usageOptions = [
   "customer-facing product",
@@ -261,12 +206,7 @@ function FirstWorkspaceOnboarding({
   }, [api, catalogQuery, onboarding, workspaceId]);
 
   useEffect(() => {
-    if (
-      !onboarding ||
-      !["company_created", "discovery_running"].includes(onboarding.currentStep) ||
-      !workspaceId
-    )
-      return;
+    if (!onboarding || resolveOnboardingStep(onboarding) !== "discovery" || !workspaceId) return;
     let cancelled = false;
     const timer = window.setInterval(() => {
       if (!cancelled) void refresh(session.access_token, workspaceId).catch(() => undefined);
@@ -331,6 +271,7 @@ function FirstWorkspaceOnboarding({
           state: z.string().optional(),
         })
         .parse(result);
+      window.localStorage.setItem("auterim-workspace-id", started.workspaceId);
       setSetupForm((current) => ({ ...current, websiteUrl }));
       try {
         await refresh(session.access_token, started.workspaceId);
@@ -441,25 +382,17 @@ function FirstWorkspaceOnboarding({
       </div>
     );
 
-  const stepIndex = onboarding.activation
-    ? 3
-    : ["company_created", "discovery_running", "dependencies_review"].includes(
-          onboarding.currentStep,
-        )
-      ? 1
-      : ["context_setup", "notifications_setup"].includes(onboarding.currentStep)
-        ? 2
-        : 3;
-  const canReview =
-    !["company_created", "discovery_running"].includes(onboarding.currentStep) ||
-    onboarding.discovery.status !== null;
-  const incomplete = !onboarding.completion.dependencyReview
-    ? "dependencies_review"
-    : !onboarding.completion.context
-      ? "context_setup"
-      : !onboarding.completion.notifications
-        ? "notifications_setup"
-        : "activation";
+  const onboardingStep = resolveOnboardingStep(onboarding);
+  const stepIndex = onboardingStepIndex(onboardingStep);
+  const canReview = onboardingStep !== "discovery" || onboarding.discovery.status !== null;
+  const incomplete =
+    onboardingStep === "dependencies"
+      ? "dependencies_review"
+      : onboardingStep === "context"
+        ? "context_setup"
+        : onboardingStep === "notifications"
+          ? "notifications_setup"
+          : "activation";
   const discoverySettled =
     onboarding.discovery.status === "completed" || onboarding.discovery.status === "failed";
   const unresolvedCandidates = onboarding.discovery.candidates.filter(
@@ -551,10 +484,7 @@ function FirstWorkspaceOnboarding({
     }, "Protection is active.");
   }
 
-  if (
-    ["company_created", "discovery_running"].includes(onboarding.currentStep) &&
-    (onboarding.discovery.status === null || onboarding.discovery.status === "running")
-  )
+  if (onboardingStep === "discovery")
     return (
       <main className="first-workspace onboarding-scan-shell">
         <p className="eyebrow">STEP 2 OF 4 · DISCOVERING DEPENDENCIES</p>
@@ -584,17 +514,21 @@ function FirstWorkspaceOnboarding({
           )}
           <div className="onboarding-activation">
             <p>You can leave and resume setup at any time.</p>
-            {onboarding.currentStep === "company_created" && canManageWorkspace && (
-              <button type="button" disabled={busy} onClick={() => void retryDiscovery()}>
-                {busy ? "Starting scan…" : "Start public discovery"}{" "}
-                <span aria-hidden="true">→</span>
-              </button>
-            )}
-            {onboarding.currentStep === "company_created" && !canManageWorkspace && (
-              <p className="onboarding-status" role="status">
-                Ask a workspace owner or admin to start the public scan.
-              </p>
-            )}
+            {onboarding.currentStep === "company_created" &&
+              onboarding.discovery.status === null &&
+              canManageWorkspace && (
+                <button type="button" disabled={busy} onClick={() => void retryDiscovery()}>
+                  {busy ? "Starting scan…" : "Start public discovery"}{" "}
+                  <span aria-hidden="true">→</span>
+                </button>
+              )}
+            {onboarding.currentStep === "company_created" &&
+              onboarding.discovery.status === null &&
+              !canManageWorkspace && (
+                <p className="onboarding-status" role="status">
+                  Ask a workspace owner or admin to start the public scan.
+                </p>
+              )}
           </div>
         </section>
       </main>
@@ -646,7 +580,7 @@ function FirstWorkspaceOnboarding({
                   <article className="onboarding-candidate" key={candidate.candidateId}>
                     <div>
                       <h3>{candidate.providerName}</h3>
-                      <p>{candidate.evidenceSummary}</p>
+                      <p>{summarizeCandidateEvidence(candidate.evidenceSummary)}</p>
                       <div className="onboarding-candidate-meta">
                         <span>{candidate.category}</span>
                         <span>{candidate.confidenceLabel} confidence</span>
@@ -718,7 +652,7 @@ function FirstWorkspaceOnboarding({
               <article className="onboarding-candidate" key={candidate.candidateId}>
                 <div>
                   <h3>{candidate.providerName}</h3>
-                  <p>{candidate.evidenceSummary}</p>
+                  <p>{summarizeCandidateEvidence(candidate.evidenceSummary)}</p>
                   <div className="onboarding-candidate-meta">
                     <span>{candidate.category}</span>
                     <span>{candidate.confidenceLabel} confidence</span>
@@ -1120,6 +1054,9 @@ export function AccountPanel({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [setupForm, setSetupForm] = useState(() => createInitialSetupForm(initialWebsiteUrl));
+  const loadSequence = useRef(createRequestSequence());
+  const authEventReceived = useRef(false);
+  const currentUserId = useRef<string | null>(null);
 
   const api = useCallback(
     async (path: string, init?: RequestInit) => {
@@ -1141,76 +1078,113 @@ export function AccountPanel({
   );
 
   const load = useCallback(async (token: string, selected?: string) => {
-    const headers = { authorization: `Bearer ${token}` };
-    const listResponse = await fetchAccountWithTimeout("/api/account/status", { headers });
-    const listBody = await listResponse.json();
-    if (!listResponse.ok) throw new Error("Could not load your workspaces.");
-    const membershipOptions = z
-      .array(z.object({ workspace_id: z.string().uuid(), role: z.string() }))
-      .parse(listBody.workspaces ?? []);
-    const options = await Promise.all(
-      membershipOptions.map(async (item) => {
-        try {
-          const workspaceResponse = await fetchAccountWithTimeout(
-            `/api/account/status?workspaceId=${encodeURIComponent(item.workspace_id)}`,
-            { headers },
+    const request = loadSequence.current.begin();
+    const isCurrent = () => loadSequence.current.isCurrent(request);
+    try {
+      const headers = { authorization: `Bearer ${token}` };
+      const listResponse = await fetchAccountWithTimeout("/api/account/status", { headers });
+      const listBody = await listResponse.json();
+      if (!isCurrent()) return;
+      if (!listResponse.ok) throw new Error("Could not load your workspaces.");
+      const membershipOptions = z
+        .array(z.object({ workspace_id: z.string().uuid(), role: z.string() }))
+        .parse(listBody.workspaces ?? []);
+      const options = await Promise.all(
+        membershipOptions.map(async (item) => {
+          try {
+            const workspaceResponse = await fetchAccountWithTimeout(
+              `/api/account/status?workspaceId=${encodeURIComponent(item.workspace_id)}`,
+              { headers },
+            );
+            const workspaceBody = await workspaceResponse.json();
+            return {
+              ...item,
+              name: accountSchema.parse(workspaceBody).onboarding.company.name,
+            };
+          } catch {
+            return { ...item, name: "Workspace" };
+          }
+        }),
+      );
+      if (!isCurrent()) return;
+      if (!options.length) {
+        setWorkspaces([]);
+        setWorkspaceId("");
+        setAccount(null);
+        setLoadError(false);
+        return;
+      }
+      const stored = selected ?? window.localStorage.getItem("auterim-workspace-id");
+      const target = options.some((item) => item.workspace_id === stored)
+        ? stored!
+        : options[0]!.workspace_id;
+      const response = await fetchAccountWithTimeout(
+        `/api/account/status?workspaceId=${encodeURIComponent(target)}`,
+        { headers },
+      );
+      const body = await response.json();
+      if (!isCurrent()) return;
+      if (!response.ok) throw new Error("Could not load workspace protection.");
+      const nextAccount = accountSchema.parse(body);
+      if (!nextAccount.onboarding.activation) {
+        const parsedOnboarding = onboardingReadModelSchema.safeParse(nextAccount.onboarding);
+        if (!parsedOnboarding.success) {
+          throw new Error(
+            "Workspace setup could not be verified. Your saved progress is preserved.",
           );
-          const workspaceBody = await workspaceResponse.json();
-          return {
-            ...item,
-            name: accountSchema.parse(workspaceBody).onboarding.company.name,
-          };
-        } catch {
-          return { ...item, name: "Workspace" };
         }
-      }),
-    );
-    setWorkspaces(options);
-    if (!options.length) {
-      setWorkspaceId("");
-      setAccount(null);
+      }
+      if (!isCurrent()) return;
+      setWorkspaces(options);
+      setWorkspaceId(target);
+      setAccount(nextAccount);
+      window.localStorage.setItem("auterim-workspace-id", target);
+      window.localStorage.removeItem("auterim-onboarding-idempotency-key");
       setLoadError(false);
-      return;
+    } catch (error) {
+      if (!isCurrent()) return;
+      throw error;
     }
-    const stored = selected ?? window.localStorage.getItem("auterim-workspace-id");
-    const target = options.some((item) => item.workspace_id === stored)
-      ? stored!
-      : options[0]!.workspace_id;
-    const response = await fetchAccountWithTimeout(
-      `/api/account/status?workspaceId=${encodeURIComponent(target)}`,
-      {
-        headers,
-      },
-    );
-    const body = await response.json();
-    if (!response.ok) throw new Error("Could not load workspace protection.");
-    setWorkspaceId(target);
-    window.localStorage.setItem("auterim-workspace-id", target);
-    setAccount(accountSchema.parse(body));
-    window.localStorage.removeItem("auterim-onboarding-idempotency-key");
-    setLoadError(false);
   }, []);
 
   useEffect(() => {
     const client = createSupabaseBrowserClient();
     void withAccountTimeout(client.auth.getSession())
       .then(({ data }) => {
+        if (authEventReceived.current) return;
+        currentUserId.current = data.session?.user.id ?? null;
         setSession(data.session);
         if (data.session) return load(data.session.access_token);
       })
       .catch(() => {
-        setLoadError(true);
-        setMessage("Could not check your sign-in state.");
+        if (!authEventReceived.current) {
+          setLoadError(true);
+          setMessage("Could not check your sign-in state.");
+        }
       })
       .finally(() => setLoading(false));
     const { data: listener } = client.auth.onAuthStateChange((_event, nextSession) => {
+      authEventReceived.current = true;
+      const nextUserId = nextSession?.user.id ?? null;
+      if (currentUserId.current !== nextUserId) {
+        loadSequence.current.invalidate();
+        setAccount(null);
+        setWorkspaces([]);
+        setWorkspaceId("");
+      }
+      currentUserId.current = nextUserId;
       setSession(nextSession);
-      setAccount(null);
       if (nextSession)
         void load(nextSession.access_token).catch(() => {
-          setLoadError(true);
-          setMessage("Could not load your workspace.");
+          if (currentUserId.current === nextSession.user.id) {
+            setLoadError(true);
+            setMessage("Could not load your workspace.");
+          }
         });
+      else {
+        loadSequence.current.invalidate();
+        setLoadError(false);
+      }
     });
     return () => listener.subscription.unsubscribe();
   }, [load]);
@@ -1218,6 +1192,8 @@ export function AccountPanel({
   async function signOut() {
     setBusy(true);
     await createSupabaseBrowserClient().auth.signOut();
+    loadSequence.current.invalidate();
+    currentUserId.current = null;
     window.localStorage.removeItem("auterim-workspace-id");
     setSession(null);
     setAccount(null);
