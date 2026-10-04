@@ -1563,6 +1563,14 @@ describe("Auterim migration and monitoring transaction", () => {
       "select * from public.claim_growth_search_console_oauth_state(repeat('a',64),repeat('b',64))",
     );
     expect(replay.rows).toHaveLength(0);
+    await db.query(
+      "insert into public.growth_search_console_oauth_states(state_hash,actor_user_id,browser_hash,verifier_ciphertext,verifier_nonce,verifier_authentication_tag,verifier_key_version,actor_token_ciphertext,actor_token_nonce,actor_token_authentication_tag,actor_token_key_version,expires_at) values(repeat('f',64),$1,repeat('e',64),'cipher','nonce','tag',1,'actor','nonce','tag',1,now()-interval '1 second')",
+      [userId],
+    );
+    const expiredOAuthClaim = await db.query(
+      "select * from public.claim_growth_search_console_oauth_state(repeat('f',64),repeat('e',64))",
+    );
+    expect(expiredOAuthClaim.rows).toHaveLength(0);
     const firstSyncClaim = await db.query<{ acquired: boolean }>(
       "select acquired from public.claim_growth_search_console_sync('m14-sync-test','2026-09-01','2026-09-30',$1)",
       ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],

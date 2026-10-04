@@ -73,6 +73,42 @@ export type SearchMetric = {
   queryTopicMatch?: boolean;
 };
 
+export function selectNewestSearchMetricVersionPerDateAndPage<
+  T extends {
+    metricDate: string;
+    pageUrl: string;
+    queryFingerprintKeyVersion: number;
+  },
+>(metrics: T[]): T[] {
+  const newestVersion = new Map<string, number>();
+  const pageKey = (metric: T) => {
+    const page = canonicalSearchPage(metric.pageUrl);
+    return page ? `${metric.metricDate}\n${page.path}` : null;
+  };
+  for (const metric of metrics) {
+    const key = pageKey(metric);
+    if (
+      !key ||
+      !Number.isInteger(metric.queryFingerprintKeyVersion) ||
+      metric.queryFingerprintKeyVersion < 1
+    )
+      continue;
+    newestVersion.set(
+      key,
+      Math.max(newestVersion.get(key) ?? 0, metric.queryFingerprintKeyVersion),
+    );
+  }
+  return metrics.filter((metric) => {
+    const key = pageKey(metric);
+    return (
+      key !== null &&
+      Number.isInteger(metric.queryFingerprintKeyVersion) &&
+      metric.queryFingerprintKeyVersion > 0 &&
+      newestVersion.get(key) === metric.queryFingerprintKeyVersion
+    );
+  });
+}
+
 export type GrowthFeedbackCandidate = {
   type: GrowthFeedbackOpportunityType;
   canonicalPath: string | null;

@@ -6,6 +6,7 @@ import {
   evaluateSearchMetrics,
   evaluateProductEntryFeedback,
   didHitSearchAnalyticsPageCap,
+  selectNewestSearchMetricVersionPerDateAndPage,
   GROWTH_FEEDBACK_RULES_VERSION,
   SEARCH_ANALYTICS_MAX_PAGES,
   SEARCH_ANALYTICS_PAGE_SIZE,
@@ -201,7 +202,15 @@ export async function evaluateGrowthFeedback(now = new Date()) {
     if (rows.length < 1000) break;
     if (offset === 9000) partialMetrics = true;
   }
-  const metrics: SearchMetric[] = rawMetrics.map((row) => ({
+  const versionedMetrics = selectNewestSearchMetricVersionPerDateAndPage(
+    rawMetrics.map((row) => ({
+      source: row,
+      metricDate: row.metric_date,
+      pageUrl: row.page_url,
+      queryFingerprintKeyVersion: row.query_fingerprint_key_version,
+    })),
+  );
+  const metrics: SearchMetric[] = versionedMetrics.map(({ source: row }) => ({
     metricDate: row.metric_date,
     query: `${row.query_fingerprint}:${row.query_fingerprint_key_version}`,
     queryTopicMatch: row.query_topic_match,

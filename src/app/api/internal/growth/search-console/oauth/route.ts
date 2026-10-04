@@ -43,18 +43,20 @@ export async function GET(request: Request) {
       expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
     });
     if (error) return Response.json({ error: "search_console_unavailable" }, { status: 503 });
-    const response = Response.redirect(
-      searchConsoleAuthorizationUrl({ state: binding.state, challenge: binding.challenge }),
-      302,
-    );
+    const authorizationUrl = searchConsoleAuthorizationUrl({
+      state: binding.state,
+      challenge: binding.challenge,
+    });
     const secure =
       new URL(getEnvironment().NEXT_PUBLIC_APP_URL).protocol === "https:" ? " Secure;" : "";
-    response.headers.append(
-      "set-cookie",
-      `auterim_gsc_state=${binding.browserSecret}; Path=/api/internal/growth/search-console/callback; Max-Age=300; HttpOnly; SameSite=Lax;${secure}`,
-    );
-    response.headers.set("cache-control", "no-store");
-    return response;
+    return new Response(null, {
+      status: 302,
+      headers: {
+        location: authorizationUrl,
+        "set-cookie": `auterim_gsc_state=${binding.browserSecret}; Path=/api/internal/growth/search-console/callback; Max-Age=300; HttpOnly; SameSite=Lax;${secure}`,
+        "cache-control": "no-store",
+      },
+    });
   } catch {
     return Response.json({ error: "search_console_unavailable" }, { status: 503 });
   }

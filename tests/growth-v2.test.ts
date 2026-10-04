@@ -9,6 +9,7 @@ import {
   growthFeedbackOpportunityTypes,
   hasOnlySearchConsoleReadScope,
   hasSearchConsolePropertyAccess,
+  selectNewestSearchMetricVersionPerDateAndPage,
   isAllowedVerifiedGrowthAdmin,
 } from "@/lib/growth-v2/contract";
 
@@ -21,6 +22,27 @@ describe("Growth Engine V2 Search Console feedback rules", () => {
     expect(didHitSearchAnalyticsPageCap(4, 1000)).toBe(true);
     expect(didHitSearchAnalyticsPageCap(4, 999)).toBe(false);
     expect(didHitSearchAnalyticsPageCap(3, 1000)).toBe(false);
+  });
+
+  it("selects the newest fingerprint-key namespace for overlapping page dates", () => {
+    const versionOne = {
+      metricDate: currentDay,
+      pageUrl: article,
+      queryFingerprintKeyVersion: 1,
+      queryFingerprint: "a".repeat(64),
+      impressions: 100,
+    };
+    const versionTwo = {
+      ...versionOne,
+      queryFingerprintKeyVersion: 2,
+      queryFingerprint: "b".repeat(64),
+      impressions: 110,
+    };
+    const olderDate = { ...versionOne, metricDate: "2026-08-01" };
+
+    expect(
+      selectNewestSearchMetricVersionPerDateAndPage([versionOne, versionTwo, olderDate]),
+    ).toEqual([versionTwo, olderDate]);
   });
 
   it("accepts only the exact least-privilege Search Console scope", () => {

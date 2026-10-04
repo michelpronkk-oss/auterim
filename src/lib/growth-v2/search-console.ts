@@ -18,6 +18,8 @@ import type { SearchMetric } from "./contract";
 
 export const SEARCH_CONSOLE_PROPERTY = "sc-domain:auterim.com" as const;
 export const SEARCH_CONSOLE_READ_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
+export const SEARCH_ANALYTICS_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+const SEARCH_CONSOLE_JSON_MAX_RESPONSE_BYTES = 1024 * 1024;
 const credentialAad = connectorCredentialAad(
   "internal",
   "google-search-console",
@@ -176,13 +178,56 @@ export function decryptOAuthVerifier(input: {
   );
 }
 
-function safeJson(response: Response) {
+async function safeJson(response: Response, maxBytes = SEARCH_CONSOLE_JSON_MAX_RESPONSE_BYTES) {
   if (response.status === 429) throw new SearchConsoleError("rate_limited", true);
   if (response.status === 401 || response.status === 403)
     throw new SearchConsoleError("reauth_required", false);
   if (response.status >= 500) throw new SearchConsoleError("provider_unavailable", true);
   if (!response.ok) throw new SearchConsoleError("invalid_response", false);
-  return response.json() as Promise<Record<string, unknown>>;
+  return readBoundedSearchConsoleJson(response, maxBytes);
+}
+
+export async function readBoundedSearchConsoleJson(response: Response, maxBytes: number) {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new SearchConsoleError("invalid_response", false);
+  }
+  const reader = response.body?.getReader();
+  if (!reader) throw new SearchConsoleError("invalid_response", false);
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new SearchConsoleError("invalid_response", false);
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    if (error instanceof SearchConsoleError) throw error;
+    throw new SearchConsoleError("invalid_response", false);
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as Record<
+      string,
+      unknown
+    >;
+  } catch {
+    throw new SearchConsoleError("invalid_response", false);
+  }
 }
 
 async function boundedFetch(url: string, init: RequestInit) {
@@ -412,7 +457,7 @@ export async function searchAnalyticsPage(input: {
       dataState: "final",
     }),
   });
-  const result = await safeJson(response);
+  const result = await safeJson(response, SEARCH_ANALYTICS_MAX_RESPONSE_BYTES);
   const rows = Array.isArray(result.rows) ? result.rows : [];
   return rows.flatMap((value): SearchMetric[] => {
     if (!value || typeof value !== "object") return [];
