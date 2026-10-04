@@ -213,15 +213,27 @@ describe("Search Console OAuth configuration", () => {
       authorization: "Bearer access-token-fixture",
     });
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response("{}", { status: 403 })),
-    );
-    await expect(verifySearchConsoleProperty("access-token-fixture")).rejects.toBeInstanceOf(
-      SearchConsolePropertyError,
-    );
-    await expect(verifySearchConsoleProperty("access-token-fixture")).rejects.toMatchObject({
-      category: "PROPERTY_ACCESS_DENIED",
-    });
+    const forbiddenReasons = [
+      ["accessNotConfigured", "API_NOT_CONFIGURED"],
+      ["serviceDisabled", "API_DISABLED"],
+      ["insufficientScope", "INSUFFICIENT_SCOPE"],
+      ["insufficientPermissions", "PROPERTY_ACCESS_DENIED"],
+      ["quotaExceeded", "QUOTA_OR_SERVICE_BLOCKED"],
+      ["forbidden", "GOOGLE_FORBIDDEN_OTHER"],
+    ] as const;
+    for (const [reason, category] of forbiddenReasons) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          Response.json({ error: { errors: [{ reason }], code: 403 } }, { status: 403 }),
+        ),
+      );
+      await expect(verifySearchConsoleProperty("access-token-fixture")).rejects.toBeInstanceOf(
+        SearchConsolePropertyError,
+      );
+      await expect(verifySearchConsoleProperty("access-token-fixture")).rejects.toMatchObject({
+        category,
+      });
+    }
   });
 });

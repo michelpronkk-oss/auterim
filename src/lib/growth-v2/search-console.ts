@@ -58,9 +58,14 @@ export class SearchConsoleOAuthExchangeError extends Error {
 export class SearchConsolePropertyError extends Error {
   constructor(
     readonly category:
+      | "API_NOT_CONFIGURED"
+      | "API_DISABLED"
+      | "INSUFFICIENT_SCOPE"
+      | "QUOTA_OR_SERVICE_BLOCKED"
       | "PROPERTY_ACCESS_DENIED"
       | "PROPERTY_NOT_FOUND"
       | "PROPERTY_VALIDATION_FAILED"
+      | "GOOGLE_FORBIDDEN_OTHER"
       | "GOOGLE_API_ERROR",
   ) {
     super(category);
@@ -166,7 +171,8 @@ export async function verifySearchConsoleProperty(accessToken: string) {
   const url = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(SEARCH_CONSOLE_PROPERTY)}`;
   const response = await boundedFetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
   if (response.status === 404) throw new SearchConsolePropertyError("PROPERTY_NOT_FOUND");
-  if (response.status === 403) throw new SearchConsolePropertyError("PROPERTY_ACCESS_DENIED");
+  if (response.status === 403)
+    throw new SearchConsolePropertyError(await classifyGoogleForbidden(response));
   if (response.status >= 500 || response.status === 429)
     throw new SearchConsolePropertyError("GOOGLE_API_ERROR");
   if (!response.ok) throw new SearchConsolePropertyError("PROPERTY_VALIDATION_FAILED");
@@ -178,6 +184,54 @@ export async function verifySearchConsoleProperty(accessToken: string) {
   }
   if (!hasSearchConsolePropertyAccess(site))
     throw new SearchConsolePropertyError("PROPERTY_ACCESS_DENIED");
+}
+
+async function classifyGoogleForbidden(response: Response) {
+  const payload: Record<string, unknown> = await readBoundedSearchConsoleJson(
+    response,
+    64 * 1024,
+  ).catch(() => ({}));
+  const rootError = payload.error;
+  if (!rootError || typeof rootError !== "object") return "GOOGLE_FORBIDDEN_OTHER" as const;
+  const error = rootError as Record<string, unknown>;
+  const details = Array.isArray(error.errors) ? error.errors : [];
+  const detailReasons = details.flatMap((detail) =>
+    detail &&
+    typeof detail === "object" &&
+    typeof (detail as Record<string, unknown>).reason === "string"
+      ? [((detail as Record<string, unknown>).reason as string).toLowerCase()]
+      : [],
+  );
+  const reasons = [
+    ...detailReasons,
+    ...(typeof error.status === "string" ? [error.status.toLowerCase()] : []),
+  ];
+  if (reasons.some((reason) => reason === "accessnotconfigured")) return "API_NOT_CONFIGURED";
+  if (reasons.some((reason) => reason === "servicedisabled" || reason === "service_disabled"))
+    return "API_DISABLED";
+  if (
+    reasons.some((reason) =>
+      ["insufficientscope", "insufficient_scope", "access_token_scope_insufficient"].includes(
+        reason,
+      ),
+    )
+  )
+    return "INSUFFICIENT_SCOPE";
+  if (
+    reasons.some((reason) =>
+      [
+        "dailylimitexceeded",
+        "quotaexceeded",
+        "ratelimitexceeded",
+        "userratelimitexceeded",
+        "concurrentlimitexceeded",
+      ].includes(reason),
+    )
+  )
+    return "QUOTA_OR_SERVICE_BLOCKED";
+  if (reasons.some((reason) => reason === "insufficientpermissions"))
+    return "PROPERTY_ACCESS_DENIED";
+  return "GOOGLE_FORBIDDEN_OTHER";
 }
 
 export function decryptOAuthActorToken(input: {
