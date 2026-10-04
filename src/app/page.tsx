@@ -71,14 +71,11 @@ export default function Home() {
                 <span>DEPENDENCY INTELLIGENCE</span>
               </span>
               <h1 id="hero-title" className={s.h1}>
-                Know when what your business{" "}
-                <span className={s.h1Keep}>
-                  depends on <span className={s.h1Accent}>changes.</span>
-                </span>
+                Know when your stack <span className={s.h1Accent}>changes.</span>
               </h1>
               <p className={s.heroLede}>
-                Auterim watches the software and APIs your business runs on, and speaks up only when
-                a change matters.
+                Auterim watches every API, price and policy you rely on. You only hear about what
+                matters.
               </p>
               <HeroAnalyzer />
             </div>
@@ -91,13 +88,13 @@ export default function Home() {
             <div className={s.headCol}>
               <span className={s.eyebrow}>02 · THE PROBLEM</span>
               <h2 id="problem-title" className={s.h2}>
-                Your stack never stands still.
+                Nothing stands still.
               </h2>
             </div>
             <div className={s.problemCopy}>
               <p>
-                APIs change. Prices move. Limits tighten. Most of it doesn&apos;t matter.{" "}
-                <strong>Some of it does.</strong>
+                APIs break. Prices jump. Limits shrink. Most of it is noise.{" "}
+                <strong>Some of it costs you.</strong>
               </p>
               <p className={s.problemPunch}>Auterim tells you which.</p>
             </div>
@@ -179,12 +176,9 @@ export default function Home() {
             <div data-reveal className={s.centerHead}>
               <span className={s.eyebrow}>03 · DISCOVER</span>
               <h2 id="discover-title" className={s.h2}>
-                Start with your company.
+                Start with your domain.
               </h2>
-              <p className={s.lede}>
-                Auterim spots your likely dependencies from public signals. You confirm what&apos;s
-                real.
-              </p>
+              <p className={s.lede}>Paste your URL. Auterim finds what you run on. You confirm.</p>
             </div>
             <div className={s.discoverGrid}>
               <div data-reveal className={s.browserCard}>
@@ -255,9 +249,7 @@ export default function Home() {
             <h2 id="watches-title" className={s.h2}>
               Dependencies, not URLs.
             </h2>
-            <p className={s.lede}>
-              Pick the services you rely on. Auterim finds and watches the sources that matter.
-            </p>
+            <p className={s.lede}>Pick a service. Auterim watches every source behind it.</p>
             <div className={s.triStats}>
               <div>
                 <span>1</span>
@@ -314,8 +306,7 @@ export default function Home() {
                 Most changes can wait.
               </h2>
               <p className={s.ledeDark}>
-                Auterim weighs each change against how you use the provider, and quietly files the
-                rest.
+                Auterim ranks every change by how you actually use it. The rest stays quiet.
               </p>
             </div>
             <ChangeInbox />
@@ -395,12 +386,12 @@ export default function Home() {
               <div className={s.headCol}>
                 <span className={s.eyebrow}>07 · DEPENDENCY MAP</span>
                 <h2 id="map-title" className={s.h2}>
-                  Your stack, in context.
+                  Everything in context.
                 </h2>
               </div>
               <div className={s.mapIntro}>
                 <p className={s.lede}>
-                  What each provider does for you, what&apos;s watched, and what needs you.
+                  Tap any provider. See what&apos;s watched and what needs you.
                 </p>
                 <div className={s.legend}>
                   {Object.values(mapStatusStyle).map((l) => (
@@ -426,14 +417,14 @@ export default function Home() {
             Quiet by default. Clear when it matters.
           </h2>
           <div data-reveal className={s.quietCopy}>
-            <p>When nothing important changes, there&apos;s nothing for you to do.</p>
+            <p>Nothing important changed? Nothing to do.</p>
             <p>
-              <strong>When something does, you&apos;ll know.</strong>
+              <strong>Something did? You&apos;ll know first.</strong>
             </p>
           </div>
           <div data-reveal className={s.quietStatus}>
             <span className={s.stable}>
-              <span>●</span>All dependencies stable.
+              <span>●</span>All dependencies stable
             </span>
             <div className={s.quietStats}>
               {quietStats.map((q) => (
@@ -473,10 +464,10 @@ export default function Home() {
         <section className={s.finalCta} aria-labelledby="cta-title">
           <div className={s.finalInner}>
             <h2 data-reveal id="cta-title" className={s.h2Final}>
-              See what your business depends on.
+              See what you run on.
             </h2>
             <p data-reveal className={s.ledeDark}>
-              Start with your company. Confirm your dependencies. Let Auterim watch the rest.
+              Paste your domain. Confirm what you run on. Auterim watches the rest.
             </p>
             <FinalCtaForm />
             <div data-reveal aria-hidden="true" className={s.ctaPreview}>
