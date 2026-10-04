@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { catalog, coverageCategories, mapGroups, mapStatus, mapStatusStyle } from "./data";
 import { ANALYZE_EVENT } from "./hero";
 import { BrandMark, ProviderMark } from "./marks";
+import { providerLogos } from "./provider-logos";
 import s from "./home.module.css";
 
 const levels = {
@@ -295,6 +296,14 @@ const orbitSlots = [
 
 const TOUR_MS = 3200;
 
+// One tile per brand mark: Supabase Auth shares Supabase's glyph, so the square skips it.
+const orbitProviders = Object.keys(catalog)
+  .filter((p, i, all) => {
+    const mark = (q: string) => providerLogos[q]?.path ?? q;
+    return all.findIndex((q) => mark(q) === mark(p)) === i;
+  })
+  .slice(0, orbitSlots.length);
+
 function OrbitDetailBody({ provider }: { provider: string }) {
   const [category, sources] = catalog[provider];
   return (
@@ -326,7 +335,6 @@ export function CoverageCatalog() {
   const providers = Object.keys(catalog).filter((n) => coverageCategories.includes(catalog[n][0]));
   const inCategory = (p: string) => category === "All" || catalog[p][0] === category;
   const rows = providers.filter(inCategory);
-  const orbitProviders = providers.slice(0, orbitSlots.length);
   const [focus, setFocus] = useState(orbitProviders[0]);
   // The square tours its logos on its own while it is on screen; a tap takes over for a while.
   const [touring, setTouring] = useState(false);
@@ -347,7 +355,7 @@ export function CoverageCatalog() {
       setFocus((cur) => orbitProviders[(orbitProviders.indexOf(cur) + 1) % orbitProviders.length]);
     }, TOUR_MS);
     return () => window.clearTimeout(id);
-  }, [touring, held, focus, orbitProviders]);
+  }, [touring, held, focus]);
   useEffect(() => {
     if (!held) return;
     const id = window.setTimeout(() => setHeld(false), 9000);
