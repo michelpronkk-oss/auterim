@@ -299,6 +299,7 @@ export function CoverageCatalog() {
   const inCategory = (p: string) => category === "All" || catalog[p][0] === category;
   const rows = providers.filter(inCategory);
   const orbitProviders = providers.slice(0, orbitSlots.length);
+  const [focus, setFocus] = useState(orbitProviders[0]);
   return (
     <div data-reveal className={s.catalog}>
       <div role="tablist" aria-label="Categories" className={s.catalogTabs}>
@@ -325,7 +326,7 @@ export function CoverageCatalog() {
         })}
       </div>
       <div id="coverage-panel" role="tabpanel" className={s.catalogPanel}>
-        {/* Phones: every provider floats in one square around Auterim; no filter needed. */}
+        {/* Phones: every provider floats in one square around Auterim; tap one to see what it covers. */}
         <div className={s.orbit}>
           <div className={s.orbitSquare}>
             <svg aria-hidden="true" viewBox="0 0 100 100" className={s.orbitLines}>
@@ -338,7 +339,7 @@ export function CoverageCatalog() {
                   y1="50"
                   x2={orbitSlots[i].x}
                   y2={orbitSlots[i].y}
-                  className={inCategory(p) ? s.orbitLine : s.orbitLineOff}
+                  className={p === focus ? s.orbitLineOn : s.orbitLine}
                 />
               ))}
             </svg>
@@ -346,23 +347,48 @@ export function CoverageCatalog() {
               <span className={s.pulseRing} />
               <BrandMark size={26} tone="dark" />
             </span>
+            <span aria-hidden="true" className={s.orbitHint}>
+              Tap a logo
+            </span>
             {orbitProviders.map((p, i) => (
-              <span
+              <button
                 key={p}
-                role="img"
-                aria-label={inCategory(p) ? p : undefined}
-                aria-hidden={inCategory(p) ? undefined : true}
-                className={inCategory(p) ? s.orbitTile : `${s.orbitTile} ${s.orbitTileOff}`}
+                type="button"
+                aria-label={`${p}, ${catalog[p][0]}`}
+                aria-pressed={p === focus}
+                aria-controls="coverage-focus"
+                className={p === focus ? `${s.orbitTile} ${s.orbitTileOn}` : s.orbitTile}
                 style={{
                   left: `${orbitSlots[i].x}%`,
                   top: `${orbitSlots[i].y}%`,
                   animationDelay: `${-((i * 0.83) % 6).toFixed(2)}s`,
                   animationDuration: `${5 + (i % 4) * 0.7}s`,
                 }}
+                onClick={() => setFocus(p)}
               >
                 <ProviderMark provider={p} size={34} />
-              </span>
+              </button>
             ))}
+          </div>
+          <div id="coverage-focus" key={focus} className={s.orbitDetail} aria-live="polite">
+            <div className={s.orbitDetailHead}>
+              <ProviderMark provider={focus} size={44} />
+              <div className={s.rowText}>
+                <span className={s.orbitName}>{focus}</span>
+                <span className={s.orbitCat}>{catalog[focus][0]}</span>
+              </div>
+              <span className={s.orbitCount}>
+                <b>{catalog[focus][1].length}</b> source types
+              </span>
+            </div>
+            <ul className={s.orbitChips}>
+              {catalog[focus][1].map((src, i) => (
+                <li key={src[0]} style={{ animationDelay: `${0.05 + i * 0.04}s` }}>
+                  <span aria-hidden="true" className={s.orbitChipDot} />
+                  {src[0]}
+                </li>
+              ))}
+            </ul>
           </div>
         </div>
         <div className={s.catalogTable}>
