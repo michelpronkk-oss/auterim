@@ -326,6 +326,29 @@ export function CoverageCatalog() {
           );
         })}
       </div>
+      {/* Below desktop the category list collapses into one picker above the square. */}
+      <div className={s.catalogPicker}>
+        <label className={s.catalogSelect}>
+          <span className={s.srOnly}>Category</span>
+          <select
+            value={category}
+            aria-controls="coverage-panel"
+            onChange={(event) => setCategory(event.target.value)}
+          >
+            {["All", ...coverageCategories].map((name) => (
+              <option key={name} value={name}>
+                {name === "All" ? "All categories" : name}
+              </option>
+            ))}
+          </select>
+          <svg aria-hidden="true" viewBox="0 0 12 12" width="12" height="12">
+            <path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+          </svg>
+        </label>
+        <span className={s.catalogCount}>
+          {rows.length} {rows.length === 1 ? "provider" : "providers"}
+        </span>
+      </div>
       <div id="coverage-panel" role="tabpanel" className={s.catalogPanel}>
         {/* Phones: every provider floats in one square around Auterim; the category dims the rest. */}
         <div className={s.orbit}>
