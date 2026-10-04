@@ -26,6 +26,8 @@ Confidence is family-based within the same surface type and hostname. Evidence f
 
 The observation layer never creates candidates or confirmed dependencies. Only the existing provider candidate pipeline can suggest a provider. Suppression codes include framework/library/build-tool, weak evidence, optional integration, correlated evidence, derived-only, and conflicted evidence. The full code vocabulary is constrained by the forward migration.
 
+Technical observation and workspace disposition are separate facts. An observation's `status` and linked discovery evidence preserve what the public surface showed; a workspace member confirming or rejecting a dependency candidate changes only that candidate's status. In particular, `Not used` is not detector ground truth and never relabels, deletes, or downgrades the observation or its provenance. A rejection may mean the signal is technically correct but irrelevant to that workspace, stale for its current usage, or incorrect; it must not train or downgrade a fingerprint by itself. Cookie-name fingerprints are **deferred by design**: the safe-fetch boundary does not expose `Set-Cookie`, and expanding that boundary is not justified for Discovery V1.
+
 ## Persistence and access
 
 `technology_observations` stores at most 250 rows per discovery run. The table uses a composite run/workspace foreign key, bounded enum/host constraints, and an index by workspace/run/technology. RLS is enabled; `anon` and `authenticated` have no table privileges or policies. The completion RPC inserts observations atomically with existing provider evidence and candidates. Fingerprint-level detail remains out of the customer onboarding read model. The internal production QA script reads only an explicit safe column projection.

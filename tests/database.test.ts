@@ -716,6 +716,43 @@ describe("Auterim migration and monitoring transaction", () => {
     await db.exec("reset role");
     await db.query("select set_config('request.jwt.claim.sub',$1,false)", [userA]);
     await db.exec("set role authenticated");
+    const candidateToDismiss = await db.query<{ id: string }>(
+      "select id from public.discovered_dependencies where company_id=$1 and dependency_id=$2",
+      [companyId, provider.rows[0]!.id],
+    );
+    expect(candidateToDismiss.rows).toHaveLength(1);
+    const dismissal = await db.query<{ value: { decision: string } }>(
+      "select public.decide_onboarding_dependency_candidate($1,$2,'rejected') as value",
+      [workspaceId, candidateToDismiss.rows[0]!.id],
+    );
+    expect(dismissal.rows[0]!.value.decision).toBe("rejected");
+    await db.exec("reset role; set role service_role");
+    const separatedDisposition = await db.query<{
+      candidate_status: string;
+      observation_status: string;
+      observation_disposition: string;
+      evidence_count: number;
+    }>(
+      `select candidate.status as candidate_status, observation.status as observation_status,
+              observation.disposition as observation_disposition,
+              (select count(*)::int from public.dependency_discovery_evidence evidence
+               where evidence.run_id=observation.run_id and evidence.provider_slug='stripe') as evidence_count
+       from public.discovered_dependencies candidate
+       join public.technology_observations observation on observation.run_id=$2
+       where candidate.id=$1`,
+      [candidateToDismiss.rows[0]!.id, run.rows[0]!.id],
+    );
+    expect(separatedDisposition.rows).toEqual([
+      {
+        candidate_status: "rejected",
+        observation_status: "supported",
+        observation_disposition: "suggested",
+        evidence_count: 1,
+      },
+    ]);
+    await db.exec("reset role");
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [userA]);
+    await db.exec("set role authenticated");
     const safeOnboarding = await db.query<{ value: unknown }>(
       "select public.get_onboarding_status_with_discovery_coverage($1) as value",
       [workspaceId],
