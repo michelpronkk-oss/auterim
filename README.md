@@ -36,5 +36,6 @@ Run the identity and environment checks before any Supabase, Trigger.dev, GitHub
 - [Architecture and security boundaries](docs/architecture.md)
 - [Database migration and operational notes](docs/database-plan.md)
 - [Environment setup](docs/environment-setup.md)
+- [Public URL dependency discovery](docs/url-dependency-discovery.md)
 
 The migration under `supabase/migrations/` is the database source of truth. The OpenAI dependency and pricing source are seeded there. Trigger.dev contains one daily dispatcher and one source scan task; automated tests use controlled content and an in-memory Postgres engine.

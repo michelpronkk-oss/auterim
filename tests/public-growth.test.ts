@@ -86,6 +86,19 @@ describe("public acquisition surfaces", () => {
       ],
       evidence: [],
       deepPass: { requested: false, scriptsFetched: 0, bytesFetched: 0 },
+      inspected: {
+        responseHeaders: 0,
+        redirects: 0,
+        htmlNodes: 0,
+        scriptReferences: 0,
+        resourceReferences: 0,
+        cspHosts: 0,
+        inlineConfigUrls: 0,
+        manifestsFetched: 0,
+        jsAssetsFetched: 0,
+        dnsRecordsUsed: false as const,
+        browserRuntime: false as const,
+      },
     });
     expect(JSON.stringify(result)).not.toContain("customer.example");
     expect(JSON.stringify(result)).not.toContain("x-vercel-id");
@@ -135,6 +148,18 @@ describe("public acquisition surfaces", () => {
     );
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "invalid_request_body" });
+  });
+
+  it("streams and rejects an oversized public scan body without buffering it whole", async () => {
+    const response = await publicStackScan(
+      new Request("http://localhost/api/public/stack-scan", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-real-ip": "203.0.113.21" },
+        body: " ".repeat(4097),
+      }),
+    );
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: "request_too_large" });
   });
 
   it("does not fetch private network targets from the public scanner", async () => {

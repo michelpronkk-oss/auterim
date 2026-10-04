@@ -32,30 +32,15 @@ const cases: Array<{
     slug: "vercel",
   },
   { name: "Cloudflare ray header", headers: { "cf-ray": "abc" }, slug: "cloudflare" },
-  {
-    name: "Cloudflare insights host",
-    html: '<script src="https://static.cloudflareinsights.com/beacon.min.js"></script>',
-    slug: "cloudflare",
-  },
   { name: "Netlify request header", headers: { "x-nf-request-id": "abc" }, slug: "netlify" },
   {
-    name: "Netlify public host",
-    html: '<img src="https://site.netlify.app/image.png">',
-    slug: "netlify",
-  },
-  {
-    name: "CloudFront reference",
-    html: '<img src="https://d123.cloudfront.net/a.png">',
-    slug: "aws",
-  },
-  {
-    name: "Supabase public host",
-    html: '<script src="https://project.supabase.co/storage/v1/client.js"></script>',
+    name: "Supabase inline public API config",
+    html: '<script type="application/json" id="runtime-config">{"apiUrl":"https://project.supabase.co"}</script>',
     slug: "supabase",
   },
   {
-    name: "Firebase app host",
-    html: '<script src="https://project.firebaseapp.com/app.js"></script>',
+    name: "Firebase SDK script",
+    html: '<script src="https://www.gstatic.com/firebasejs/10.0.0/firebase-app.js"></script>',
     slug: "firebase",
   },
   {
@@ -95,7 +80,7 @@ const cases: Array<{
   },
   {
     name: "Algolia search host",
-    html: '<script src="https://123-dsn.algolia.net/1/indexes"></script>',
+    html: '<script type="application/json" id="app-config">{"searchEndpoint":"https://123-dsn.algolia.net/1/indexes"}</script>',
     slug: "algolia",
   },
   {
@@ -105,7 +90,7 @@ const cases: Array<{
   },
   {
     name: "Firebase database host",
-    html: '<script src="https://project.firebasedatabase.app/sdk.js"></script>',
+    html: '<script type="application/json" id="app-config">{"apiUrl":"https://project.firebasedatabase.app"}</script>',
     slug: "firebase",
   },
 ];
@@ -151,6 +136,8 @@ describe("offline URL dependency evaluation", () => {
     "ftp://example.com/file",
     "https://user:pass@example.com/",
     "https://example.com:8443/",
+    "https://example.com:80/",
+    "http://example.com:443/",
     "not a URL",
   ])("rejects unsafe or malformed website input: %s", (url) => {
     expect(() => normalizePublicWebsiteUrl(url)).toThrow();
@@ -160,6 +147,8 @@ describe("offline URL dependency evaluation", () => {
     "ftp://example.com/",
     "https://user:password@example.com/",
     "https://example.com:8443/",
+    "https://example.com:80/",
+    "http://example.com:443/",
     "not a URL",
   ])("rejects a permanently invalid task URL before task execution: %s", (url) => {
     expect(discoveryWebsiteUrlSchema.safeParse(url).success).toBe(false);
@@ -184,11 +173,21 @@ describe("offline URL dependency evaluation", () => {
     expect(result.candidates.map(({ providerSlug }) => providerSlug)).not.toContain("stripe");
   });
 
-  it("combines independent signals and labels high confidence only after corroboration", async () => {
+  it("does not label correlated mixed-strength signals high", async () => {
     const result = await discover('<script src="/_vercel/insights/script.js"></script>', {
       server: "Vercel",
     });
-    expect(result.candidates[0]).toMatchObject({ providerSlug: "vercel", confidenceLabel: "high" });
+    expect(result.candidates[0]).toMatchObject({
+      providerSlug: "vercel",
+      confidenceLabel: "medium",
+    });
+  });
+
+  it("labels two strong technical provider signals high", async () => {
+    const result = await discover(
+      '<script src="https://js.stripe.com/v3/"></script><form action="https://checkout.stripe.com/pay"></form>',
+    );
+    expect(result.candidates[0]).toMatchObject({ providerSlug: "stripe", confidenceLabel: "high" });
   });
 
   it("does not treat two correlated response headers as independent confidence", async () => {
@@ -206,7 +205,67 @@ describe("offline URL dependency evaluation", () => {
 
   it("keeps a weak infrastructure reference at low confidence", async () => {
     const result = await discover('<img src="https://d123.cloudfront.net/image.png">');
-    expect(result.candidates[0]).toMatchObject({ providerSlug: "aws", confidenceLabel: "low" });
+    expect(result.evidence).toContainEqual(
+      expect.objectContaining({ providerSlug: "aws", strength: "weak" }),
+    );
+    expect(result.candidates.map(({ providerSlug }) => providerSlug)).not.toContain("aws");
+  });
+
+  it("retains weak analytics references without suggesting Cloudflare by themselves", async () => {
+    const result = await discover(
+      '<script src="https://static.cloudflareinsights.com/beacon.min.js"></script>',
+    );
+    expect(result.evidence).toContainEqual(
+      expect.objectContaining({ providerSlug: "cloudflare", strength: "weak" }),
+    );
+    expect(result.candidates).toEqual([]);
+  });
+
+  it("does not suggest providers from generic embedded assets or demo frames", async () => {
+    const result = await discover(
+      '<iframe src="https://demo.netlify.app/embed"></iframe><img src="https://project.supabase.co/storage/v1/object/public/logo.png"><img src="https://cdn.shopify.com/icons/store.png">',
+    );
+    expect(result.candidates).toEqual([]);
+  });
+
+  it("detects a provider endpoint in CSP without treating it as confirmed or high confidence", async () => {
+    const result = await discover("", {
+      "content-security-policy-report-only":
+        "default-src 'self'; connect-src https://api.openai.com",
+    });
+    expect(result.candidates).toEqual([]);
+    expect(result.evidence).toContainEqual(
+      expect.objectContaining({ providerSlug: "openai", signalType: "csp_host", strength: "weak" }),
+    );
+  });
+
+  it("ignores a lookalike host in CSP", async () => {
+    const result = await discover("", {
+      "content-security-policy": "connect-src https://api.openai.com.attacker.example",
+    });
+    expect(result.candidates).toEqual([]);
+  });
+
+  it("uses only the final host of an observed safe redirect as redirect evidence", async () => {
+    const result = await discoverWebsiteDependencies("https://company.example/", {
+      fetcher: async () => ({
+        ...page(""),
+        finalUrl: "https://my-site.netlify.app/",
+        redirectEvidence: [{ origin: "https://company.example", safeHeaders: {} }],
+      }),
+    });
+    expect(result.candidates.map(({ providerSlug }) => providerSlug)).toContain("netlify");
+    expect(result.evidence).toContainEqual(
+      expect.objectContaining({ signalType: "redirect_host", strength: "medium" }),
+    );
+  });
+
+  it("extracts bounded API endpoint values from selected inline JSON keys", async () => {
+    const result = await discover(
+      '<script type="application/json" id="app-config">{"apiUrl":"https://api.openai.com/v1","description":"https://api.openai.com"}</script>',
+    );
+    expect(result.candidates.map(({ providerSlug }) => providerSlug)).toContain("openai");
+    expect(result.inspected.inlineConfigUrls).toBe(1);
   });
 
   it.each([
@@ -257,11 +316,21 @@ describe("offline URL dependency evaluation", () => {
     const calls: string[] = [];
     const result = await discover(html, {}, true, (url) => {
       calls.push(url);
-      return page("const app = true;");
+      return { ...page("const app = true;"), contentType: "application/javascript" };
     });
     expect(calls).toHaveLength(4);
     expect(calls.every((url) => new URL(url).origin === "https://company.example")).toBe(true);
     expect(result.deepPass.scriptsFetched).toBe(4);
+  });
+
+  it("does not analyze non-JavaScript MIME responses returned by an adapter", async () => {
+    const result = await discover('<script src="/app.js"></script>', {}, true, (url) =>
+      url.endsWith("app.js")
+        ? { ...page("Sentry.init({})"), contentType: "text/html" }
+        : page('<script src="/app.js"></script>'),
+    );
+    expect(result.deepPass.scriptsFetched).toBe(0);
+    expect(result.candidates).toEqual([]);
   });
 
   it("does not fail the fast result when an optional deep script fails", async () => {
@@ -276,13 +345,104 @@ describe("offline URL dependency evaluation", () => {
   it("treats URLs embedded in deep script source as weak evidence", async () => {
     const result = await discover('<script src="/app.js"></script>', {}, true, (url) =>
       url.endsWith("app.js")
-        ? page('// example only: "https://project.supabase.co/rest/v1"')
+        ? {
+            ...page('// example only: "https://project.supabase.co/rest/v1"'),
+            contentType: "application/javascript",
+          }
         : page('<script src="/app.js"></script>'),
     );
-    expect(result.candidates[0]).toMatchObject({
-      providerSlug: "supabase",
-      confidenceLabel: "low",
-      evidence: [{ signalType: "embedded_url", strength: "weak" }],
+    expect(result.candidates).toEqual([]);
+    expect(result.evidence).toEqual([]);
+  });
+
+  it("uses active first-party JavaScript SDK markers while ignoring comments", async () => {
+    const result = await discover('<script src="/app.js"></script>', {}, true, (url) =>
+      url.endsWith("app.js")
+        ? {
+            ...page('// Sentry.init({});\nSentry.init({ dsn: "https://x@ingest.sentry.io/42" });'),
+            contentType: "application/javascript",
+          }
+        : page('<script src="/app.js"></script>'),
+    );
+    expect(result.candidates.map(({ providerSlug }) => providerSlug)).toContain("sentry");
+    expect(result.evidence.some(({ signalType }) => signalType === "js_sdk")).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("ingest.sentry.io/42");
+  });
+
+  it("does not treat SDK examples in JavaScript strings as active use", async () => {
+    const result = await discover('<script src="/app.js"></script>', {}, true, (url) =>
+      url.endsWith("app.js")
+        ? {
+            ...page('const example = "Sentry.init({})";'),
+            contentType: "application/javascript",
+          }
+        : page('<script src="/app.js"></script>'),
+    );
+    expect(result.candidates).toEqual([]);
+    expect(result.evidence).toEqual([]);
+  });
+
+  it("does not treat SDK marker text in JavaScript regex literals as active use", async () => {
+    const result = await discover('<script src="/app.js"></script>', {}, true, (url) =>
+      url.endsWith("app.js")
+        ? {
+            ...page("const example = /Sentry.init/;"),
+            contentType: "application/javascript",
+          }
+        : page('<script src="/app.js"></script>'),
+    );
+    expect(result.candidates).toEqual([]);
+    expect(result.evidence).toEqual([]);
+  });
+
+  it("ignores endpoint-looking values in unlabelled example JSON blocks", async () => {
+    const result = await discover(
+      '<script type="application/json">{"apiUrl":"https://project.supabase.co"}</script>',
+    );
+    expect(result.candidates).toEqual([]);
+    expect(result.evidence).toEqual([]);
+  });
+
+  it("ignores endpoint values in JSON blocks labeled as examples", async () => {
+    const result = await discover(
+      '<script type="application/json" id="example-config">{"apiUrl":"https://project.supabase.co"}</script>',
+    );
+    expect(result.candidates).toEqual([]);
+    expect(result.evidence).toEqual([]);
+  });
+
+  it("ignores endpoint URLs in ordinary descriptive meta tags", async () => {
+    const result = await discover(
+      '<meta name="description" content="Our docs mention API access at https://api.openai.com">',
+    );
+    expect(result.candidates).toEqual([]);
+    expect(result.evidence).toEqual([]);
+  });
+
+  it("does not label strong plus multiple medium signals high without two strong signal types", async () => {
+    const result = await discoverWebsiteDependencies("https://company.example/", {
+      fetcher: async () => ({
+        ...page('<script src="/_vercel/insights/script.js"></script>', { server: "Vercel" }),
+        finalUrl: "https://company.vercel.app/",
+        redirectEvidence: [{ origin: "https://company.example", safeHeaders: {} }],
+      }),
+    });
+    expect(result.candidates[0]?.confidence).toBeGreaterThan(0.85);
+    expect(result.candidates[0]?.confidenceLabel).toBe("medium");
+  });
+
+  it("reports concrete bounded inspection counts", async () => {
+    const result = await discover(
+      '<script src="/app.js"></script><img src="https://assets.example/logo.png">',
+      { server: "Vercel" },
+    );
+    expect(result.inspected).toMatchObject({
+      responseHeaders: 1,
+      htmlNodes: expect.any(Number),
+      scriptReferences: 1,
+      resourceReferences: 2,
+      dnsRecordsUsed: false,
+      browserRuntime: false,
     });
   });
 
@@ -324,6 +484,19 @@ describe("offline URL dependency evaluation", () => {
         candidates: [],
         evidence: [],
         deepPass: { requested: false, scriptsFetched: 0, bytesFetched: 0 },
+        inspected: {
+          responseHeaders: 0,
+          redirects: 0,
+          htmlNodes: 0,
+          scriptReferences: 0,
+          resourceReferences: 0,
+          cspHosts: 0,
+          inlineConfigUrls: 0,
+          manifestsFetched: 0,
+          jsAssetsFetched: 0,
+          dnsRecordsUsed: false as const,
+          browserRuntime: false as const,
+        },
       };
     };
     await expect(

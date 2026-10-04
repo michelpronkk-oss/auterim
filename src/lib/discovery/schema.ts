@@ -13,7 +13,9 @@ export const discoveryWebsiteUrlSchema = z
         (url.protocol === "https:" || url.protocol === "http:") &&
         !url.username &&
         !url.password &&
-        (url.port === "" || url.port === "80" || url.port === "443")
+        (url.port === "" ||
+          (url.protocol === "http:" && url.port === "80") ||
+          (url.protocol === "https:" && url.port === "443"))
       );
     } catch {
       return false;

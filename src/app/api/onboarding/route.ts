@@ -84,7 +84,7 @@ export async function POST(request: Request) {
               workspaceId: started.workspaceId,
               companyId: started.companyId,
               websiteUrl,
-              deep: false,
+              deep: true,
             },
             { idempotencyKey },
           );

@@ -4,7 +4,12 @@ export type DiscoverySignalType =
   | "script_path"
   | "document_host"
   | "embedded_url"
-  | "markup_marker";
+  | "markup_marker"
+  | "resource_host"
+  | "csp_host"
+  | "api_endpoint"
+  | "js_sdk"
+  | "redirect_host";
 
 export type ProviderSignature = {
   providerSlug: string;
@@ -19,34 +24,51 @@ export type SignatureInput = {
   headers: Record<string, string>;
   scriptUrls: string[];
   resourceUrls: string[];
+  stylesheetUrls?: string[];
+  iframeUrls?: string[];
+  formActionUrls?: string[];
+  inlineConfigUrls?: string[];
+  javascriptUrls?: string[];
+  cspHosts?: string[];
+  redirectOrigins?: string[];
+  javascriptSources?: string[];
   embeddedUrls: string[];
   siteOrigin: string;
 };
 
 const headerValue = (input: SignatureInput, name: string) =>
   input.headers[name]?.toLowerCase() ?? "";
-const hasScriptHost = (input: SignatureInput, suffix: string) =>
-  input.scriptUrls.some((value) => {
-    try {
-      const host = new URL(value).hostname.toLowerCase();
-      return host === suffix || host.endsWith(`.${suffix}`);
-    } catch {
-      return false;
-    }
-  });
-const hasScriptHostAndPath = (input: SignatureInput, hostSuffix: string, path: string) =>
+
+function urlHost(value: string) {
+  try {
+    return new URL(value).hostname.toLowerCase().replace(/\.$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function hostMatches(host: string, suffix: string) {
+  return host === suffix || host.endsWith(`.${suffix}`);
+}
+
+const anyUrlHost = (values: string[] | undefined, suffix: string) =>
+  (values ?? []).some((value) => hostMatches(urlHost(value), suffix));
+const anyCspHost = (values: string[] | undefined, suffix: string) =>
+  (values ?? []).some((value) => hostMatches(value.toLowerCase(), suffix));
+const anyRedirectHost = (values: string[] | undefined, suffix: string) =>
+  (values ?? []).some((value) => hostMatches(urlHost(value), suffix));
+const anyScriptHost = (input: SignatureInput, suffix: string) =>
+  anyUrlHost(input.scriptUrls, suffix);
+const anyScriptHostAndPath = (input: SignatureInput, hostSuffix: string, path: string) =>
   input.scriptUrls.some((value) => {
     try {
       const url = new URL(value);
-      const host = url.hostname.toLowerCase();
-      return (
-        (host === hostSuffix || host.endsWith(`.${hostSuffix}`)) && url.pathname.startsWith(path)
-      );
+      return hostMatches(url.hostname.toLowerCase(), hostSuffix) && url.pathname.startsWith(path);
     } catch {
       return false;
     }
   });
-const hasSameOriginScriptPath = (input: SignatureInput, path: string) =>
+const anySameOriginScriptPath = (input: SignatureInput, path: string) =>
   input.scriptUrls.some((value) => {
     try {
       const url = new URL(value);
@@ -55,27 +77,11 @@ const hasSameOriginScriptPath = (input: SignatureInput, path: string) =>
       return false;
     }
   });
-const hasResourceHost = (input: SignatureInput, suffix: string) =>
-  input.resourceUrls.some((value) => {
-    try {
-      const host = new URL(value).hostname.toLowerCase();
-      return host === suffix || host.endsWith(`.${suffix}`);
-    } catch {
-      return false;
-    }
-  });
-const hasEmbeddedHost = (input: SignatureInput, suffix: string) =>
-  input.embeddedUrls.some((value) => {
-    try {
-      const host = new URL(value).hostname.toLowerCase();
-      return host === suffix || host.endsWith(`.${suffix}`);
-    } catch {
-      return false;
-    }
-  });
+const anyJavaScriptSource = (input: SignatureInput, pattern: RegExp) =>
+  (input.javascriptSources ?? []).some((source) => pattern.test(source));
 
-// Each rule is a public, deterministic marker. Arbitrary provider-name mentions in visible copy
-// are intentionally not considered evidence.
+// Provider-specific technical markers only. Generic page copy, icons, social links, and arbitrary
+// media resources do not qualify as provider evidence.
 export const providerSignatureRegistry: readonly ProviderSignature[] = [
   {
     providerSlug: "vercel",
@@ -99,7 +105,15 @@ export const providerSignatureRegistry: readonly ProviderSignature[] = [
     signalType: "script_path",
     signatureKey: "vercel-insights-script",
     strength: "medium",
-    matches: (input) => hasSameOriginScriptPath(input, "/_vercel/insights/"),
+    matches: (input) => anySameOriginScriptPath(input, "/_vercel/insights/"),
+  },
+  {
+    providerSlug: "vercel",
+    providerName: "Vercel",
+    signalType: "redirect_host",
+    signatureKey: "vercel-app-redirect",
+    strength: "medium",
+    matches: (input) => anyRedirectHost(input.redirectOrigins, "vercel.app"),
   },
   {
     providerSlug: "cloudflare",
@@ -112,10 +126,10 @@ export const providerSignatureRegistry: readonly ProviderSignature[] = [
   {
     providerSlug: "cloudflare",
     providerName: "Cloudflare",
-    signalType: "document_host",
-    signatureKey: "cloudflare-insights-host",
-    strength: "medium",
-    matches: (input) => hasResourceHost(input, "static.cloudflareinsights.com"),
+    signalType: "script_host",
+    signatureKey: "cloudflare-insights-script",
+    strength: "weak",
+    matches: (input) => anyScriptHost(input, "static.cloudflareinsights.com"),
   },
   {
     providerSlug: "netlify",
@@ -128,43 +142,83 @@ export const providerSignatureRegistry: readonly ProviderSignature[] = [
   {
     providerSlug: "netlify",
     providerName: "Netlify",
-    signalType: "document_host",
-    signatureKey: "netlify-app-host",
+    signalType: "redirect_host",
+    signatureKey: "netlify-app-redirect",
     strength: "medium",
-    matches: (input) => hasResourceHost(input, "netlify.app"),
+    matches: (input) => anyRedirectHost(input.redirectOrigins, "netlify.app"),
   },
   {
     providerSlug: "aws",
     providerName: "Amazon Web Services",
-    signalType: "document_host",
-    signatureKey: "cloudfront-host",
+    signalType: "resource_host",
+    signatureKey: "cloudfront-resource",
     strength: "weak",
-    matches: (input) => hasResourceHost(input, "cloudfront.net"),
+    matches: (input) => anyUrlHost(input.resourceUrls, "cloudfront.net"),
   },
   {
     providerSlug: "supabase",
     providerName: "Supabase",
-    signalType: "document_host",
-    signatureKey: "supabase-public-host",
+    signalType: "api_endpoint",
+    signatureKey: "supabase-public-api-config",
+    strength: "strong",
+    matches: (input) => anyUrlHost(input.inlineConfigUrls, "supabase.co"),
+  },
+  {
+    providerSlug: "supabase",
+    providerName: "Supabase",
+    signalType: "api_endpoint",
+    signatureKey: "supabase-public-api-reference",
+    strength: "weak",
+    matches: (input) => anyUrlHost(input.javascriptUrls, "supabase.co"),
+  },
+  {
+    providerSlug: "supabase",
+    providerName: "Supabase",
+    signalType: "csp_host",
+    signatureKey: "supabase-csp-endpoint",
+    strength: "weak",
+    matches: (input) => anyCspHost(input.cspHosts, "supabase.co"),
+  },
+  {
+    providerSlug: "supabase",
+    providerName: "Supabase",
+    signalType: "js_sdk",
+    signatureKey: "supabase-create-client",
     strength: "medium",
-    matches: (input) => hasResourceHost(input, "supabase.co"),
-  },
-  {
-    providerSlug: "supabase",
-    providerName: "Supabase",
-    signalType: "embedded_url",
-    signatureKey: "supabase-sdk-endpoint-literal",
-    strength: "weak",
-    matches: (input) => hasEmbeddedHost(input, "supabase.co"),
+    matches: (input) =>
+      anyJavaScriptSource(input, /createClient\s*\(\s*["'`]https?:\/\/[^"'`]+\.supabase\.co/i),
   },
   {
     providerSlug: "firebase",
     providerName: "Firebase",
-    signalType: "document_host",
-    signatureKey: "firebase-public-host",
-    strength: "medium",
+    signalType: "script_host",
+    signatureKey: "firebase-sdk-script",
+    strength: "strong",
     matches: (input) =>
-      hasResourceHost(input, "firebaseapp.com") || hasResourceHost(input, "firebasedatabase.app"),
+      anyScriptHost(input, "www.gstatic.com") &&
+      input.scriptUrls.some((value) => /\/firebasejs\//i.test(value)),
+  },
+  {
+    providerSlug: "firebase",
+    providerName: "Firebase",
+    signalType: "api_endpoint",
+    signatureKey: "firebase-api-config",
+    strength: "strong",
+    matches: (input) =>
+      ["firebaseio.com", "firebasedatabase.app", "firebaseapp.com"].some((host) =>
+        anyUrlHost(input.inlineConfigUrls, host),
+      ),
+  },
+  {
+    providerSlug: "firebase",
+    providerName: "Firebase",
+    signalType: "csp_host",
+    signatureKey: "firebase-csp-endpoint",
+    strength: "weak",
+    matches: (input) =>
+      ["firebaseio.com", "firebasedatabase.app", "firebaseapp.com"].some((host) =>
+        anyCspHost(input.cspHosts, host),
+      ),
   },
   {
     providerSlug: "stripe",
@@ -172,7 +226,25 @@ export const providerSignatureRegistry: readonly ProviderSignature[] = [
     signalType: "script_host",
     signatureKey: "stripe-js-v3",
     strength: "strong",
-    matches: (input) => hasScriptHostAndPath(input, "js.stripe.com", "/v3/"),
+    matches: (input) => anyScriptHostAndPath(input, "js.stripe.com", "/v3/"),
+  },
+  {
+    providerSlug: "stripe",
+    providerName: "Stripe",
+    signalType: "api_endpoint",
+    signatureKey: "stripe-checkout-endpoint",
+    strength: "strong",
+    matches: (input) =>
+      anyUrlHost(input.formActionUrls, "checkout.stripe.com") ||
+      anyUrlHost(input.inlineConfigUrls, "api.stripe.com"),
+  },
+  {
+    providerSlug: "stripe",
+    providerName: "Stripe",
+    signalType: "csp_host",
+    signatureKey: "stripe-csp-sdk",
+    strength: "weak",
+    matches: (input) => anyCspHost(input.cspHosts, "js.stripe.com"),
   },
   {
     providerSlug: "clerk",
@@ -181,7 +253,17 @@ export const providerSignatureRegistry: readonly ProviderSignature[] = [
     signatureKey: "clerk-frontend-api",
     strength: "strong",
     matches: (input) =>
-      hasScriptHost(input, "clerk.com") || hasScriptHost(input, "clerk.accounts.dev"),
+      anyScriptHost(input, "clerk.com") || anyScriptHost(input, "clerk.accounts.dev"),
+  },
+  {
+    providerSlug: "clerk",
+    providerName: "Clerk",
+    signalType: "api_endpoint",
+    signatureKey: "clerk-api-config",
+    strength: "strong",
+    matches: (input) =>
+      anyUrlHost(input.inlineConfigUrls, "clerk.com") ||
+      anyUrlHost(input.inlineConfigUrls, "clerk.accounts.dev"),
   },
   {
     providerSlug: "auth0",
@@ -189,7 +271,15 @@ export const providerSignatureRegistry: readonly ProviderSignature[] = [
     signalType: "script_host",
     signatureKey: "auth0-cdn-sdk",
     strength: "strong",
-    matches: (input) => hasScriptHost(input, "cdn.auth0.com"),
+    matches: (input) => anyScriptHost(input, "cdn.auth0.com"),
+  },
+  {
+    providerSlug: "auth0",
+    providerName: "Auth0",
+    signalType: "api_endpoint",
+    signatureKey: "auth0-api-config",
+    strength: "medium",
+    matches: (input) => anyUrlHost(input.inlineConfigUrls, "auth0.com"),
   },
   {
     providerSlug: "sentry",
@@ -197,7 +287,31 @@ export const providerSignatureRegistry: readonly ProviderSignature[] = [
     signalType: "script_host",
     signatureKey: "sentry-browser-sdk",
     strength: "strong",
-    matches: (input) => hasScriptHost(input, "browser.sentry-cdn.com"),
+    matches: (input) => anyScriptHost(input, "browser.sentry-cdn.com"),
+  },
+  {
+    providerSlug: "sentry",
+    providerName: "Sentry",
+    signalType: "api_endpoint",
+    signatureKey: "sentry-dsn-config",
+    strength: "strong",
+    matches: (input) => anyUrlHost(input.inlineConfigUrls, "ingest.sentry.io"),
+  },
+  {
+    providerSlug: "sentry",
+    providerName: "Sentry",
+    signalType: "csp_host",
+    signatureKey: "sentry-csp-endpoint",
+    strength: "weak",
+    matches: (input) => anyCspHost(input.cspHosts, "ingest.sentry.io"),
+  },
+  {
+    providerSlug: "sentry",
+    providerName: "Sentry",
+    signalType: "js_sdk",
+    signatureKey: "sentry-init",
+    strength: "medium",
+    matches: (input) => anyJavaScriptSource(input, /Sentry\.init\s*\(/i),
   },
   {
     providerSlug: "posthog",
@@ -206,7 +320,39 @@ export const providerSignatureRegistry: readonly ProviderSignature[] = [
     signatureKey: "posthog-js-cdn",
     strength: "strong",
     matches: (input) =>
-      hasScriptHost(input, "us.i.posthog.com") || hasScriptHost(input, "app.posthog.com"),
+      anyScriptHost(input, "us.i.posthog.com") ||
+      anyScriptHost(input, "eu.i.posthog.com") ||
+      anyScriptHost(input, "app.posthog.com"),
+  },
+  {
+    providerSlug: "posthog",
+    providerName: "PostHog",
+    signalType: "api_endpoint",
+    signatureKey: "posthog-api-config",
+    strength: "medium",
+    matches: (input) =>
+      ["us.i.posthog.com", "eu.i.posthog.com", "us.posthog.com", "eu.posthog.com"].some((host) =>
+        anyUrlHost(input.inlineConfigUrls, host),
+      ),
+  },
+  {
+    providerSlug: "posthog",
+    providerName: "PostHog",
+    signalType: "csp_host",
+    signatureKey: "posthog-csp-endpoint",
+    strength: "weak",
+    matches: (input) =>
+      ["us.i.posthog.com", "eu.i.posthog.com", "us.posthog.com", "eu.posthog.com"].some((host) =>
+        anyCspHost(input.cspHosts, host),
+      ),
+  },
+  {
+    providerSlug: "posthog",
+    providerName: "PostHog",
+    signalType: "js_sdk",
+    signatureKey: "posthog-init",
+    strength: "medium",
+    matches: (input) => anyJavaScriptSource(input, /posthog\.init\s*\(/i),
   },
   {
     providerSlug: "segment",
@@ -214,7 +360,15 @@ export const providerSignatureRegistry: readonly ProviderSignature[] = [
     signalType: "script_host",
     signatureKey: "segment-analytics-cdn",
     strength: "strong",
-    matches: (input) => hasScriptHost(input, "cdn.segment.com"),
+    matches: (input) => anyScriptHost(input, "cdn.segment.com"),
+  },
+  {
+    providerSlug: "segment",
+    providerName: "Segment",
+    signalType: "js_sdk",
+    signatureKey: "segment-analytics-load",
+    strength: "medium",
+    matches: (input) => anyJavaScriptSource(input, /analytics\.load\s*\(/i),
   },
   {
     providerSlug: "intercom",
@@ -223,23 +377,56 @@ export const providerSignatureRegistry: readonly ProviderSignature[] = [
     signatureKey: "intercom-widget-cdn",
     strength: "strong",
     matches: (input) =>
-      hasScriptHost(input, "widget.intercom.io") || hasScriptHost(input, "intercomcdn.com"),
+      anyScriptHost(input, "widget.intercom.io") || anyScriptHost(input, "intercomcdn.com"),
+  },
+  {
+    providerSlug: "intercom",
+    providerName: "Intercom",
+    signalType: "api_endpoint",
+    signatureKey: "intercom-api-config",
+    strength: "medium",
+    matches: (input) => anyUrlHost(input.inlineConfigUrls, "intercom.io"),
+  },
+  {
+    providerSlug: "intercom",
+    providerName: "Intercom",
+    signalType: "js_sdk",
+    signatureKey: "intercom-init",
+    strength: "medium",
+    matches: (input) => anyJavaScriptSource(input, /Intercom\s*\(/i),
   },
   {
     providerSlug: "algolia",
     providerName: "Algolia",
-    signalType: "document_host",
-    signatureKey: "algolia-search-host",
+    signalType: "api_endpoint",
+    signatureKey: "algolia-api-config",
     strength: "medium",
     matches: (input) =>
-      hasResourceHost(input, "algolia.net") || hasResourceHost(input, "algolianet.com"),
+      anyUrlHost(input.inlineConfigUrls, "algolia.net") ||
+      anyUrlHost(input.inlineConfigUrls, "algolianet.com"),
   },
   {
     providerSlug: "shopify",
     providerName: "Shopify",
-    signalType: "document_host",
-    signatureKey: "shopify-cdn-host",
+    signalType: "script_path",
+    signatureKey: "shopify-storefront-script",
     strength: "medium",
-    matches: (input) => hasResourceHost(input, "cdn.shopify.com"),
+    matches: (input) => anyScriptHostAndPath(input, "cdn.shopify.com", "/shopifycloud/"),
+  },
+  {
+    providerSlug: "openai",
+    providerName: "OpenAI",
+    signalType: "api_endpoint",
+    signatureKey: "openai-api-config",
+    strength: "medium",
+    matches: (input) => anyUrlHost(input.inlineConfigUrls, "api.openai.com"),
+  },
+  {
+    providerSlug: "openai",
+    providerName: "OpenAI",
+    signalType: "csp_host",
+    signatureKey: "openai-csp-api",
+    strength: "weak",
+    matches: (input) => anyCspHost(input.cspHosts, "api.openai.com"),
   },
 ];

@@ -37,6 +37,15 @@ const discoveryMigration = await readFile(
   ),
   "utf8",
 );
+const discoverySignalsMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261011000000_expanded_public_discovery_signals.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 const onboardingMigration = await readFile(
   fileURLToPath(
     new URL(
@@ -137,6 +146,7 @@ async function makeDatabase() {
   await db.exec(classificationMigration);
   await db.exec(impactMigration);
   await db.exec(discoveryMigration);
+  await db.exec(discoverySignalsMigration);
   await db.exec(onboardingMigration);
   await db.exec(preflightMigration);
   await db.exec(preflightPrivilegeMigration);
@@ -529,6 +539,28 @@ describe("Auterim migration and monitoring transaction", () => {
       )`,
       [run.rows[0]!.id, workspaceId, companyId],
     );
+    for (const [index, signalType] of [
+      "resource_host",
+      "csp_host",
+      "api_endpoint",
+      "js_sdk",
+      "redirect_host",
+    ].entries()) {
+      await db.query(
+        `insert into public.dependency_discovery_evidence (
+          workspace_id,run_id,provider_slug,signature_key,signal_type,strength,source_origin
+        ) values ($1,$2,'stripe',$3,$4,'medium','https://discovery.example')`,
+        [workspaceId, run.rows[0]!.id, `m11-signal-${index}`, signalType],
+      );
+    }
+    await expect(
+      db.query(
+        `insert into public.dependency_discovery_evidence (
+          workspace_id,run_id,provider_slug,signature_key,signal_type,strength,source_origin
+        ) values ($1,$2,'stripe','m11-unknown-signal','unknown_type','medium','https://discovery.example')`,
+        [workspaceId, run.rows[0]!.id],
+      ),
+    ).rejects.toBeTruthy();
     const candidate = await db.query<{ id: string }>(
       "select id from public.discovered_dependencies where company_id=$1 and dependency_id=$2",
       [companyId, provider.rows[0]!.id],

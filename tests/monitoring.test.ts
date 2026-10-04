@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { deterministicDiff, hashContent, normalizeContent } from "@/lib/monitoring/content";
-import { fetchHttpSource, SafeFetchError } from "@/lib/monitoring/fetcher";
+import { fetchHttpSource, isPublicAddress, SafeFetchError } from "@/lib/monitoring/fetcher";
 
 const publicAddresses = async () => [{ address: "93.184.216.34", family: 4 }];
 const wire = (status: number, body = "", headers: Record<string, string> = {}) => ({
@@ -39,6 +39,25 @@ describe("deterministic content pipeline", () => {
 });
 
 describe("safe HTTP fetcher", () => {
+  it.each([
+    ["192.88.99.1", false],
+    ["192.0.2.10", false],
+    ["203.0.113.10", false],
+    ["93.184.216.34", true],
+    ["2001:4860:4860::8888", true],
+    ["2001:db8::1", false],
+    ["2001::1", false],
+    ["3ffe::1", false],
+    ["3fff::1", false],
+    ["3fff:0fff::1", false],
+    ["3fff:1000::1", true],
+    ["fc00::1", false],
+    ["fe80::1", false],
+    ["::ffff:192.0.2.1", false],
+  ])("classifies public-routability for %s", (address, expected) => {
+    expect(isPublicAddress(address)).toBe(expected);
+  });
+
   it("fetches HTML and sends a bounded conditional request with controlled user agent", async () => {
     let seenHeaders: Record<string, string> = {};
     const result = await fetchHttpSource(
@@ -127,6 +146,28 @@ describe("safe HTTP fetcher", () => {
     expect(requestCount).toBe(1);
   });
 
+  it.each(["https://end.example.com:80/", "http://end.example.com:443/"])(
+    "rejects a discovery redirect with a mismatched scheme and standard port: %s",
+    async (location) => {
+      let requestCount = 0;
+      await expect(
+        fetchHttpSource(
+          "https://start.example.com/",
+          {},
+          {
+            resolveHost: publicAddresses,
+            restrictToStandardPorts: true,
+            request: async () => {
+              requestCount += 1;
+              return wire(302, "", { location });
+            },
+          },
+        ),
+      ).rejects.toMatchObject({ category: "unsafe_redirect" });
+      expect(requestCount).toBe(1);
+    },
+  );
+
   it("keeps the optional deep pass on the approved origin after redirects", async () => {
     let requestCount = 0;
     await expect(
@@ -213,5 +254,24 @@ describe("safe HTTP fetcher", () => {
         },
       ),
     ).rejects.toMatchObject({ category: "unsafe_target" });
+  });
+
+  it("bounds DNS resolution before starting the HTTP request", async () => {
+    let requestCount = 0;
+    await expect(
+      fetchHttpSource(
+        "https://slow-dns.example/",
+        {},
+        {
+          dnsTimeoutMs: 5,
+          resolveHost: () => new Promise(() => undefined),
+          request: async () => {
+            requestCount += 1;
+            return wire(200, "ok", { "content-type": "text/html" });
+          },
+        },
+      ),
+    ).rejects.toMatchObject({ category: "dns_error" });
+    expect(requestCount).toBe(0);
   });
 });

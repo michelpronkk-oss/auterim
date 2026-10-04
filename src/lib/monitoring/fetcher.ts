@@ -14,6 +14,7 @@ export type FetchResult = {
   body: Buffer;
   contentType: string | null;
   safeHeaders: Record<string, string>;
+  redirectEvidence?: Array<{ origin: string; safeHeaders: Record<string, string> }>;
   etag: string | null;
   lastModified: string | null;
   finalUrl: string;
@@ -48,6 +49,7 @@ type FetchDependencies = {
   maxResponseBytes?: number;
   allowedOrigins?: readonly string[];
   restrictToStandardPorts?: boolean;
+  dnsTimeoutMs?: number;
 };
 
 function parseIPv4(value: string): number[] {
@@ -88,6 +90,7 @@ export function isPublicAddress(address: string): boolean {
       (a === 192 && b === 168) ||
       (a === 192 && b === 0 && c === 0) ||
       (a === 192 && b === 0 && c === 2) ||
+      (a === 192 && b === 88 && c === 99) ||
       (a === 198 && (b === 18 || b === 19)) ||
       (a === 198 && b === 51 && c === 100) ||
       (a === 203 && b === 0 && c === 113)
@@ -105,24 +108,53 @@ export function isPublicAddress(address: string): boolean {
   const first = groups[0]!;
   const unspecified = groups.every((part) => part === 0);
   const loopback = groups.slice(0, 7).every((part) => part === 0) && groups[7] === 1;
-  const isDocumentation = first === 0x2001 && groups[1] === 0x0db8;
+  const globalUnicast = first >= 0x2000 && first <= 0x3fff;
+  const isSpecialUse = first === 0x2001 && groups[1]! <= 0x01ff;
+  const isDocumentation =
+    (first === 0x2001 && groups[1] === 0x0db8) || (first === 0x3fff && (groups[1]! & 0xf000) === 0);
+  const deprecated6bone = first === 0x3ffe;
   const nat64 = first === 0x0064 && groups[1] === 0xff9b;
   return !(
+    !globalUnicast ||
     unspecified ||
     loopback ||
     (first & 0xffc0) === 0xfe80 ||
     (first & 0xfe00) === 0xfc00 ||
     (first & 0xff00) === 0xff00 ||
     isDocumentation ||
+    deprecated6bone ||
+    isSpecialUse ||
     nat64 ||
     first === 0x2002 ||
     (allZeroPrefix && groups[5] === 0)
   );
 }
 
-function safeHeader(value: string | null | undefined): string | null {
-  if (!value || value.length > 512 || /[\r\n\0]/.test(value)) return null;
+function safeHeader(value: string | null | undefined, maxLength = 512): string | null {
+  if (!value || value.length > maxLength || /[\r\n\0]/.test(value)) return null;
   return value;
+}
+
+function selectSafeHeaders(headers: WireResponse["headers"]): Record<string, string> {
+  const names = [
+    "server",
+    "x-powered-by",
+    "x-vercel-id",
+    "x-vercel-cache",
+    "cf-ray",
+    "x-nf-request-id",
+    "x-served-by",
+    "content-security-policy",
+    "content-security-policy-report-only",
+  ];
+  return Object.fromEntries(
+    names.flatMap((name) => {
+      const value = headers[name];
+      const raw = Array.isArray(value) ? value[0] : value;
+      const header = safeHeader(raw, name.startsWith("content-security-policy") ? 4096 : 512);
+      return header ? [[name, header]] : [];
+    }),
+  );
 }
 
 async function resolvePublic(host: string) {
@@ -241,6 +273,7 @@ export async function fetchHttpSource(
   const originalProtocol = current.protocol;
   const originalOrigin = current.origin;
   const visited = new Set<string>();
+  const redirectEvidence: Array<{ origin: string; safeHeaders: Record<string, string> }> = [];
   const resolveHost = dependencies.resolveHost ?? resolvePublic;
   const request = dependencies.request ?? nodeRequest;
   const conditional = new Map<string, string>();
@@ -268,8 +301,10 @@ export async function fetchHttpSource(
     if (
       dependencies.restrictToStandardPorts &&
       current.port !== "" &&
-      current.port !== "80" &&
-      current.port !== "443"
+      !(
+        (current.protocol === "http:" && current.port === "80") ||
+        (current.protocol === "https:" && current.port === "443")
+      )
     ) {
       throw new SafeFetchError("unsafe_redirect", "The source uses a non-standard public port.");
     }
@@ -279,11 +314,22 @@ export async function fetchHttpSource(
     visited.add(current.href);
 
     let addresses: Array<{ address: string; family: number }>;
+    let dnsTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
-      addresses = await resolveHost(current.hostname);
+      addresses = await Promise.race([
+        resolveHost(current.hostname),
+        new Promise<never>((_, reject) => {
+          dnsTimeout = setTimeout(
+            () => reject(new SafeFetchError("dns_error", "The source hostname lookup timed out.")),
+            dependencies.dnsTimeoutMs ?? 3_000,
+          );
+        }),
+      ]);
     } catch (error) {
       if (error instanceof SafeFetchError) throw error;
       throw new SafeFetchError("dns_error", "The source hostname could not be validated.");
+    } finally {
+      if (dnsTimeout) clearTimeout(dnsTimeout);
     }
     if (addresses.length === 0 || addresses.some(({ address }) => !isPublicAddress(address))) {
       throw new SafeFetchError(
@@ -322,6 +368,10 @@ export async function fetchHttpSource(
           response.status,
         );
       }
+      redirectEvidence.push({
+        origin: current.origin,
+        safeHeaders: selectSafeHeaders(response.headers),
+      });
       try {
         current = new URL(location, current);
       } catch {
@@ -352,6 +402,7 @@ export async function fetchHttpSource(
         body: Buffer.alloc(0),
         contentType,
         safeHeaders: {},
+        redirectEvidence,
         etag: returnedEtag,
         lastModified: returnedModified,
         finalUrl: current.href,
@@ -389,21 +440,8 @@ export async function fetchHttpSource(
       status: response.status,
       body,
       contentType,
-      safeHeaders: Object.fromEntries(
-        [
-          "server",
-          "x-powered-by",
-          "x-vercel-id",
-          "x-vercel-cache",
-          "cf-ray",
-          "x-nf-request-id",
-          "x-served-by",
-        ].flatMap((name) => {
-          const value = response.headers[name];
-          const header = safeHeader(Array.isArray(value) ? value[0] : value);
-          return header ? [[name, header]] : [];
-        }),
-      ),
+      safeHeaders: selectSafeHeaders(response.headers),
+      redirectEvidence,
       etag: returnedEtag,
       lastModified: returnedModified,
       finalUrl: current.href,

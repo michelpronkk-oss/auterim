@@ -30,7 +30,11 @@ export function canonicalizePublicWebsiteUrl(value: string): string {
     !url.hostname ||
     url.username ||
     url.password ||
-    (url.port !== "" && url.port !== "80" && url.port !== "443")
+    (url.port !== "" &&
+      !(
+        (url.protocol === "http:" && url.port === "80") ||
+        (url.protocol === "https:" && url.port === "443")
+      ))
   ) {
     throw new WebsiteUrlInputError("unsafe_target", "This website address is not supported.");
   }
