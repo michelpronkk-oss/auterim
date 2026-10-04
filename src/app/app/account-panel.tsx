@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { z } from "zod";
@@ -11,6 +12,10 @@ import {
   type PlanSlug,
   type WorkspaceEntitlements,
 } from "@/lib/billing/plan-catalog";
+import {
+  canonicalizePublicWebsiteUrl,
+  WebsiteUrlInputError,
+} from "@/lib/discovery/normalize-website-url";
 
 const accountSchema = z
   .object({
@@ -64,7 +69,11 @@ async function fetchAccountWithTimeout(input: RequestInfo | URL, init?: RequestI
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), ACCOUNT_BOOTSTRAP_TIMEOUT_MS);
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
+    return await fetch(input, {
+      ...init,
+      cache: init?.cache ?? "no-store",
+      signal: controller.signal,
+    });
   } catch {
     if (controller.signal.aborted) throw new Error("Workspace request timed out. Try again.");
     throw new Error("Could not reach your workspace. Try again.");
@@ -75,14 +84,7 @@ async function fetchAccountWithTimeout(input: RequestInfo | URL, init?: RequestI
 
 function createInitialSetupForm(websiteUrl: string) {
   try {
-    const parsed = new URL(websiteUrl);
-    if (
-      !["http:", "https:"].includes(parsed.protocol) ||
-      parsed.username ||
-      parsed.password ||
-      !["", "80", "443"].includes(parsed.port)
-    )
-      throw new Error("invalid_site");
+    const parsed = new URL(canonicalizePublicWebsiteUrl(websiteUrl));
     const domain = parsed.hostname.replace(/^www\./, "");
     const companyName = domain.split(".")[0]?.replace(/[-_]+/g, " ") ?? "";
     return {
@@ -95,7 +97,1018 @@ function createInitialSetupForm(websiteUrl: string) {
   }
 }
 
-export function AccountPanel({ initialWebsiteUrl = "" }: { initialWebsiteUrl?: string }) {
+const candidateSchema = z.object({
+  candidateId: z.string().uuid(),
+  dependencyId: z.string().uuid(),
+  providerName: z.string(),
+  category: z.string(),
+  confidence: z.number(),
+  confidenceLabel: z.string(),
+  evidenceSummary: z.string(),
+  suggestedStatus: z.enum(["candidate", "confirmed", "rejected"]),
+});
+const dependencySchema = z.object({
+  workspaceDependencyId: z.string().uuid(),
+  dependencyId: z.string().uuid(),
+  providerName: z.string(),
+  category: z.string(),
+  origin: z.string(),
+  criticality: z.enum(["critical", "important", "normal"]),
+  productionCritical: z.boolean(),
+  usedFor: z.array(z.string()),
+  contextNote: z.string(),
+  usageMetadata: z.record(z.string(), z.unknown()),
+});
+const onboardingReadModelSchema = z
+  .object({
+    currentStep: z.string(),
+    company: z.object({
+      id: z.string().uuid(),
+      name: z.string(),
+      websiteUrl: z.string().nullable(),
+    }),
+    discovery: z.object({
+      status: z.enum(["running", "completed", "failed"]).nullable(),
+      candidates: z.array(candidateSchema),
+    }),
+    confirmedDependencies: z.array(dependencySchema),
+    completion: z.object({
+      dependencyReview: z.boolean(),
+      context: z.boolean(),
+      notifications: z.boolean(),
+    }),
+    notificationPreferences: z
+      .object({
+        importantChanges: z.enum(["daily_digest", "instant", "off"]),
+        informational: z.enum(["off", "digest"]),
+        monthlyProtectionReport: z.boolean(),
+      })
+      .nullable(),
+    coveragePreview: z.object({
+      dependenciesConfirmed: z.number(),
+      authoritativeSourcesAvailable: z.number(),
+      criticalDependencies: z.number(),
+      sourcesByType: z.record(z.string(), z.number()),
+    }),
+    activation: z
+      .object({
+        activatedAt: z.string(),
+        baselineStatus: z.enum(["ready", "in_progress", "partial"]),
+      })
+      .nullable(),
+  })
+  .passthrough();
+type OnboardingReadModel = z.infer<typeof onboardingReadModelSchema>;
+
+const usageOptions = [
+  "customer-facing product",
+  "authentication",
+  "billing",
+  "email",
+  "AI processing",
+  "verification",
+  "internal workflows",
+  "analytics",
+  "infrastructure",
+  "database",
+  "other",
+];
+
+function FirstWorkspaceOnboarding({
+  session,
+  workspaceId,
+  onboarding,
+  setupForm,
+  setSetupForm,
+  api,
+  refresh,
+  busy,
+  setBusy,
+  setLoadError,
+  canManageWorkspace,
+}: {
+  session: Session;
+  workspaceId: string;
+  onboarding: OnboardingReadModel | null;
+  setupForm: ReturnType<typeof createInitialSetupForm>;
+  setSetupForm: React.Dispatch<React.SetStateAction<ReturnType<typeof createInitialSetupForm>>>;
+  api: (path: string, init?: RequestInit) => Promise<unknown>;
+  refresh: (token: string, selected?: string) => Promise<void>;
+  busy: boolean;
+  setBusy: (value: boolean) => void;
+  setLoadError: (value: boolean) => void;
+  canManageWorkspace: boolean;
+}) {
+  const [operationError, setOperationError] = useState("");
+  const [websiteError, setWebsiteError] = useState("");
+  const [catalogQuery, setCatalogQuery] = useState("");
+  const [catalog, setCatalog] = useState<
+    Array<{ id: string; slug: string; name: string; category: string }>
+  >([]);
+  const [preferences, setPreferences] = useState<{
+    importantChanges: "daily_digest" | "instant" | "off";
+    informational: "off" | "digest";
+    monthlyProtectionReport: boolean;
+  } | null>(null);
+  const router = useRouter();
+  const notificationPreferences = preferences ?? {
+    importantChanges: onboarding?.notificationPreferences?.importantChanges ?? "instant",
+    informational: onboarding?.notificationPreferences?.informational ?? "off",
+    monthlyProtectionReport: onboarding?.notificationPreferences?.monthlyProtectionReport ?? true,
+  };
+  const [localContext, setLocalContext] = useState<
+    Record<
+      string,
+      {
+        criticality: "critical" | "important" | "normal";
+        productionCritical: boolean;
+        usedFor: string[];
+        contextNote: string;
+      }
+    >
+  >({});
+
+  useEffect(() => {
+    if (!onboarding || !workspaceId || !catalogQuery.trim()) return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void api(
+        `/api/onboarding/dependencies?workspaceId=${encodeURIComponent(workspaceId)}&q=${encodeURIComponent(catalogQuery.trim())}`,
+      )
+        .then((value) => {
+          const parsed = z
+            .object({
+              dependencies: z.array(
+                z.object({
+                  id: z.string().uuid(),
+                  slug: z.string(),
+                  name: z.string(),
+                  category: z.string(),
+                }),
+              ),
+            })
+            .parse(value);
+          if (!cancelled) setCatalog(parsed.dependencies);
+        })
+        .catch(() => {
+          if (!cancelled) setOperationError("Could not search the dependency catalog. Try again.");
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [api, catalogQuery, onboarding, workspaceId]);
+
+  useEffect(() => {
+    if (
+      !onboarding ||
+      !["company_created", "discovery_running"].includes(onboarding.currentStep) ||
+      !workspaceId
+    )
+      return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      if (!cancelled) void refresh(session.access_token, workspaceId).catch(() => undefined);
+    }, 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [onboarding, refresh, session.access_token, workspaceId]);
+
+  async function run(action: () => Promise<unknown>, success?: string) {
+    setBusy(true);
+    setOperationError("");
+    try {
+      await action();
+      if (success) setOperationError(success);
+      if (workspaceId) await refresh(session.access_token, workspaceId);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "The request could not be completed.";
+      setOperationError(message.replaceAll("_", " "));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startWorkspace(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    let websiteUrl: string;
+    try {
+      websiteUrl = canonicalizePublicWebsiteUrl(setupForm.websiteUrl);
+      setWebsiteError("");
+    } catch (error) {
+      setWebsiteError(
+        error instanceof WebsiteUrlInputError ? error.message : "Enter a valid company website.",
+      );
+      return;
+    }
+    const workspaceName = setupForm.workspaceName.trim();
+    const companyName = setupForm.companyName.trim();
+    if (!workspaceName || !companyName) {
+      setOperationError("Add a workspace and company name to continue.");
+      return;
+    }
+    setBusy(true);
+    setOperationError("");
+    try {
+      let key = window.localStorage.getItem("auterim-onboarding-idempotency-key");
+      if (!key) {
+        key = crypto.randomUUID();
+        window.localStorage.setItem("auterim-onboarding-idempotency-key", key);
+      }
+      const result = await api("/api/onboarding", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceName, companyName, websiteUrl, idempotencyKey: key }),
+      });
+      const started = z
+        .object({
+          workspaceId: z.string().uuid(),
+          discoveryQueued: z.boolean().optional(),
+          state: z.string().optional(),
+        })
+        .parse(result);
+      setSetupForm((current) => ({ ...current, websiteUrl }));
+      try {
+        await refresh(session.access_token, started.workspaceId);
+      } catch {
+        setLoadError(true);
+        throw new Error("Workspace created. We could not load it yet. Try again to resume setup.");
+      }
+      window.localStorage.removeItem("auterim-onboarding-idempotency-key");
+      setOperationError(
+        started.discoveryQueued
+          ? "Workspace saved. Auterim is checking public signals from your company website."
+          : started.state === "discovery_running"
+            ? "Workspace saved. Discovery is already in progress."
+            : started.state === "company_created"
+              ? "Workspace saved. Start public discovery to continue."
+              : "Workspace saved. Discovery results are ready to review.",
+      );
+    } catch (error) {
+      const value = error instanceof Error ? error.message : "Workspace setup failed.";
+      setOperationError(value.replaceAll("_", " "));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!onboarding)
+    return (
+      <div className="first-workspace">
+        <p className="eyebrow">FIRST WORKSPACE SETUP</p>
+        <h1>Start with the company you want to protect.</h1>
+        <p className="hero-copy">
+          Auterim will check public signals and suggest dependencies. You decide what to protect.
+        </p>
+        <div className="onboarding-progress" aria-label="Setup progress">
+          {["Company", "Dependencies", "Preferences", "Protect"].map((label, index) => (
+            <div className={`onboarding-step${index === 0 ? " is-current" : ""}`} key={label}>
+              <span>{index + 1}</span>
+              {label}
+            </div>
+          ))}
+        </div>
+        <form className="onboarding-card" onSubmit={startWorkspace} noValidate>
+          <div className="onboarding-fields">
+            <label>
+              Workspace name
+              <input
+                name="workspaceName"
+                autoComplete="organization"
+                maxLength={120}
+                value={setupForm.workspaceName}
+                onChange={(event) =>
+                  setSetupForm((current) => ({ ...current, workspaceName: event.target.value }))
+                }
+                aria-invalid={!setupForm.workspaceName.trim()}
+              />
+            </label>
+            <label>
+              Company name
+              <input
+                name="companyName"
+                autoComplete="organization"
+                maxLength={160}
+                placeholder="Acme, Inc."
+                value={setupForm.companyName}
+                onChange={(event) =>
+                  setSetupForm((current) => ({ ...current, companyName: event.target.value }))
+                }
+                aria-invalid={!setupForm.companyName.trim()}
+              />
+            </label>
+            <label className="onboarding-website-row">
+              Company website
+              <input
+                name="websiteUrl"
+                type="text"
+                inputMode="url"
+                autoComplete="url"
+                maxLength={2048}
+                placeholder="example.com"
+                value={setupForm.websiteUrl}
+                onChange={(event) => {
+                  setSetupForm((current) => ({ ...current, websiteUrl: event.target.value }));
+                  setWebsiteError("");
+                }}
+                aria-invalid={Boolean(websiteError)}
+                aria-describedby={websiteError ? "website-error" : undefined}
+              />
+              {websiteError && (
+                <span id="website-error" className="onboarding-field-error" role="alert">
+                  {websiteError}
+                </span>
+              )}
+            </label>
+          </div>
+          <div className="onboarding-activation">
+            <p>Sign in as {session.user.email}. Your setup is saved as you go.</p>
+            <button type="submit" disabled={busy}>
+              {busy ? "Starting public discovery…" : "Discover my stack"}{" "}
+              <span aria-hidden="true">→</span>
+            </button>
+          </div>
+        </form>
+        {operationError && (
+          <p className="onboarding-inline-error" role="status">
+            {operationError}
+          </p>
+        )}
+      </div>
+    );
+
+  const stepIndex = onboarding.activation
+    ? 3
+    : ["company_created", "discovery_running", "dependencies_review"].includes(
+          onboarding.currentStep,
+        )
+      ? 1
+      : ["context_setup", "notifications_setup"].includes(onboarding.currentStep)
+        ? 2
+        : 3;
+  const canReview =
+    !["company_created", "discovery_running"].includes(onboarding.currentStep) ||
+    onboarding.discovery.status !== null;
+  const incomplete = !onboarding.completion.dependencyReview
+    ? "dependencies_review"
+    : !onboarding.completion.context
+      ? "context_setup"
+      : !onboarding.completion.notifications
+        ? "notifications_setup"
+        : "activation";
+  const discoverySettled =
+    onboarding.discovery.status === "completed" || onboarding.discovery.status === "failed";
+  const unresolvedCandidates = onboarding.discovery.candidates.filter(
+    (candidate) => candidate.suggestedStatus === "candidate",
+  );
+
+  async function retryDiscovery() {
+    const current = onboarding;
+    if (!workspaceId || !current?.company.websiteUrl) return;
+    await run(async () => {
+      const result = await api("/api/onboarding", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          workspaceName: "Workspace",
+          companyName: current.company.name,
+          websiteUrl: current.company.websiteUrl,
+          idempotencyKey: `onboarding-discovery-retry:${workspaceId}`,
+        }),
+      });
+      const started = z.object({ discoveryQueued: z.boolean().optional() }).parse(result);
+      if (!started.discoveryQueued) throw new Error("discovery_retry_unavailable");
+    }, "Discovery restarted.");
+  }
+
+  async function decide(candidateId: string, decision: "confirmed" | "rejected") {
+    if (!workspaceId) return;
+    await run(() =>
+      api("/api/onboarding/dependencies", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "decision", workspaceId, candidateId, decision }),
+      }),
+    );
+  }
+  async function saveContext(dependency: OnboardingReadModel["confirmedDependencies"][number]) {
+    if (!workspaceId) return;
+    const context = localContext[dependency.workspaceDependencyId] ?? {
+      criticality: dependency.criticality,
+      productionCritical: dependency.productionCritical,
+      usedFor: dependency.usedFor,
+      contextNote: dependency.contextNote,
+    };
+    await run(() =>
+      api(`/api/onboarding/dependencies/${dependency.workspaceDependencyId}/context`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, ...context }),
+      }),
+    );
+  }
+  async function finishStep(step: "dependencies_review" | "context_setup" | "notifications_setup") {
+    if (!workspaceId) return;
+    await run(() =>
+      api("/api/onboarding/steps", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, step }),
+      }),
+    );
+  }
+  async function savePreferences() {
+    if (!workspaceId) return;
+    await run(async () => {
+      await api("/api/onboarding/preferences", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, ...notificationPreferences }),
+      });
+      await api("/api/onboarding/steps", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, step: "notifications_setup" }),
+      });
+    });
+  }
+  async function activate() {
+    if (!workspaceId) return;
+    await run(async () => {
+      await api("/api/onboarding/activate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId }),
+      });
+      await refresh(session.access_token, workspaceId);
+      window.dispatchEvent(new Event("auterim:workspace-updated"));
+      router.push("/app");
+    }, "Protection is active.");
+  }
+
+  if (
+    ["company_created", "discovery_running"].includes(onboarding.currentStep) &&
+    (onboarding.discovery.status === null || onboarding.discovery.status === "running")
+  )
+    return (
+      <main className="first-workspace onboarding-scan-shell">
+        <p className="eyebrow">STEP 2 OF 4 · DISCOVERING DEPENDENCIES</p>
+        <section className="onboarding-card onboarding-scan-card" aria-live="polite">
+          <span className="scan-orbit" aria-hidden="true">
+            <span />
+          </span>
+          <p className="card-kicker">SCANNING YOUR STACK</p>
+          <h1>Checking public signals for {onboarding.company.name}.</h1>
+          <p>
+            Auterim is looking at public company website signals to suggest software dependencies.
+            Suggestions stay private to your workspace and won’t be protected unless you confirm
+            them.
+          </p>
+          <p className="onboarding-scan-domain">{onboarding.company.websiteUrl}</p>
+          <p className="onboarding-status" role="status">
+            {onboarding.discovery.status === "running"
+              ? "Discovery is in progress. This screen updates automatically."
+              : onboarding.currentStep === "company_created"
+                ? "Your workspace is saved. Start a public scan to find possible dependencies."
+                : "Discovery has been dispatched. Waiting for the first scan result."}
+          </p>
+          {operationError && (
+            <p className="onboarding-inline-error" role="alert">
+              {operationError}
+            </p>
+          )}
+          <div className="onboarding-activation">
+            <p>You can leave and resume setup at any time.</p>
+            {onboarding.currentStep === "company_created" && canManageWorkspace && (
+              <button type="button" disabled={busy} onClick={() => void retryDiscovery()}>
+                {busy ? "Starting scan…" : "Start public discovery"}{" "}
+                <span aria-hidden="true">→</span>
+              </button>
+            )}
+            {onboarding.currentStep === "company_created" && !canManageWorkspace && (
+              <p className="onboarding-status" role="status">
+                Ask a workspace owner or admin to start the public scan.
+              </p>
+            )}
+          </div>
+        </section>
+      </main>
+    );
+
+  return (
+    <div className="first-workspace">
+      <p className="eyebrow">COMPANY PROTECTION SETUP</p>
+      <h1>
+        {onboarding.activation
+          ? "Auterim is watching."
+          : "Protect the stack your company depends on."}
+      </h1>
+      <p className="hero-copy">
+        {onboarding.company.name} · {onboarding.company.websiteUrl}
+      </p>
+      <div className="onboarding-progress" aria-label="Setup progress">
+        {["Company", "Dependencies", "Preferences", "Protect"].map((label, index) => (
+          <div
+            className={`onboarding-step${index === stepIndex ? " is-current" : index < stepIndex ? " is-complete" : ""}`}
+            key={label}
+          >
+            <span>{index < stepIndex ? "✓" : index + 1}</span>
+            {label}
+          </div>
+        ))}
+      </div>
+      {operationError && (
+        <p className="onboarding-status" role="status">
+          {operationError}
+        </p>
+      )}
+      {!onboarding.activation &&
+        incomplete !== "dependencies_review" &&
+        onboarding.discovery.candidates.some(
+          (candidate) => candidate.suggestedStatus === "candidate",
+        ) && (
+          <section className="onboarding-card">
+            <p className="card-kicker">NEW PUBLIC SIGNALS</p>
+            <h2>Review additional suggestions</h2>
+            <p>
+              Discovery can finish while you continue setup. These remain suggestions until you
+              confirm them.
+            </p>
+            <div className="onboarding-candidates">
+              {onboarding.discovery.candidates
+                .filter((candidate) => candidate.suggestedStatus === "candidate")
+                .map((candidate) => (
+                  <article className="onboarding-candidate" key={candidate.candidateId}>
+                    <div>
+                      <h3>{candidate.providerName}</h3>
+                      <p>{candidate.evidenceSummary}</p>
+                      <div className="onboarding-candidate-meta">
+                        <span>{candidate.category}</span>
+                        <span>{candidate.confidenceLabel} confidence</span>
+                      </div>
+                    </div>
+                    <div className="onboarding-candidate-actions">
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void decide(candidate.candidateId, "confirmed")}
+                      >
+                        Confirm
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void decide(candidate.candidateId, "rejected")}
+                      >
+                        Not used
+                      </button>
+                    </div>
+                  </article>
+                ))}
+            </div>
+          </section>
+        )}
+      {!onboarding.activation && incomplete === "dependencies_review" && (
+        <section className="onboarding-card">
+          <p className="card-kicker">STEP 1 · REVIEW YOUR STACK</p>
+          <h2>Suggested dependencies</h2>
+          <p>
+            These suggestions come from public website signals. Confirm only services your company
+            actually depends on.
+          </p>
+          {onboarding.discovery.status === "running" && (
+            <p className="onboarding-status" role="status">
+              Discovery is still checking public signals. This page updates automatically; you can
+              also add a known dependency below.
+            </p>
+          )}
+          {onboarding.discovery.status === null && !canReview && (
+            <p className="onboarding-status" role="status">
+              Auterim is starting public discovery. This page will update when the results are
+              ready.
+            </p>
+          )}
+          {onboarding.discovery.status === "failed" && (
+            <div className="onboarding-status" role="status">
+              <p>Website discovery did not finish. You can retry or add dependencies manually.</p>
+              <button
+                type="button"
+                className="secondary-link"
+                disabled={busy}
+                onClick={() => void retryDiscovery()}
+              >
+                Retry website scan
+              </button>
+            </div>
+          )}
+          {onboarding.discovery.status === "completed" &&
+            onboarding.discovery.candidates.length === 0 && (
+              <p className="onboarding-status">
+                No dependencies were identified from public signals. Add the services your company
+                uses below.
+              </p>
+            )}
+          <div className="onboarding-candidates">
+            {onboarding.discovery.candidates.map((candidate) => (
+              <article className="onboarding-candidate" key={candidate.candidateId}>
+                <div>
+                  <h3>{candidate.providerName}</h3>
+                  <p>{candidate.evidenceSummary}</p>
+                  <div className="onboarding-candidate-meta">
+                    <span>{candidate.category}</span>
+                    <span>{candidate.confidenceLabel} confidence</span>
+                    <span>
+                      {candidate.suggestedStatus === "confirmed"
+                        ? "Confirmed by you"
+                        : candidate.suggestedStatus === "rejected"
+                          ? "Marked not used"
+                          : "Suggestion · not protected"}
+                    </span>
+                  </div>
+                </div>
+                <div className="onboarding-candidate-actions">
+                  {candidate.suggestedStatus === "candidate" && (
+                    <>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void decide(candidate.candidateId, "confirmed")}
+                      >
+                        Confirm
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void decide(candidate.candidateId, "rejected")}
+                      >
+                        Not used
+                      </button>
+                    </>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+          <div className="onboarding-manual-add">
+            <label htmlFor="dependency-search">Add a dependency you already know</label>
+            <input
+              id="dependency-search"
+              value={catalogQuery}
+              onChange={(event) => setCatalogQuery(event.target.value)}
+              placeholder="Search services, e.g. OpenAI"
+              autoComplete="off"
+            />
+            <p className="summary-note">
+              Only catalog services can be monitored in this setup. Unknown services are not
+              silently added.
+            </p>
+            <div className="onboarding-candidates">
+              {catalogQuery.trim() &&
+                catalog.map((item) => (
+                  <article className="onboarding-candidate" key={item.id}>
+                    <div>
+                      <h4>{item.name}</h4>
+                      <p>{item.category}</p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() =>
+                        void run(() =>
+                          api("/api/onboarding/dependencies", {
+                            method: "POST",
+                            headers: { "content-type": "application/json" },
+                            body: JSON.stringify({
+                              action: "manual_add",
+                              workspaceId,
+                              dependencySlug: item.slug,
+                            }),
+                          }),
+                        )
+                      }
+                    >
+                      Add
+                    </button>
+                  </article>
+                ))}
+            </div>
+          </div>
+          <div className="onboarding-review-summary">
+            <div>
+              <strong>{onboarding.confirmedDependencies.length}</strong>
+              <span>confirmed dependencies</span>
+            </div>
+            <div>
+              <strong>{onboarding.coveragePreview.authoritativeSourcesAvailable}</strong>
+              <span>authoritative sources available</span>
+            </div>
+          </div>
+          <div className="onboarding-activation">
+            <p>Only confirmed and manually added services become protected.</p>
+            <button
+              type="button"
+              disabled={busy || !canReview || !onboarding.confirmedDependencies.length}
+              onClick={() => void finishStep("dependencies_review")}
+            >
+              {busy ? "Saving…" : "Continue"} <span aria-hidden="true">→</span>
+            </button>
+          </div>
+        </section>
+      )}
+      {!onboarding.activation && incomplete === "context_setup" && (
+        <section className="onboarding-card">
+          <p className="card-kicker">STEP 3 · PREFERENCES</p>
+          <h2>What matters most?</h2>
+          <p>
+            Optional context helps Auterim explain how a verified change may affect your business.
+          </p>
+          <div className="onboarding-candidates">
+            {onboarding.confirmedDependencies.map((dependency) => {
+              const context = localContext[dependency.workspaceDependencyId] ?? {
+                criticality: dependency.criticality,
+                productionCritical: dependency.productionCritical,
+                usedFor: dependency.usedFor,
+                contextNote: dependency.contextNote,
+              };
+              return (
+                <article className="onboarding-candidate" key={dependency.workspaceDependencyId}>
+                  <div>
+                    <h3>{dependency.providerName}</h3>
+                    <p>
+                      {dependency.origin === "manual" ? "Added by you" : "Confirmed from discovery"}
+                    </p>
+                    <div className="onboarding-fields">
+                      <label>
+                        Criticality
+                        <select
+                          value={context.criticality}
+                          onChange={(event) =>
+                            setLocalContext((all) => ({
+                              ...all,
+                              [dependency.workspaceDependencyId]: {
+                                ...context,
+                                criticality: event.target.value as typeof context.criticality,
+                              },
+                            }))
+                          }
+                        >
+                          <option value="normal">Normal</option>
+                          <option value="important">Important</option>
+                          <option value="critical">Critical</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>Production critical</span>
+                        <select
+                          value={String(context.productionCritical)}
+                          onChange={(event) =>
+                            setLocalContext((all) => ({
+                              ...all,
+                              [dependency.workspaceDependencyId]: {
+                                ...context,
+                                productionCritical: event.target.value === "true",
+                              },
+                            }))
+                          }
+                        >
+                          <option value="false">No</option>
+                          <option value="true">Yes</option>
+                        </select>
+                      </label>
+                      <label className="onboarding-website-row">
+                        Used for (optional)
+                        <select
+                          multiple
+                          value={context.usedFor}
+                          onChange={(event) =>
+                            setLocalContext((all) => ({
+                              ...all,
+                              [dependency.workspaceDependencyId]: {
+                                ...context,
+                                usedFor: Array.from(
+                                  event.target.selectedOptions,
+                                  (option) => option.value,
+                                ),
+                              },
+                            }))
+                          }
+                        >
+                          {usageOptions.map((usage) => (
+                            <option value={usage} key={usage}>
+                              {usage}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="onboarding-website-row">
+                        Context note (optional)
+                        <textarea
+                          value={context.contextNote}
+                          maxLength={2000}
+                          onChange={(event) =>
+                            setLocalContext((all) => ({
+                              ...all,
+                              [dependency.workspaceDependencyId]: {
+                                ...context,
+                                contextNote: event.target.value,
+                              },
+                            }))
+                          }
+                        />
+                      </label>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void saveContext(dependency)}
+                    >
+                      Save context
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+          <div className="onboarding-activation">
+            <p>You can leave detailed context blank and update it later.</p>
+            <button type="button" disabled={busy} onClick={() => void finishStep("context_setup")}>
+              Continue <span aria-hidden="true">→</span>
+            </button>
+          </div>
+        </section>
+      )}
+      {!onboarding.activation && incomplete === "notifications_setup" && (
+        <section className="onboarding-card">
+          <p className="card-kicker">STEP 3 · PREFERENCES</p>
+          <h2>Choose what reaches you</h2>
+          <p>
+            Critical changes are always instant. These preferences are saved now; delivery can be
+            connected later.
+          </p>
+          <div className="onboarding-fields">
+            <label>
+              Important changes
+              <select
+                value={notificationPreferences.importantChanges}
+                onChange={(event) =>
+                  setPreferences((current) => ({
+                    ...notificationPreferences,
+                    ...current,
+                    importantChanges: event.target
+                      .value as typeof notificationPreferences.importantChanges,
+                  }))
+                }
+              >
+                <option value="instant">Instant</option>
+                <option value="daily_digest">Daily digest</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
+            <label>
+              Informational updates
+              <select
+                value={notificationPreferences.informational}
+                onChange={(event) =>
+                  setPreferences((current) => ({
+                    ...notificationPreferences,
+                    ...current,
+                    informational: event.target
+                      .value as typeof notificationPreferences.informational,
+                  }))
+                }
+              >
+                <option value="off">Off</option>
+                <option value="digest">Digest</option>
+              </select>
+            </label>
+            <label>
+              Monthly protection report
+              <select
+                value={String(notificationPreferences.monthlyProtectionReport)}
+                onChange={(event) =>
+                  setPreferences((current) => ({
+                    ...notificationPreferences,
+                    ...current,
+                    monthlyProtectionReport: event.target.value === "true",
+                  }))
+                }
+              >
+                <option value="true">On</option>
+                <option value="false">Off</option>
+              </select>
+            </label>
+          </div>
+          <div className="onboarding-activation">
+            <p>No email is sent as part of setup.</p>
+            <button type="button" disabled={busy} onClick={() => void savePreferences()}>
+              Save and continue <span aria-hidden="true">→</span>
+            </button>
+          </div>
+        </section>
+      )}
+      {onboarding.activation && (
+        <section className="onboarding-card">
+          <p className="card-kicker">PROTECTION ACTIVE</p>
+          <h2>Auterim is watching.</h2>
+          <div className="onboarding-review-summary">
+            <div>
+              <strong>{onboarding.coveragePreview.dependenciesConfirmed}</strong>
+              <span>dependencies</span>
+            </div>
+            <div>
+              <strong>{onboarding.coveragePreview.authoritativeSourcesAvailable}</strong>
+              <span>authoritative sources</span>
+            </div>
+            <div>
+              <strong>{onboarding.coveragePreview.criticalDependencies}</strong>
+              <span>critical dependencies</span>
+            </div>
+          </div>
+          <p>
+            Baseline status: {onboarding.activation.baselineStatus.replaceAll("_", " ")}. Your
+            five-day Pro trial begins after protection is activated.
+          </p>
+          <div className="onboarding-activation">
+            <Link className="primary-link" href="/app">
+              Go to dashboard <span aria-hidden="true">→</span>
+            </Link>
+          </div>
+        </section>
+      )}
+      {!onboarding.activation && incomplete === "activation" && (
+        <section className="onboarding-card">
+          <p className="card-kicker">READY TO PROTECT</p>
+          <h2>Review your coverage</h2>
+          <p>
+            Protection starts the five-day Pro trial and makes eligible global sources available for
+            baseline monitoring.
+          </p>
+          {!discoverySettled && (
+            <p className="onboarding-status" role="status">
+              Discovery is still running. You can finish setup now; activation will be available
+              when all suggestions are ready to review.
+            </p>
+          )}
+          <div className="onboarding-review-summary">
+            <div>
+              <strong>{onboarding.coveragePreview.dependenciesConfirmed}</strong>
+              <span>confirmed dependencies</span>
+            </div>
+            <div>
+              <strong>{onboarding.coveragePreview.authoritativeSourcesAvailable}</strong>
+              <span>authoritative sources</span>
+            </div>
+            <div>
+              <strong>{onboarding.coveragePreview.criticalDependencies}</strong>
+              <span>critical dependencies</span>
+            </div>
+          </div>
+          <div className="onboarding-activation">
+            <p>
+              {unresolvedCandidates.length
+                ? `Review or dismiss ${unresolvedCandidates.length} remaining suggestion${unresolvedCandidates.length === 1 ? "" : "s"} before activation.`
+                : "Activate only the dependencies your team has confirmed."}
+            </p>
+            {!canManageWorkspace && (
+              <p className="onboarding-status" role="status">
+                A workspace owner or admin must start protection.
+              </p>
+            )}
+            <button
+              type="button"
+              disabled={
+                busy ||
+                !canManageWorkspace ||
+                !onboarding.confirmedDependencies.length ||
+                !discoverySettled ||
+                unresolvedCandidates.length > 0
+              }
+              onClick={() => void activate()}
+            >
+              {busy ? "Activating…" : "Activate protection"} <span aria-hidden="true">→</span>
+            </button>
+          </div>
+        </section>
+      )}
+      <p className="account-step-note">
+        Your progress is saved to this workspace. You can leave and resume later.
+      </p>
+    </div>
+  );
+}
+
+export function AccountPanel({
+  initialWebsiteUrl = "",
+  onboardingMode = false,
+}: {
+  initialWebsiteUrl?: string;
+  onboardingMode?: boolean;
+}) {
   const [session, setSession] = useState<Session | null>(null);
   const [workspaceId, setWorkspaceId] = useState("");
   const [workspaces, setWorkspaces] = useState<
@@ -111,7 +1124,7 @@ export function AccountPanel({ initialWebsiteUrl = "" }: { initialWebsiteUrl?: s
   const api = useCallback(
     async (path: string, init?: RequestInit) => {
       if (!session?.access_token) throw new Error("Sign in to continue.");
-      const response = await fetch(path, {
+      const response = await fetchAccountWithTimeout(path, {
         ...init,
         headers: { authorization: `Bearer ${session.access_token}`, ...(init?.headers ?? {}) },
       });
@@ -174,6 +1187,7 @@ export function AccountPanel({ initialWebsiteUrl = "" }: { initialWebsiteUrl?: s
     setWorkspaceId(target);
     window.localStorage.setItem("auterim-workspace-id", target);
     setAccount(accountSchema.parse(body));
+    window.localStorage.removeItem("auterim-onboarding-idempotency-key");
     setLoadError(false);
   }, []);
 
@@ -200,38 +1214,6 @@ export function AccountPanel({ initialWebsiteUrl = "" }: { initialWebsiteUrl?: s
     });
     return () => listener.subscription.unsubscribe();
   }, [load]);
-
-  async function startWorkspace(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setBusy(true);
-    setMessage("");
-    const form = new FormData(event.currentTarget);
-    try {
-      let key = window.localStorage.getItem("auterim-onboarding-idempotency-key");
-      if (!key) {
-        key = crypto.randomUUID();
-        window.localStorage.setItem("auterim-onboarding-idempotency-key", key);
-      }
-      const result = await api("/api/account/onboarding/start", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          workspaceName: form.get("workspaceName"),
-          companyName: form.get("companyName"),
-          websiteUrl: form.get("websiteUrl"),
-          idempotencyKey: key,
-        }),
-      });
-      const response = z.object({ workspaceId: z.string().uuid() }).parse(result);
-      window.localStorage.removeItem("auterim-onboarding-idempotency-key");
-      await load(session!.access_token, response.workspaceId);
-      setMessage("Workspace created. Your onboarding progress is saved as you go.");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Workspace setup failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function signOut() {
     setBusy(true);
@@ -326,7 +1308,7 @@ export function AccountPanel({ initialWebsiteUrl = "" }: { initialWebsiteUrl?: s
   return (
     <main className="product-shell">
       <header className="topbar product-topbar">
-        <Link className="wordmark" href="/">
+        <Link className="wordmark" href={onboardingMode ? "/app/onboarding" : "/"}>
           <span className="brand-mark">A</span>auterim
         </Link>
         <div className="account-nav">
@@ -336,14 +1318,15 @@ export function AccountPanel({ initialWebsiteUrl = "" }: { initialWebsiteUrl?: s
           </button>
         </div>
       </header>
-      <section className="product-content">
+      <section className={`product-content${onboardingMode ? " onboarding-product-content" : ""}`}>
         <p className="eyebrow">
-          <span className="status-dot" /> Account &amp; protection
+          <span className="status-dot" />{" "}
+          {onboardingMode ? "Workspace setup" : "Account &amp; protection"}
         </p>
-        <h1>
-          {account ? "Your workspace, protected with context." : "Set up your first workspace."}
-        </h1>
-        {message && (
+        {account?.onboarding.currentStep === "active" && (
+          <h1>Your workspace, protected with context.</h1>
+        )}
+        {message && account?.onboarding.currentStep === "active" && (
           <p className="auth-message" role="status">
             {message}
           </p>
@@ -366,56 +1349,27 @@ export function AccountPanel({ initialWebsiteUrl = "" }: { initialWebsiteUrl?: s
             </button>
           </section>
         )}
-        {!loadError && !workspaces.length && (
-          <form className="auth-form workspace-form" onSubmit={startWorkspace}>
-            <label>
-              Workspace name
-              <input
-                name="workspaceName"
-                required
-                minLength={1}
-                maxLength={120}
-                placeholder="Acme engineering"
-                value={setupForm.workspaceName}
-                onChange={(event) =>
-                  setSetupForm((current) => ({ ...current, workspaceName: event.target.value }))
-                }
-              />
-            </label>
-            <label>
-              Company name
-              <input
-                name="companyName"
-                required
-                minLength={1}
-                maxLength={160}
-                placeholder="Acme, Inc."
-                value={setupForm.companyName}
-                onChange={(event) =>
-                  setSetupForm((current) => ({ ...current, companyName: event.target.value }))
-                }
-              />
-            </label>
-            <label>
-              Company website
-              <input
-                name="websiteUrl"
-                type="url"
-                required
-                maxLength={2048}
-                placeholder="https://example.com"
-                value={setupForm.websiteUrl}
-                onChange={(event) =>
-                  setSetupForm((current) => ({ ...current, websiteUrl: event.target.value }))
-                }
-              />
-            </label>
-            <button className="primary-link auth-submit" disabled={busy}>
-              {busy ? "Saving…" : "Create workspace"}
-              <span aria-hidden="true">→</span>
-            </button>
-          </form>
-        )}
+        {!loadError &&
+          session &&
+          (!workspaces.length || (account && !account.onboarding.activation)) && (
+            <FirstWorkspaceOnboarding
+              session={session}
+              workspaceId={workspaceId}
+              onboarding={
+                account
+                  ? (onboardingReadModelSchema.safeParse(account.onboarding).data ?? null)
+                  : null
+              }
+              setupForm={setupForm}
+              setSetupForm={setSetupForm}
+              api={api}
+              refresh={load}
+              busy={busy}
+              setBusy={setBusy}
+              setLoadError={setLoadError}
+              canManageWorkspace={account?.role === "owner" || account?.role === "admin"}
+            />
+          )}
         {workspaces.length > 1 && (
           <label className="workspace-select">
             Workspace
@@ -431,7 +1385,7 @@ export function AccountPanel({ initialWebsiteUrl = "" }: { initialWebsiteUrl?: s
             </select>
           </label>
         )}
-        {account && (
+        {account?.onboarding.activation && (
           <>
             <div className="account-summary">
               <div>
@@ -529,15 +1483,16 @@ export function AccountPanel({ initialWebsiteUrl = "" }: { initialWebsiteUrl?: s
               </section>
             )}
             <p className="account-step-note">
-              Resume onboarding at{" "}
-              <strong>{account.onboarding.currentStep.replaceAll("_", " ")}</strong>. Changes
-              already confirmed in onboarding remain attached to this workspace.
+              Your protection is active. Changes already confirmed in onboarding remain attached to
+              this workspace.
             </p>
           </>
         )}
-        <Link className="back-link" href="/">
-          ← Back to Auterim
-        </Link>
+        {!onboardingMode && (
+          <Link className="back-link" href="/">
+            ← Back to Auterim
+          </Link>
+        )}
       </section>
     </main>
   );

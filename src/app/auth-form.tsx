@@ -9,6 +9,7 @@ import {
   emitPublicConversionEvent,
   readPublicAttribution,
 } from "@/lib/public/conversion";
+import { canonicalizePublicWebsiteUrl } from "@/lib/discovery/normalize-website-url";
 
 export type AuthMode = "signup" | "login" | "forgot" | "reset";
 
@@ -55,14 +56,7 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
         const websiteUrl = current.get("websiteUrl");
         if (websiteUrl && websiteUrl.length <= 2048) {
           try {
-            const parsed = new URL(websiteUrl);
-            if (
-              ["https:", "http:"].includes(parsed.protocol) &&
-              !parsed.username &&
-              !parsed.password &&
-              ["", "80", "443"].includes(parsed.port)
-            )
-              nextParams.set("websiteUrl", websiteUrl);
+            nextParams.set("websiteUrl", canonicalizePublicWebsiteUrl(websiteUrl));
           } catch {
             // Ignore malformed attribution input and continue through ordinary workspace setup.
           }
@@ -71,7 +65,7 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
           const value = current.get(key);
           if (value && /^[\p{L}\p{N}._ -]{1,100}$/u.test(value)) nextParams.set(key, value);
         }
-        const nextPath = `/app/account${nextParams.size ? `?${nextParams}` : ""}`;
+        const nextPath = `/app/onboarding${nextParams.size ? `?${nextParams}` : ""}`;
         emitPublicConversionEvent("signup_started", readPublicAttribution(current, "/signup"));
         const { data, error } = await supabase.auth.signUp({
           email,

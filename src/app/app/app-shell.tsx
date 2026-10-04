@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   createContext,
   useCallback,
@@ -42,7 +42,7 @@ function withTimeout<T>(promise: Promise<T>, message: string): Promise<T> {
   });
 }
 
-type Workspace = { workspaceId: string; name: string; role: string };
+type Workspace = { workspaceId: string; name: string; role: string; active: boolean };
 type AppContextValue = {
   session: Session;
   workspaceId: string;
@@ -69,6 +69,7 @@ const links = [
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
   const [session, setSession] = useState<Session | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceId, setWorkspaceId] = useState("");
@@ -85,6 +86,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       try {
         const response = await fetch(path, {
           ...init,
+          cache: init?.cache ?? "no-store",
           signal: controller.signal,
           headers: { authorization: `Bearer ${session.access_token}`, ...(init?.headers ?? {}) },
         });
@@ -121,13 +123,17 @@ export function AppShell({ children }: { children: ReactNode }) {
       );
       const entries = await Promise.all(
         (list.workspaces ?? []).map(async (item) => {
-          const account = await api<{ onboarding?: { company?: { name?: string } } }>(
-            `/api/account/status?workspaceId=${encodeURIComponent(item.workspace_id)}`,
-          );
+          const account = await api<{
+            onboarding?: {
+              company?: { name?: string };
+              activation?: { activatedAt?: string } | null;
+            };
+          }>(`/api/account/status?workspaceId=${encodeURIComponent(item.workspace_id)}`);
           return {
             workspaceId: item.workspace_id,
             name: account.onboarding?.company?.name || "Workspace",
             role: item.role,
+            active: Boolean(account.onboarding?.activation?.activatedAt),
           };
         }),
       );
@@ -141,12 +147,16 @@ export function AppShell({ children }: { children: ReactNode }) {
       const saved = window.localStorage.getItem("auterim-workspace-id");
       const selected = entries.some((item) => item.workspaceId === saved)
         ? saved!
-        : (entries[0]?.workspaceId ?? "");
+        : (entries.find((item) => item.active)?.workspaceId ?? entries[0]?.workspaceId ?? "");
       setWorkspaceId(selected);
       if (selected) window.localStorage.setItem("auterim-workspace-id", selected);
       else window.localStorage.removeItem("auterim-workspace-id");
       setBootstrapState(
-        resolveWorkspaceBootstrapState({ authenticated: true, workspaceCount: entries.length }),
+        resolveWorkspaceBootstrapState({
+          authenticated: true,
+          workspaceCount: entries.length,
+          selectedWorkspaceActive: entries.find((item) => item.workspaceId === selected)?.active,
+        }),
       );
     } catch (bootstrapError) {
       if (requestId !== bootstrapRequestId.current) return;
@@ -210,6 +220,11 @@ export function AppShell({ children }: { children: ReactNode }) {
     };
   }, [session, refresh]);
   useEffect(() => {
+    const handleWorkspaceUpdate = () => void refresh();
+    window.addEventListener("auterim:workspace-updated", handleWorkspaceUpdate);
+    return () => window.removeEventListener("auterim:workspace-updated", handleWorkspaceUpdate);
+  }, [refresh]);
+  useEffect(() => {
     if (!session || !workspaceId) return;
     let cancelled = false;
     void api<{ unreadCount: number }>(
@@ -226,6 +241,12 @@ export function AppShell({ children }: { children: ReactNode }) {
     };
   }, [api, session, workspaceId, pathname]);
 
+  useEffect(() => {
+    if (bootstrapState === "NEEDS_ONBOARDING" && pathname !== "/app/onboarding")
+      router.replace("/app/onboarding");
+    if (bootstrapState === "READY" && pathname === "/app/onboarding") router.replace("/app");
+  }, [bootstrapState, pathname, router]);
+
   const value = useMemo(
     () => ({
       session: session!,
@@ -233,8 +254,17 @@ export function AppShell({ children }: { children: ReactNode }) {
       workspace: workspaces.find((item) => item.workspaceId === workspaceId)!,
       workspaces,
       selectWorkspace: (id: string) => {
+        const selected = workspaces.find((item) => item.workspaceId === id);
         setWorkspaceId(id);
         window.localStorage.setItem("auterim-workspace-id", id);
+        if (selected)
+          setBootstrapState(
+            resolveWorkspaceBootstrapState({
+              authenticated: true,
+              workspaceCount: workspaces.length,
+              selectedWorkspaceActive: selected.active,
+            }),
+          );
       },
       api,
       refresh,
@@ -293,22 +323,8 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       </main>
     );
-  if (bootstrapState === "NEEDS_ONBOARDING" && pathname !== "/app/account")
-    return (
-      <main className="app-auth">
-        <div className="auth-card">
-          <span className="brand-mark">A</span>
-          <p className="eyebrow">Your workspace</p>
-          <h1>Set up protection for your company.</h1>
-          <p>
-            Your account is ready. Finish workspace setup to start monitoring your dependencies.
-          </p>
-          <Link className="button-primary" href="/app/account">
-            Continue setup <span aria-hidden="true">→</span>
-          </Link>
-        </div>
-      </main>
-    );
+  if (bootstrapState === "NEEDS_ONBOARDING" && pathname !== "/app/onboarding")
+    return <main className="app-loading">Opening your protection setup…</main>;
   if (bootstrapState === "NEEDS_ONBOARDING") return <>{children}</>;
   const active = (href: string) =>
     href === "/app" ? pathname === href : pathname === href || pathname.startsWith(`${href}/`);

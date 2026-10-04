@@ -3,6 +3,10 @@
 import { useState } from "react";
 import Link from "next/link";
 import { emitPublicConversionEvent, readPublicAttribution } from "@/lib/public/conversion";
+import {
+  canonicalizePublicWebsiteUrl,
+  WebsiteUrlInputError,
+} from "@/lib/discovery/normalize-website-url";
 
 type Scan = {
   status: "completed" | "failed";
@@ -18,6 +22,7 @@ type Scan = {
 
 export function StackScanner() {
   const [websiteUrl, setWebsiteUrl] = useState("");
+  const [scannedWebsiteUrl, setScannedWebsiteUrl] = useState("");
   const [scan, setScan] = useState<Scan | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -27,27 +32,38 @@ export function StackScanner() {
     setBusy(true);
     setMessage("");
     setScan(null);
+    setScannedWebsiteUrl("");
     const search = new URLSearchParams(window.location.search);
     const attribution = readPublicAttribution(search, window.location.pathname);
     emitPublicConversionEvent("stack_scan_started", attribution);
     try {
+      const normalizedUrl = canonicalizePublicWebsiteUrl(websiteUrl);
       const response = await fetch("/api/public/stack-scan", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ websiteUrl }),
+        body: JSON.stringify({ websiteUrl: normalizedUrl }),
       });
       const body = (await response.json()) as Scan & { message?: string };
       if (!response.ok) throw new Error(body.message || "The scan could not be completed safely.");
       setScan(body);
+      setScannedWebsiteUrl(normalizedUrl);
       emitPublicConversionEvent("stack_scan_completed", attribution);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "The scan could not be completed.");
+      setMessage(
+        error instanceof WebsiteUrlInputError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "The scan could not be completed.",
+      );
     } finally {
       setBusy(false);
     }
   }
 
-  const continueParams = new URLSearchParams({ websiteUrl: websiteUrl.trim() });
+  const continueParams = new URLSearchParams({
+    websiteUrl: scannedWebsiteUrl || websiteUrl.trim(),
+  });
   for (const key of ["utm_source", "utm_medium", "utm_campaign"]) {
     const value = new URLSearchParams(
       typeof window === "undefined" ? "" : window.location.search,
@@ -57,19 +73,23 @@ export function StackScanner() {
   const continueUrl = `/signup?${continueParams}`;
   return (
     <div className="scanner-panel">
-      <form className="scanner-form" onSubmit={submit}>
+      <form className="scanner-form" onSubmit={submit} noValidate>
         <label htmlFor="websiteUrl">Company website</label>
         <div className="scanner-input-row">
           <input
             id="websiteUrl"
             name="websiteUrl"
-            type="url"
+            type="text"
+            inputMode="url"
             autoComplete="url"
-            placeholder="https://example.com"
+            placeholder="example.com"
             value={websiteUrl}
-            onChange={(event) => setWebsiteUrl(event.target.value)}
+            onChange={(event) => {
+              setWebsiteUrl(event.target.value);
+              setScan(null);
+              setScannedWebsiteUrl("");
+            }}
             maxLength={2048}
-            required
           />
           <button className="primary-link scanner-submit" disabled={busy}>
             {busy ? "Checking…" : "Scan public signals"} <span aria-hidden="true">→</span>

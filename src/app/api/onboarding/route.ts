@@ -9,6 +9,8 @@ import {
 import type { discoverWebsiteDependenciesTask } from "@/trigger/discover-website-dependencies";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
+const PRIVATE_NO_STORE = { "Cache-Control": "private, no-store, max-age=0" };
+
 const workspaceIdSchema = z.string().uuid();
 const startSchema = z
   .object({
@@ -30,7 +32,7 @@ export async function GET(request: Request) {
     p_workspace_id: parsed.data,
   });
   if (error) return onboardingError(error);
-  return Response.json(data);
+  return Response.json(data, { headers: PRIVATE_NO_STORE });
 }
 
 export async function POST(request: Request) {
@@ -60,7 +62,7 @@ export async function POST(request: Request) {
       })
       .parse(data);
 
-    if (started.state === "company_created") {
+    if (["company_created", "discovery_running"].includes(started.state)) {
       const claim = await dispatchClient.rpc("claim_onboarding_discovery_dispatch", {
         p_actor_user_id: auth.user.id,
         p_workspace_id: started.workspaceId,

@@ -8,7 +8,7 @@ import { confirmSignupConversion } from "@/lib/public/conversion";
 
 function safeNextPath(value: string | null) {
   if (!value || !value.startsWith("/") || value.startsWith("//") || value.includes("\\"))
-    return "/app";
+    return "/app/onboarding";
   return value;
 }
 
@@ -26,7 +26,7 @@ export default function AuthCallbackPage() {
         if (!data.user) throw new Error("auth_session_missing");
         if (!cancelled) {
           const nextPath = safeNextPath(new URLSearchParams(window.location.search).get("next"));
-          if (nextPath.startsWith("/app/account")) {
+          if (nextPath.startsWith("/app/onboarding") || nextPath.startsWith("/app/account")) {
             if (sessionData.session) void confirmSignupConversion(sessionData.session.access_token);
           }
           router.replace(nextPath);

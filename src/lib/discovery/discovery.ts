@@ -2,6 +2,10 @@ import "server-only";
 import { parse } from "parse5";
 import { fetchHttpSource, SafeFetchError } from "@/lib/monitoring/fetcher";
 import {
+  canonicalizePublicWebsiteUrl,
+  WebsiteUrlInputError,
+} from "@/lib/discovery/normalize-website-url";
+import {
   providerSignatureRegistry,
   type DiscoverySignalType,
   type SignatureInput,
@@ -47,28 +51,14 @@ type HtmlNode = {
 };
 
 export function normalizePublicWebsiteUrl(value: string): string {
-  if (typeof value !== "string" || value.length > 2048) {
-    throw new SafeFetchError("invalid_url", "The website URL is invalid.");
-  }
-  let url: URL;
   try {
-    url = new URL(value.trim());
-  } catch {
-    throw new SafeFetchError("invalid_url", "The website URL is invalid.");
+    return canonicalizePublicWebsiteUrl(value);
+  } catch (error) {
+    if (error instanceof WebsiteUrlInputError) {
+      throw new SafeFetchError(error.category, error.message);
+    }
+    throw error;
   }
-  if (
-    (url.protocol !== "https:" && url.protocol !== "http:") ||
-    url.username ||
-    url.password ||
-    (url.port !== "" && url.port !== "80" && url.port !== "443")
-  ) {
-    throw new SafeFetchError("unsafe_target", "The website URL is not an allowed public HTTP URL.");
-  }
-  // Discovery is rooted at the public site origin; do not persist route paths that may carry IDs.
-  url.pathname = "/";
-  url.search = "";
-  url.hash = "";
-  return url.href;
 }
 
 function sanitizeSourceOrigin(value: string): string | null {

@@ -4,10 +4,13 @@ export type WorkspaceBootstrapState =
 export function resolveWorkspaceBootstrapState(input: {
   authenticated: boolean;
   workspaceCount?: number;
+  selectedWorkspaceActive?: boolean;
   failed?: boolean;
 }): WorkspaceBootstrapState {
   if (!input.authenticated) return "AUTH_REQUIRED";
   if (input.failed) return "ERROR";
   if (input.workspaceCount === undefined) return "LOADING";
-  return input.workspaceCount > 0 ? "READY" : "NEEDS_ONBOARDING";
+  if (input.workspaceCount === 0) return "NEEDS_ONBOARDING";
+  if (input.selectedWorkspaceActive === undefined) return "LOADING";
+  return input.selectedWorkspaceActive ? "READY" : "NEEDS_ONBOARDING";
 }

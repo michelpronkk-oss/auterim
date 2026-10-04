@@ -6,9 +6,29 @@ describe("workspace bootstrap state", () => {
     expect(resolveWorkspaceBootstrapState({ authenticated: true })).toBe("LOADING");
   });
 
-  it("shows the dashboard for an authenticated workspace member", () => {
+  it("shows the dashboard only after the selected workspace is active", () => {
+    expect(
+      resolveWorkspaceBootstrapState({
+        authenticated: true,
+        workspaceCount: 1,
+        selectedWorkspaceActive: true,
+      }),
+    ).toBe("READY");
+  });
+
+  it("routes an incomplete workspace member into onboarding", () => {
+    expect(
+      resolveWorkspaceBootstrapState({
+        authenticated: true,
+        workspaceCount: 1,
+        selectedWorkspaceActive: false,
+      }),
+    ).toBe("NEEDS_ONBOARDING");
+  });
+
+  it("fails closed while selected workspace activation is unknown", () => {
     expect(resolveWorkspaceBootstrapState({ authenticated: true, workspaceCount: 1 })).toBe(
-      "READY",
+      "LOADING",
     );
   });
 

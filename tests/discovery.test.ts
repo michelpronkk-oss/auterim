@@ -139,6 +139,14 @@ describe("offline URL dependency evaluation", () => {
   });
 
   it.each([
+    ["example.com", "https://example.com/"],
+    ["  www.example.com/path?q=1  ", "https://www.example.com/"],
+    ["http://example.com/path", "http://example.com/"],
+  ])("normalizes a company website input %s", (input, expected) => {
+    expect(normalizePublicWebsiteUrl(input)).toBe(expected);
+  });
+
+  it.each([
     "file:///etc/passwd",
     "ftp://example.com/file",
     "https://user:pass@example.com/",

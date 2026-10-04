@@ -538,9 +538,6 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
                     Dependencies discovered from your company URL are suggestions until a workspace
                     member confirms them.
                   </p>
-                  <Link href="/app/account" className="text-link">
-                    Resume onboarding →
-                  </Link>
                 </div>
               )}
             </div>

@@ -8,6 +8,7 @@ import {
 import type { scanSourceTask } from "@/trigger/scan-source";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { recordGrowthFirstPartyEvent } from "@/lib/growth-v2/feedback";
+import { hasUnresolvedDiscoveryCandidates } from "@/lib/onboarding/activation-readiness";
 
 const inputSchema = z.object({ workspaceId: z.string().uuid() }).strict();
 const activationSchema = z.object({
@@ -33,6 +34,20 @@ export async function POST(request: Request) {
   if (!auth.ok) return auth.response;
   try {
     const input = inputSchema.parse(await parseJsonBody(request));
+    const current = await auth.client.rpc("get_onboarding_status", {
+      p_workspace_id: input.workspaceId,
+    });
+    if (current.error) return onboardingError(current.error);
+    const onboarding = z
+      .object({
+        discovery: z.object({
+          candidates: z.array(z.object({ suggestedStatus: z.string() }).passthrough()),
+        }),
+      })
+      .passthrough()
+      .parse(current.data);
+    if (hasUnresolvedDiscoveryCandidates(onboarding.discovery.candidates))
+      return Response.json({ error: "review_pending_candidates" }, { status: 409 });
     const activated = await auth.client.rpc("activate_workspace_protection", {
       p_workspace_id: input.workspaceId,
     });

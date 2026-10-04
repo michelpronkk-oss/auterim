@@ -2,6 +2,8 @@ import { z } from "zod";
 import { authenticateOnboardingRequest } from "@/lib/onboarding/auth";
 import { getWorkspaceRole, resolveWorkspaceEntitlementsForMember } from "@/lib/billing/server";
 
+const PRIVATE_NO_STORE = { "Cache-Control": "private, no-store, max-age=0" };
+
 export async function GET(request: Request) {
   const auth = await authenticateOnboardingRequest(request);
   if (!auth.ok) return auth.response;
@@ -12,8 +14,12 @@ export async function GET(request: Request) {
       .select("workspace_id,role")
       .eq("user_id", auth.user.id)
       .order("created_at", { ascending: true });
-    if (error) return Response.json({ error: "account_state_unavailable" }, { status: 503 });
-    return Response.json({ workspaces: data ?? [] });
+    if (error)
+      return Response.json(
+        { error: "account_state_unavailable" },
+        { status: 503, headers: PRIVATE_NO_STORE },
+      );
+    return Response.json({ workspaces: data ?? [] }, { headers: PRIVATE_NO_STORE });
   }
   const parsed = z.string().uuid().safeParse(requestedId);
   if (!parsed.success) return Response.json({ error: "invalid_workspace_id" }, { status: 400 });
@@ -37,13 +43,16 @@ export async function GET(request: Request) {
     ]);
     if (onboardingError || assessmentError)
       return Response.json({ error: "account_state_unavailable" }, { status: 503 });
-    return Response.json({
-      user: { id: auth.user.id, email: auth.user.email },
-      role,
-      onboarding,
-      entitlements,
-      initialAssessment,
-    });
+    return Response.json(
+      {
+        user: { id: auth.user.id, email: auth.user.email },
+        role,
+        onboarding,
+        entitlements,
+        initialAssessment,
+      },
+      { headers: PRIVATE_NO_STORE },
+    );
   } catch {
     return Response.json({ error: "account_state_unavailable" }, { status: 503 });
   }
