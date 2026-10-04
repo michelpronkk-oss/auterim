@@ -1,7 +1,7 @@
 import "server-only";
-import { parse } from "parse5";
 import { performance } from "node:perf_hooks";
 import { fetchHttpSource, SafeFetchError } from "@/lib/monitoring/fetcher";
+import { StreamingHtmlReferenceExtractor } from "@/lib/discovery/streaming-html";
 import {
   canonicalizePublicWebsiteUrl,
   WebsiteUrlInputError,
@@ -13,10 +13,12 @@ import {
 } from "@/lib/discovery/registry";
 
 export const discoveryLimits = {
-  maxHtmlBytes: 2 * 1024 * 1024,
+  maxHtmlBytes: 4 * 1024 * 1024,
   maxHtmlNodes: 20_000,
   maxReferenceUrls: 64,
+  maxScriptReferences: 30,
   maxInlineConfigUrls: 32,
+  maxInlineConfigBytes: 32 * 1024,
   maxManifests: 1,
   maxManifestBytes: 32 * 1024,
   maxDeepScripts: 4,
@@ -24,6 +26,7 @@ export const discoveryLimits = {
   maxDeepBytes: 384 * 1024,
   maxParallelDeepAssets: 2,
   maxScanDurationMs: 45_000,
+  maxRuntimeDurationMs: 8_000,
 } as const;
 
 export type DiscoveryEvidence = {
@@ -41,6 +44,23 @@ export type DiscoveryCandidate = {
   confidence: number;
   confidenceLabel: "low" | "medium" | "high";
   evidence: DiscoveryEvidence[];
+};
+
+export type RuntimeRequestObservation = {
+  host: string;
+  resourceType: "document" | "script" | "fetch" | "xhr";
+};
+
+export type RuntimeDiscoveryResult = {
+  requests: RuntimeRequestObservation[];
+  requestsObserved: number;
+  requestsFulfilled?: number;
+  requestsBlocked?: number;
+  uniqueHosts: number;
+  blockedUnsafeRequests: number;
+  durationMs: number;
+  status: "complete" | "partial" | "unavailable";
+  memoryDeltaBytes: number | null;
 };
 
 export type UrlDiscoveryResult = {
@@ -65,9 +85,39 @@ export type UrlDiscoveryResult = {
       status: number | null;
       bytesRead: number;
       truncated: boolean;
+      referencesExtracted: number;
       extractionPerformed: boolean;
       nodeLimitReached: boolean;
       referenceLimitReached: boolean;
+    };
+    staticCoverage: {
+      quality: "strong" | "weak" | "partial";
+      durationMs: number;
+      signalFamilies: number;
+      runtimeRequired: boolean;
+      resourceGraph: {
+        scriptsFirstParty: number;
+        scriptsThirdParty: number;
+        stylesheets: number;
+        preloads: number;
+        apiEndpoints: number;
+        frames: number;
+        manifests: number;
+        formActions: number;
+        otherResources: number;
+      };
+    };
+    runtime: {
+      attempted: boolean;
+      durationMs: number;
+      requestsObserved: number;
+      requestsFulfilled?: number;
+      requestsBlocked?: number;
+      uniqueHosts: number;
+      providerMatches: number;
+      blockedUnsafeRequests: number;
+      status: "skipped" | "complete" | "partial" | "unavailable";
+      memoryDeltaBytes: number | null;
     };
     headers: { inspected: number };
     csp: { inspected: boolean; hostSources: number };
@@ -94,17 +144,9 @@ export type UrlDiscoveryResult = {
     manifestsFetched: number;
     jsAssetsFetched: number;
     dnsRecordsUsed: false;
-    browserRuntime: false;
+    browserRuntime: boolean;
   };
   failureCategory?: string;
-};
-
-type HtmlNode = {
-  nodeName: string;
-  tagName?: string;
-  attrs?: Array<{ name: string; value: string }>;
-  value?: string;
-  childNodes?: HtmlNode[];
 };
 
 export function normalizePublicWebsiteUrl(value: string): string {
@@ -171,182 +213,6 @@ function parseConfigJson(value: string, urls: Set<string>) {
   return budget.limited;
 }
 
-function collectNodeText(node: HtmlNode, maxBytes: number) {
-  const values: string[] = [];
-  const stack = [node];
-  let size = 0;
-  let visited = 0;
-  while (stack.length && size < maxBytes && visited < 500) {
-    const current = stack.pop()!;
-    visited += 1;
-    if (current.value) {
-      const remaining = maxBytes - size;
-      const value = Buffer.from(current.value, "utf8").subarray(0, remaining).toString("utf8");
-      values.push(value);
-      size += Buffer.byteLength(value, "utf8");
-    }
-    const children = current.childNodes ?? [];
-    const allowed = Math.max(0, 500 - visited - stack.length);
-    for (let index = Math.min(children.length, allowed) - 1; index >= 0; index -= 1) {
-      stack.push(children[index]!);
-    }
-  }
-  return { value: values.join(""), truncated: stack.length > 0 || visited >= 500 };
-}
-
-function collectReferences(html: string, baseUrl: string) {
-  const tree = parse(html) as unknown as HtmlNode;
-  const scripts: string[] = [];
-  const resources: string[] = [];
-  const stylesheets: string[] = [];
-  const iframes: string[] = [];
-  const formActions: string[] = [];
-  const manifests: string[] = [];
-  const inlineConfigUrls = new Set<string>();
-  let scriptReferenceLimitReached = false;
-  let inlineConfigLimitReached = false;
-  const baseSearch = findFirstBaseHref(tree);
-  const firstBaseHref = baseSearch.href;
-  let effectiveBase = baseUrl;
-  if (firstBaseHref) {
-    try {
-      const base = new URL(firstBaseHref, baseUrl);
-      if (
-        (base.protocol === "https:" || base.protocol === "http:") &&
-        !base.username &&
-        !base.password &&
-        (base.port === "" ||
-          (base.protocol === "http:" && base.port === "80") ||
-          (base.protocol === "https:" && base.port === "443"))
-      ) {
-        effectiveBase = base.href;
-      }
-    } catch {
-      // Invalid base tags fall back to the fetched document URL.
-    }
-  }
-  const stack = [tree];
-  let nodesVisited = 0;
-  let referenceLimitReached = false;
-  while (
-    stack.length > 0 &&
-    resources.length < discoveryLimits.maxReferenceUrls &&
-    nodesVisited < discoveryLimits.maxHtmlNodes
-  ) {
-    const node = stack.pop()!;
-    nodesVisited += 1;
-    const attrs = new Map((node.attrs ?? []).map((attribute) => [attribute.name, attribute.value]));
-    const tagName = node.tagName?.toLowerCase();
-    let resourceValue: string | undefined;
-    if (tagName === "script") {
-      const scriptType = attrs.get("type")?.toLowerCase() ?? "";
-      const source = attrs.get("src");
-      if (source && scripts.length >= 30) {
-        scriptReferenceLimitReached = true;
-      } else if (source) {
-        const normalized = normalizeReference(source, effectiveBase);
-        if (normalized) {
-          scripts.push(normalized);
-          resources.push(normalized);
-        }
-      } else if (
-        (scriptType === "application/json" || scriptType === "text/json") &&
-        (/^(?:__(?:app|runtime|public|client|provider)?[-_]?config__|(?:app|runtime|public|client|provider)?[-_]?config)$/i.test(
-          attrs.get("id") ?? "",
-        ) ||
-          attrs.has("data-config") ||
-          attrs.get("data-purpose")?.toLowerCase() === "config")
-      ) {
-        const text = collectNodeText(node, 32 * 1024);
-        if (text.truncated || parseConfigJson(text.value, inlineConfigUrls))
-          inlineConfigLimitReached = true;
-      }
-    } else if (tagName === "link") {
-      const rel = attrs.get("rel")?.toLowerCase().split(/\s+/) ?? [];
-      if (rel.includes("manifest")) {
-        resourceValue = attrs.get("href");
-        if (resourceValue) {
-          const normalized = normalizeReference(resourceValue, effectiveBase);
-          if (normalized) manifests.push(normalized);
-        }
-      } else if (
-        rel.some((value) =>
-          ["stylesheet", "preconnect", "preload", "modulepreload", "icon", "dns-prefetch"].includes(
-            value,
-          ),
-        )
-      ) {
-        resourceValue = attrs.get("href");
-        if (resourceValue && rel.includes("stylesheet")) {
-          const normalized = normalizeReference(resourceValue, effectiveBase);
-          if (normalized) stylesheets.push(normalized);
-        }
-      }
-    } else if (["img", "iframe", "source"].includes(tagName ?? "")) {
-      resourceValue = attrs.get("src");
-      if (tagName === "iframe" && resourceValue) {
-        const normalized = normalizeReference(resourceValue, effectiveBase);
-        if (normalized) iframes.push(normalized);
-      }
-    } else if (tagName === "video") {
-      resourceValue = attrs.get("poster");
-    } else if (tagName === "form") {
-      const action = attrs.get("action");
-      const normalized = action ? normalizeReference(action, effectiveBase) : null;
-      if (normalized) formActions.push(normalized);
-    } else if (tagName === "meta") {
-      const keys = [attrs.get("name"), attrs.get("property")].filter((value): value is string =>
-        Boolean(value),
-      );
-      const content = attrs.get("content");
-      if (
-        content &&
-        keys.some((key) =>
-          /^(?:api[-_]url|api[-_]endpoint|endpoint|dsn|sentry[-_]dsn|base[-_]url|server[-_]url|auth[-_]url|project[-_]url|public[-_]url)$/i.test(
-            key.trim(),
-          ),
-        )
-      ) {
-        for (const url of collectEmbeddedUrls(content)) inlineConfigUrls.add(url);
-      }
-    }
-    if (resourceValue) {
-      const normalized = normalizeReference(resourceValue, effectiveBase);
-      if (normalized) resources.push(normalized);
-    }
-    // Reverse-push so traversal and the 30-script cap preserve document order.
-    const children = node.childNodes ?? [];
-    const remainingNodes = discoveryLimits.maxHtmlNodes - nodesVisited - stack.length;
-    for (
-      let index = children.length - 1;
-      index >= 0 && stack.length < discoveryLimits.maxHtmlNodes - nodesVisited;
-      index -= 1
-    ) {
-      stack.push(children[index]!);
-    }
-    if (children.length > Math.max(0, remainingNodes)) referenceLimitReached = true;
-  }
-  return {
-    scriptUrls: [...new Set(scripts)].slice(0, 30),
-    resourceUrls: [...new Set(resources)].slice(0, discoveryLimits.maxReferenceUrls),
-    stylesheetUrls: [...new Set(stylesheets)].slice(0, discoveryLimits.maxReferenceUrls),
-    iframeUrls: [...new Set(iframes)].slice(0, discoveryLimits.maxReferenceUrls),
-    formActionUrls: [...new Set(formActions)].slice(0, discoveryLimits.maxReferenceUrls),
-    manifestUrls: [...new Set(manifests)].slice(0, discoveryLimits.maxManifests),
-    inlineConfigUrls: [...inlineConfigUrls].slice(0, discoveryLimits.maxInlineConfigUrls),
-    scriptReferenceLimitReached,
-    inlineConfigLimitReached:
-      inlineConfigLimitReached || inlineConfigUrls.size > discoveryLimits.maxInlineConfigUrls,
-    nodesVisited: nodesVisited + baseSearch.nodesVisited,
-    nodeLimitReached:
-      (nodesVisited >= discoveryLimits.maxHtmlNodes && stack.length > 0) ||
-      baseSearch.nodeLimitReached,
-    referenceLimitReached:
-      referenceLimitReached ||
-      (resources.length >= discoveryLimits.maxReferenceUrls && stack.length > 0),
-  };
-}
-
 function normalizeReference(value: string, baseUrl: string) {
   try {
     const url = new URL(value, baseUrl);
@@ -368,29 +234,6 @@ function normalizeReference(value: string, baseUrl: string) {
   } catch {
     return null;
   }
-}
-
-function findFirstBaseHref(tree: HtmlNode) {
-  const stack = [tree];
-  let nodesVisited = 0;
-  while (stack.length > 0 && nodesVisited < discoveryLimits.maxHtmlNodes) {
-    const node = stack.pop()!;
-    nodesVisited += 1;
-    if (node.tagName === "base") {
-      const href = node.attrs?.find((attribute) => attribute.name === "href")?.value;
-      if (href !== undefined) return { href, nodesVisited, nodeLimitReached: false };
-    }
-    const children = node.childNodes ?? [];
-    const allowed = Math.max(0, discoveryLimits.maxHtmlNodes - nodesVisited - stack.length);
-    for (let index = Math.min(children.length, allowed) - 1; index >= 0; index -= 1) {
-      stack.push(children[index]!);
-    }
-  }
-  return {
-    href: null,
-    nodesVisited,
-    nodeLimitReached: nodesVisited >= discoveryLimits.maxHtmlNodes && stack.length > 0,
-  };
 }
 
 function collectEmbeddedUrls(source: string): string[] {
@@ -554,8 +397,65 @@ function emptyInspection(redirects = 0) {
   };
 }
 
+function countByOrigin(urls: string[], origin: string, firstParty: boolean) {
+  return urls.filter((value) => {
+    try {
+      return (new URL(value).origin === origin) === firstParty;
+    } catch {
+      return false;
+    }
+  }).length;
+}
+
+function emptyStaticResourceGraph() {
+  return {
+    scriptsFirstParty: 0,
+    scriptsThirdParty: 0,
+    stylesheets: 0,
+    preloads: 0,
+    apiEndpoints: 0,
+    frames: 0,
+    manifests: 0,
+    formActions: 0,
+    otherResources: 0,
+  };
+}
+
+function staticResourceGraph(
+  references: ReturnType<StreamingHtmlReferenceExtractor["finish"]>,
+  pageOrigin: string,
+) {
+  const scripts = new Set(references.scriptUrls);
+  const resources = new Set(references.resourceUrls);
+  return {
+    scriptsFirstParty: countByOrigin(references.scriptUrls, pageOrigin, true),
+    scriptsThirdParty: countByOrigin(references.scriptUrls, pageOrigin, false),
+    stylesheets: references.stylesheetUrls.length,
+    preloads: references.preloadUrls.length,
+    apiEndpoints: references.inlineConfigUrls.length,
+    frames: references.iframeUrls.length,
+    manifests: references.manifestUrls.length,
+    formActions: references.formActionUrls.length,
+    otherResources: [...resources].filter((url) => !scripts.has(url)).length,
+  };
+}
+
 function scoreStrength(strength: DiscoveryEvidence["strength"]) {
   return strength === "strong" ? 0.68 : strength === "medium" ? 0.4 : 0.18;
+}
+
+export function evidenceFamily(signalType: DiscoverySignalType) {
+  if (["script_host", "script_path", "js_sdk", "runtime_script_host"].includes(signalType))
+    return "sdk";
+  if (["api_endpoint", "runtime_api_host"].includes(signalType)) return "provider_endpoint";
+  if (["response_header", "redirect_host"].includes(signalType)) return "hosting_infrastructure";
+  if (signalType === "csp_host") return "policy_allowlist";
+  if (signalType === "runtime_host") return "runtime_host";
+  return "context_reference";
+}
+
+function isRuntimeSignal(signalType: DiscoverySignalType) {
+  return signalType.startsWith("runtime_");
 }
 
 function matchEvidence(
@@ -587,25 +487,52 @@ function makeCandidates(evidence: DiscoveryEvidence[]): DiscoveryCandidate[] {
   return [...grouped.entries()]
     .map(([providerSlug, items]) => {
       if (items.every((item) => item.strength === "weak")) return null;
-      const strongestBySignal = new Map<DiscoverySignalType, number>();
+      const strongestByFamily = new Map<string, number>();
       for (const item of items) {
-        strongestBySignal.set(
-          item.signalType,
-          Math.max(strongestBySignal.get(item.signalType) ?? 0, scoreStrength(item.strength)),
+        const family = evidenceFamily(item.signalType);
+        strongestByFamily.set(
+          family,
+          Math.max(strongestByFamily.get(family) ?? 0, scoreStrength(item.strength)),
         );
       }
       const rawConfidence = Number(
         (
           1 -
-          [...strongestBySignal.values()].reduce((remainder, score) => remainder * (1 - score), 1)
+          [...strongestByFamily.values()].reduce((remainder, score) => remainder * (1 - score), 1)
         ).toFixed(3),
       );
-      const strongSignalTypes = new Set(
-        items.filter((item) => item.strength === "strong").map((item) => item.signalType),
+      const strongFamilies = new Set(
+        items
+          .filter((item) => item.strength === "strong")
+          .map((item) => evidenceFamily(item.signalType)),
       ).size;
+      const hasDirectUse = items.some(
+        (item) =>
+          item.strength === "strong" &&
+          ["sdk", "provider_endpoint"].includes(evidenceFamily(item.signalType)),
+      );
+      const runtimeEvidence = items.filter(
+        (item) => item.strength === "strong" && isRuntimeSignal(item.signalType),
+      );
+      const runtimeHosts = new Set(
+        runtimeEvidence.map((item) => {
+          try {
+            return new URL(item.sourceOrigin).hostname.toLowerCase();
+          } catch {
+            return item.sourceOrigin;
+          }
+        }),
+      );
+      const runtimeFamilies = new Set(
+        runtimeEvidence.map((item) => evidenceFamily(item.signalType)),
+      );
+      const independentlyObservedRuntimeUse = runtimeHosts.size >= 2 && runtimeFamilies.size >= 2;
       const confidence = rawConfidence;
       const label =
-        strongSignalTypes >= 2 && rawConfidence >= 0.85
+        strongFamilies >= 2 &&
+        hasDirectUse &&
+        rawConfidence >= 0.85 &&
+        independentlyObservedRuntimeUse
           ? "high"
           : rawConfidence >= 0.5
             ? "medium"
@@ -627,7 +554,28 @@ function makeCandidates(evidence: DiscoveryEvidence[]): DiscoveryCandidate[] {
 
 export async function discoverWebsiteDependencies(
   rawUrl: string,
-  options: { deep?: boolean; fetcher?: typeof fetchHttpSource } = {},
+  options: {
+    deep?: boolean;
+    fetcher?: typeof fetchHttpSource;
+    runtimeEnabled?: boolean;
+    runtimeRunner?: (
+      url: string,
+      options: { deadlineAt: number; signal?: AbortSignal },
+      dependencies?: {
+        initialDocument: Pick<
+          Awaited<ReturnType<typeof fetchHttpSource>>,
+          | "status"
+          | "body"
+          | "bytesRead"
+          | "wireBytesRead"
+          | "bodyTruncated"
+          | "contentType"
+          | "finalUrl"
+        >;
+      },
+    ) => Promise<RuntimeDiscoveryResult>;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<UrlDiscoveryResult> {
   const normalizedUrl = normalizePublicWebsiteUrl(rawUrl);
   const fetcher = options.fetcher ?? fetchHttpSource;
@@ -641,8 +589,25 @@ export async function discoverWebsiteDependencies(
       timeoutMs: Math.min(10_000, remainingMs),
       dnsTimeoutMs: Math.min(3_000, remainingMs),
       deadlineAt,
+      signal: options.signal,
     };
   };
+  const throwIfCancelled = () => {
+    if (options.signal?.aborted)
+      throw new SafeFetchError("timeout", "The discovery task was cancelled.");
+  };
+  const referenceExtractor = new StreamingHtmlReferenceExtractor(
+    {
+      maxNodes: discoveryLimits.maxHtmlNodes,
+      maxReferences: discoveryLimits.maxReferenceUrls,
+      maxScripts: discoveryLimits.maxScriptReferences,
+      maxInlineConfigBytes: discoveryLimits.maxInlineConfigBytes,
+      maxInlineConfigUrls: discoveryLimits.maxInlineConfigUrls,
+    },
+    parseConfigJson,
+    normalizeReference,
+    normalizedUrl,
+  );
   let page;
   try {
     page = await fetcher(
@@ -652,6 +617,8 @@ export async function discoverWebsiteDependencies(
         restrictToStandardPorts: true,
         maxResponseBytes: discoveryLimits.maxHtmlBytes,
         allowTruncatedResponse: true,
+        onDecodedChunk: (chunk) => referenceExtractor.write(chunk),
+        retainBody: options.runtimeEnabled === true,
         ...fetchBounds(),
       },
     );
@@ -691,9 +658,29 @@ export async function discoverWebsiteDependencies(
           status: null,
           bytesRead: 0,
           truncated: false,
+          referencesExtracted: 0,
           extractionPerformed: false,
           nodeLimitReached: false,
           referenceLimitReached: false,
+        },
+        staticCoverage: {
+          quality: "partial",
+          durationMs: Math.ceil(performance.now() - startedAt),
+          signalFamilies: 0,
+          runtimeRequired: false,
+          resourceGraph: emptyStaticResourceGraph(),
+        },
+        runtime: {
+          attempted: false,
+          durationMs: 0,
+          requestsObserved: 0,
+          requestsFulfilled: 0,
+          requestsBlocked: 0,
+          uniqueHosts: 0,
+          providerMatches: 0,
+          blockedUnsafeRequests: 0,
+          status: "skipped",
+          memoryDeltaBytes: null,
         },
         headers: { inspected: 0 },
         csp: { inspected: false, hostSources: 0 },
@@ -740,9 +727,29 @@ export async function discoverWebsiteDependencies(
           status: page.status,
           bytesRead: page.bytesRead,
           truncated: page.bodyTruncated,
+          referencesExtracted: 0,
           extractionPerformed: false,
           nodeLimitReached: false,
           referenceLimitReached: false,
+        },
+        staticCoverage: {
+          quality: "partial",
+          durationMs: Math.ceil(performance.now() - startedAt),
+          signalFamilies: 0,
+          runtimeRequired: false,
+          resourceGraph: emptyStaticResourceGraph(),
+        },
+        runtime: {
+          attempted: false,
+          durationMs: 0,
+          requestsObserved: 0,
+          requestsFulfilled: 0,
+          requestsBlocked: 0,
+          uniqueHosts: 0,
+          providerMatches: 0,
+          blockedUnsafeRequests: 0,
+          status: "skipped",
+          memoryDeltaBytes: null,
         },
         headers: { inspected: 0 },
         csp: { inspected: false, hostSources: 0 },
@@ -763,8 +770,13 @@ export async function discoverWebsiteDependencies(
     };
   }
 
-  const html = page.body.toString("utf8");
-  const references = collectReferences(html, page.finalUrl);
+  // Injected test fetchers and older adapters may still return a retained body without invoking
+  // the streaming callback. Production fetchHttpSource uses the no-retention streaming path.
+  if (!referenceExtractor.hasReceivedBytes && page.body.byteLength > 0) {
+    referenceExtractor.write(page.body);
+  }
+  const references = referenceExtractor.finish(page.finalUrl);
+  throwIfCancelled();
   const cspHosts = parseContentSecurityPolicy(page.safeHeaders);
   const redirectOrigins = page.redirectEvidence?.length ? [pageOrigin] : [];
   const evidence: DiscoveryEvidence[] = [];
@@ -851,6 +863,7 @@ export async function discoverWebsiteDependencies(
       }
     }
   }
+  throwIfCancelled();
 
   const selectedScripts = sameOriginScripts.slice(0, discoveryLimits.maxDeepScripts);
   const scriptLimitReached = sameOriginScripts.length > selectedScripts.length;
@@ -899,6 +912,7 @@ export async function discoverWebsiteDependencies(
       }
     },
   );
+  throwIfCancelled();
   for (const { script, failure } of scriptResults) {
     if (failure) scriptFailures += 1;
     if (!script) continue;
@@ -961,6 +975,107 @@ export async function discoverWebsiteDependencies(
   if (scriptTruncated) incompleteReasons.push("javascript_truncated");
   if (scriptLimitReached) incompleteReasons.push("deep_script_limit");
   if (performance.now() >= deadlineAt) incompleteReasons.push("scan_time_budget");
+  const staticSignalFamilies = new Set(
+    evidence
+      .filter(
+        (item) =>
+          item.strength === "strong" &&
+          !isRuntimeSignal(item.signalType) &&
+          !["hosting_infrastructure", "policy_allowlist", "context_reference"].includes(
+            evidenceFamily(item.signalType),
+          ),
+      )
+      .map((item) => evidenceFamily(item.signalType)),
+  ).size;
+  const staticIncomplete = incompleteReasons.length > 0;
+  const staticQuality = staticIncomplete
+    ? "partial"
+    : staticSignalFamilies >= 2 && references.scriptUrls.length > 0
+      ? "strong"
+      : "weak";
+  const staticDurationMs = Math.ceil(performance.now() - startedAt);
+  const runtimeRequired = options.runtimeEnabled === true && staticQuality !== "strong";
+  let runtimeSummary: UrlDiscoveryResult["coverage"]["runtime"] = {
+    attempted: false,
+    durationMs: 0,
+    requestsObserved: 0,
+    requestsFulfilled: 0,
+    requestsBlocked: 0,
+    uniqueHosts: 0,
+    providerMatches: 0,
+    blockedUnsafeRequests: 0,
+    status: "skipped",
+    memoryDeltaBytes: null,
+  };
+  if (runtimeRequired && new URL(normalizedUrl).protocol === "https:") {
+    const runtimeStartedAt = performance.now();
+    runtimeSummary = { ...runtimeSummary, attempted: true, status: "unavailable" };
+    try {
+      const deadlineAt = Math.min(
+        startedAt + discoveryLimits.maxScanDurationMs,
+        performance.now() + discoveryLimits.maxRuntimeDurationMs,
+      );
+      const runner =
+        options.runtimeRunner ??
+        (await import("@/lib/discovery/runtime-browser")).inspectPublicLandingPage;
+      const runtimeResult = await runner(
+        page.finalUrl,
+        { deadlineAt, signal: options.signal },
+        { initialDocument: page },
+      );
+      if (options.signal?.aborted)
+        throw new SafeFetchError("timeout", "The discovery task was cancelled.");
+      const requests = [
+        ...new Map(
+          runtimeResult.requests.map((request) => [
+            `${request.host}:${request.resourceType}`,
+            request,
+          ]),
+        ).values(),
+      ];
+      const before = evidence.length;
+      for (const request of requests) {
+        matchEvidence(
+          {
+            headers: {},
+            scriptUrls: [],
+            resourceUrls: [],
+            embeddedUrls: [],
+            siteOrigin: pageOrigin,
+            runtimeRequests: [request],
+          },
+          `https://${request.host}`,
+          seen,
+          evidence,
+        );
+      }
+      runtimeSummary = {
+        attempted: true,
+        durationMs: runtimeResult.durationMs,
+        requestsObserved: runtimeResult.requestsObserved,
+        requestsFulfilled: runtimeResult.requestsFulfilled ?? 0,
+        requestsBlocked: runtimeResult.requestsBlocked ?? 0,
+        uniqueHosts: runtimeResult.uniqueHosts,
+        providerMatches: evidence.length - before,
+        blockedUnsafeRequests: runtimeResult.blockedUnsafeRequests,
+        status: runtimeResult.status,
+        memoryDeltaBytes: runtimeResult.memoryDeltaBytes,
+      };
+      if (runtimeResult.status === "partial") incompleteReasons.push("runtime_partial");
+      if (runtimeResult.status === "unavailable") incompleteReasons.push("runtime_unavailable");
+    } catch {
+      if (options.signal?.aborted)
+        throw new SafeFetchError("timeout", "The discovery task was cancelled.");
+      runtimeSummary = {
+        ...runtimeSummary,
+        durationMs: Math.ceil(performance.now() - runtimeStartedAt),
+      };
+      incompleteReasons.push("runtime_unavailable");
+    }
+  } else if (runtimeRequired) {
+    incompleteReasons.push("runtime_https_required");
+  }
+  throwIfCancelled();
   const partial = incompleteReasons.length > 0;
   const candidates = makeCandidates(evidence);
   const outcome = partial ? "partial" : candidates.length === 0 ? "empty" : "complete";
@@ -987,10 +1102,19 @@ export async function discoverWebsiteDependencies(
         status: page.status,
         bytesRead: page.bytesRead,
         truncated: page.bodyTruncated,
+        referencesExtracted: new Set([...references.resourceUrls, ...references.scriptUrls]).size,
         extractionPerformed: true,
         nodeLimitReached: references.nodeLimitReached,
         referenceLimitReached: references.referenceLimitReached,
       },
+      staticCoverage: {
+        quality: staticQuality,
+        durationMs: staticDurationMs,
+        signalFamilies: staticSignalFamilies,
+        runtimeRequired,
+        resourceGraph: staticResourceGraph(references, pageOrigin),
+      },
+      runtime: runtimeSummary,
       headers: { inspected: responseHeaders },
       csp: { inspected: true, hostSources: cspHosts.length },
       manifest: {
@@ -1021,7 +1145,7 @@ export async function discoverWebsiteDependencies(
       manifestsFetched,
       jsAssetsFetched: scriptsFetched,
       dnsRecordsUsed: false,
-      browserRuntime: false,
+      browserRuntime: runtimeSummary.attempted,
     },
   };
 }

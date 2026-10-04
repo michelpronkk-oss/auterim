@@ -145,6 +145,15 @@ const discoveryOutcomeConsistencyMigration = await readFile(
   ),
   "utf8",
 );
+const runtimeDiscoveryMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261012000000_runtime_dependency_discovery.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase() {
   const db = new PGlite();
@@ -177,6 +186,7 @@ async function makeDatabase() {
   await db.exec(growthSearchConsoleScopeMigration);
   await db.exec(partialDiscoveryMigration);
   await db.exec(discoveryOutcomeConsistencyMigration);
+  await db.exec(runtimeDiscoveryMigration);
   return db;
 }
 
@@ -566,6 +576,9 @@ describe("Auterim migration and monitoring transaction", () => {
       "api_endpoint",
       "js_sdk",
       "redirect_host",
+      "runtime_host",
+      "runtime_script_host",
+      "runtime_api_host",
     ].entries()) {
       await db.query(
         `insert into public.dependency_discovery_evidence (

@@ -9,7 +9,10 @@ export type DiscoverySignalType =
   | "csp_host"
   | "api_endpoint"
   | "js_sdk"
-  | "redirect_host";
+  | "redirect_host"
+  | "runtime_host"
+  | "runtime_script_host"
+  | "runtime_api_host";
 
 export type ProviderSignature = {
   providerSlug: string;
@@ -32,6 +35,7 @@ export type SignatureInput = {
   cspHosts?: string[];
   redirectOrigins?: string[];
   javascriptSources?: string[];
+  runtimeRequests?: Array<{ host: string; resourceType: string }>;
   embeddedUrls: string[];
   siteOrigin: string;
 };
@@ -59,6 +63,11 @@ const anyRedirectHost = (values: string[] | undefined, suffix: string) =>
   (values ?? []).some((value) => hostMatches(urlHost(value), suffix));
 const anyScriptHost = (input: SignatureInput, suffix: string) =>
   anyUrlHost(input.scriptUrls, suffix);
+const anyRuntimeHost = (input: SignatureInput, suffix: string, resourceTypes: readonly string[]) =>
+  (input.runtimeRequests ?? []).some(
+    ({ host, resourceType }) =>
+      hostMatches(host.toLowerCase(), suffix) && resourceTypes.includes(resourceType),
+  );
 const anyScriptHostAndPath = (input: SignatureInput, hostSuffix: string, path: string) =>
   input.scriptUrls.some((value) => {
     try {
@@ -189,6 +198,14 @@ export const providerSignatureRegistry: readonly ProviderSignature[] = [
       anyJavaScriptSource(input, /createClient\s*\(\s*["'`]https?:\/\/[^"'`]+\.supabase\.co/i),
   },
   {
+    providerSlug: "supabase",
+    providerName: "Supabase",
+    signalType: "runtime_api_host",
+    signatureKey: "supabase-runtime-api",
+    strength: "strong",
+    matches: (input) => anyRuntimeHost(input, "supabase.co", ["fetch", "xhr"]),
+  },
+  {
     providerSlug: "firebase",
     providerName: "Firebase",
     signalType: "script_host",
@@ -237,6 +254,24 @@ export const providerSignatureRegistry: readonly ProviderSignature[] = [
     matches: (input) =>
       anyUrlHost(input.formActionUrls, "checkout.stripe.com") ||
       anyUrlHost(input.inlineConfigUrls, "api.stripe.com"),
+  },
+  {
+    providerSlug: "stripe",
+    providerName: "Stripe",
+    signalType: "runtime_script_host",
+    signatureKey: "stripe-runtime-script",
+    strength: "strong",
+    matches: (input) => anyRuntimeHost(input, "js.stripe.com", ["script"]),
+  },
+  {
+    providerSlug: "stripe",
+    providerName: "Stripe",
+    signalType: "runtime_api_host",
+    signatureKey: "stripe-runtime-api",
+    strength: "strong",
+    matches: (input) =>
+      anyRuntimeHost(input, "api.stripe.com", ["fetch", "xhr"]) ||
+      anyRuntimeHost(input, "checkout.stripe.com", ["document", "fetch", "xhr"]),
   },
   {
     providerSlug: "stripe",
@@ -314,6 +349,22 @@ export const providerSignatureRegistry: readonly ProviderSignature[] = [
     matches: (input) => anyJavaScriptSource(input, /Sentry\.init\s*\(/i),
   },
   {
+    providerSlug: "sentry",
+    providerName: "Sentry",
+    signalType: "runtime_script_host",
+    signatureKey: "sentry-runtime-script",
+    strength: "strong",
+    matches: (input) => anyRuntimeHost(input, "browser.sentry-cdn.com", ["script"]),
+  },
+  {
+    providerSlug: "sentry",
+    providerName: "Sentry",
+    signalType: "runtime_api_host",
+    signatureKey: "sentry-runtime-ingest",
+    strength: "strong",
+    matches: (input) => anyRuntimeHost(input, "ingest.sentry.io", ["fetch", "xhr"]),
+  },
+  {
     providerSlug: "posthog",
     providerName: "PostHog",
     signalType: "script_host",
@@ -323,6 +374,32 @@ export const providerSignatureRegistry: readonly ProviderSignature[] = [
       anyScriptHost(input, "us.i.posthog.com") ||
       anyScriptHost(input, "eu.i.posthog.com") ||
       anyScriptHost(input, "app.posthog.com"),
+  },
+  {
+    providerSlug: "posthog",
+    providerName: "PostHog",
+    signalType: "runtime_script_host",
+    signatureKey: "posthog-runtime-script",
+    strength: "strong",
+    matches: (input) =>
+      [
+        "us.i.posthog.com",
+        "eu.i.posthog.com",
+        "app.posthog.com",
+        "us-assets.i.posthog.com",
+        "eu-assets.i.posthog.com",
+      ].some((host) => anyRuntimeHost(input, host, ["script"])),
+  },
+  {
+    providerSlug: "posthog",
+    providerName: "PostHog",
+    signalType: "runtime_api_host",
+    signatureKey: "posthog-runtime-api",
+    strength: "strong",
+    matches: (input) =>
+      ["us.i.posthog.com", "eu.i.posthog.com", "us.posthog.com", "eu.posthog.com"].some((host) =>
+        anyRuntimeHost(input, host, ["fetch", "xhr"]),
+      ),
   },
   {
     providerSlug: "posthog",

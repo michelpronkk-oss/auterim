@@ -75,6 +75,10 @@ export const environmentSchema = z
       z.coerce.number().int().positive().optional(),
     ),
     AUTERIM_PREFLIGHT_LIVE: z.preprocess(emptyToUndefined, z.enum(["0", "1"]).default("0")),
+    AUTERIM_DISCOVERY_RUNTIME_ENABLED: z.preprocess(
+      emptyToUndefined,
+      z.enum(["0", "1"]).default("0"),
+    ),
     AUTERIM_PREFLIGHT_FIXTURE_OWNER: z.preprocess(emptyToUndefined, z.string().trim().optional()),
     AUTERIM_PREFLIGHT_FIXTURE_REPOSITORY: z.preprocess(
       emptyToUndefined,

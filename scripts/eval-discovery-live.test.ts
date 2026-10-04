@@ -8,6 +8,7 @@ const targets: Array<{
   expectedProvider: string | null;
   expectedAbsentProvider?: string;
 }> = [
+  { name: "Cal.com", url: "https://cal.com/", expectedProvider: null },
   { name: "TrustMRR", url: "https://trustmrr.com/", expectedProvider: null },
   { name: "Vercel", url: "https://vercel.com/", expectedProvider: "vercel" },
   {
@@ -32,7 +33,8 @@ it("runs a bounded live URL dependency evaluation against selected public sites"
   let requests = 0;
   for (const target of selectedTargets) {
     const result = await discoverWebsiteDependencies(target.url, {
-      deep: target.name === "TrustMRR",
+      deep: target.name === "TrustMRR" || target.name === "Cal.com",
+      runtimeEnabled: target.name === "TrustMRR" || target.name === "Cal.com",
       fetcher: async (...args) => {
         requests += 1;
         return fetchHttpSource(...args);
@@ -42,7 +44,13 @@ it("runs a bounded live URL dependency evaluation against selected public sites"
       site: target.name,
       status: result.status,
       failureCategory: result.failureCategory ?? null,
+      rootStatus: result.coverage.html.status,
+      htmlBytes: result.coverage.html.bytesRead,
+      htmlTruncated: result.coverage.html.truncated,
+      references: result.coverage.html.referencesExtracted,
+      scriptsFetched: result.coverage.javascript.scriptsFetched,
       deepPass: result.deepPass,
+      runtime: result.coverage.runtime,
       coverage: result.coverage,
       inspected: result.inspected,
       evidence: result.evidence.map(({ providerSlug, signatureKey, signalType, strength }) => ({

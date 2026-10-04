@@ -10,7 +10,13 @@ describe("environment validation", () => {
     expect(parseEnvironment({})).toMatchObject({
       NEXT_PUBLIC_APP_URL: "http://localhost:3000",
       AUTERIM_CLASSIFIER_PROVIDER: "openai",
+      AUTERIM_DISCOVERY_RUNTIME_ENABLED: "0",
     });
+    expect(
+      parseEnvironment({ AUTERIM_DISCOVERY_RUNTIME_ENABLED: "1" })
+        .AUTERIM_DISCOVERY_RUNTIME_ENABLED,
+    ).toBe("1");
+    expect(() => parseEnvironment({ AUTERIM_DISCOVERY_RUNTIME_ENABLED: "true" })).toThrow();
   });
 
   it("validates OpenAI as the supported provider and checks config without exposing its key", () => {

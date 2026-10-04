@@ -16,6 +16,7 @@ export type FetchResult = {
   status: number;
   body: Buffer;
   bytesRead: number;
+  wireBytesRead?: number;
   bodyTruncated: boolean;
   contentType: string | null;
   safeHeaders: Record<string, string>;
@@ -23,6 +24,7 @@ export type FetchResult = {
   etag: string | null;
   lastModified: string | null;
   finalUrl: string;
+  redirectLocation?: string;
 };
 
 export class SafeFetchError extends Error {
@@ -30,6 +32,7 @@ export class SafeFetchError extends Error {
     readonly category: string,
     message: string,
     readonly httpStatus: number | null = null,
+    readonly wireBytesRead?: number,
   ) {
     super(message);
     this.name = "SafeFetchError";
@@ -50,7 +53,10 @@ type FetchDependencies = {
     headers: Record<string, string>,
     addresses: Array<{ address: string; family: number }>,
     timeoutMs: number,
+    signal?: AbortSignal,
+    method?: "GET" | "HEAD",
   ) => Promise<WireResponse>;
+  method?: "GET" | "HEAD";
   acceptedContentTypes?: readonly string[];
   maxResponseBytes?: number;
   allowTruncatedResponse?: boolean;
@@ -60,6 +66,10 @@ type FetchDependencies = {
   timeoutMs?: number;
   deadlineAt?: number;
   maxWireBytes?: number;
+  onDecodedChunk?: (chunk: Buffer) => void;
+  retainBody?: boolean;
+  followRedirects?: boolean;
+  signal?: AbortSignal;
 };
 
 function parseIPv4(value: string): number[] {
@@ -203,6 +213,8 @@ function nodeRequest(
   headers: Record<string, string>,
   addresses: Array<{ address: string; family: number }>,
   timeoutMs: number,
+  signal?: AbortSignal,
+  method: "GET" | "HEAD" = "GET",
 ) {
   return new Promise<WireResponse>((resolve, reject) => {
     let settled = false;
@@ -217,10 +229,12 @@ function nodeRequest(
     const req = transport(
       url,
       {
-        method: "GET",
+        method,
         headers,
         agent: false,
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: signal
+          ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal])
+          : AbortSignal.timeout(timeoutMs),
         lookup: (_host, options, callback) => {
           const all =
             typeof options === "object" && options !== null && "all" in options && options.all;
@@ -286,7 +300,9 @@ async function readBounded(
   maxBytes: number,
   allowTruncated: boolean,
   maxWireBytes = Math.max(maxBytes * 2, 64 * 1024),
-): Promise<{ body: Buffer; bytesRead: number; truncated: boolean }> {
+  onDecodedChunk?: (chunk: Buffer) => void,
+  retainBody = true,
+): Promise<{ body: Buffer; bytesRead: number; wireBytesRead: number; truncated: boolean }> {
   if (
     !Number.isInteger(maxBytes) ||
     maxBytes <= 0 ||
@@ -339,14 +355,19 @@ async function readBounded(
   };
   const chunks: Buffer[] = [];
   let size = 0;
+  const consume = (bytes: Buffer) => {
+    if (bytes.byteLength === 0) return;
+    onDecodedChunk?.(bytes);
+    if (retainBody) chunks.push(bytes);
+    size += bytes.byteLength;
+  };
   try {
     for await (const chunk of stream) {
       const bytes = Buffer.from(chunk as Uint8Array);
       const remaining = maxBytes - size;
       if (bytes.byteLength > remaining) {
         if (remaining > 0) {
-          chunks.push(bytes.subarray(0, remaining));
-          size += remaining;
+          consume(bytes.subarray(0, remaining));
         }
         cancel();
         if (!allowTruncated) {
@@ -356,24 +377,42 @@ async function readBounded(
             response.status,
           );
         }
-        return { body: Buffer.concat(chunks, size), bytesRead: size, truncated: true };
+        return {
+          body: retainBody ? Buffer.concat(chunks, size) : Buffer.alloc(0),
+          bytesRead: size,
+          wireBytesRead,
+          truncated: true,
+        };
       }
       if (bytes.byteLength > 0) {
-        chunks.push(bytes);
-        size += bytes.byteLength;
+        consume(bytes);
       }
     }
   } catch (error) {
     cancel();
     if (wireTruncated && allowTruncated)
-      return { body: Buffer.concat(chunks, size), bytesRead: size, truncated: true };
+      return {
+        body: retainBody ? Buffer.concat(chunks, size) : Buffer.alloc(0),
+        bytesRead: size,
+        wireBytesRead,
+        truncated: true,
+      };
     if (wireTruncated)
       throw new SafeFetchError(
         "response_too_large",
         "The source response exceeded the configured size limit.",
         response.status,
+        wireBytesRead,
       );
-    throw error;
+    if (error instanceof SafeFetchError) {
+      throw new SafeFetchError(error.category, error.message, error.httpStatus, wireBytesRead);
+    }
+    throw new SafeFetchError(
+      "network_error",
+      "The source response could not be read.",
+      null,
+      wireBytesRead,
+    );
   }
   if (wireTruncated) {
     cancel();
@@ -382,9 +421,15 @@ async function readBounded(
         "response_too_large",
         "The source response exceeded the configured size limit.",
         response.status,
+        wireBytesRead,
       );
   }
-  return { body: Buffer.concat(chunks, size), bytesRead: size, truncated: wireTruncated };
+  return {
+    body: retainBody ? Buffer.concat(chunks, size) : Buffer.alloc(0),
+    bytesRead: size,
+    wireBytesRead,
+    truncated: wireTruncated,
+  };
 }
 
 function isTimeout(error: unknown): boolean {
@@ -495,6 +540,8 @@ export async function fetchHttpSource(
         },
         addresses,
         Math.min(dependencies.timeoutMs ?? REQUEST_TIMEOUT_MS, requestRemaining),
+        dependencies.signal,
+        dependencies.method ?? "GET",
       );
     } catch (error) {
       if (error instanceof SafeFetchError) throw error;
@@ -528,6 +575,36 @@ export async function fetchHttpSource(
           "The source returned an invalid redirect URL.",
           response.status,
         );
+      }
+      if (dependencies.followRedirects === false) {
+        if (
+          (current.protocol !== "http:" && current.protocol !== "https:") ||
+          (originalProtocol === "https:" && current.protocol !== "https:") ||
+          current.username ||
+          current.password ||
+          (dependencies.allowedOrigins && !dependencies.allowedOrigins.includes(current.origin)) ||
+          (dependencies.restrictToStandardPorts &&
+            current.port !== "" &&
+            !(
+              (current.protocol === "http:" && current.port === "80") ||
+              (current.protocol === "https:" && current.port === "443")
+            ))
+        ) {
+          throw new SafeFetchError("unsafe_redirect", "The source returned an unsafe redirect.");
+        }
+        return {
+          status: response.status,
+          body: Buffer.alloc(0),
+          bytesRead: 0,
+          bodyTruncated: false,
+          contentType: null,
+          safeHeaders: {},
+          redirectEvidence,
+          etag: null,
+          lastModified: null,
+          finalUrl: current.href,
+          redirectLocation: current.href,
+        };
       }
       continue;
     }
@@ -581,13 +658,15 @@ export async function fetchHttpSource(
       );
     }
 
-    let bounded: { body: Buffer; bytesRead: number; truncated: boolean };
+    let bounded: { body: Buffer; bytesRead: number; wireBytesRead: number; truncated: boolean };
     try {
       bounded = await readBounded(
         response,
         dependencies.maxResponseBytes ?? MAX_RESPONSE_BYTES,
         dependencies.allowTruncatedResponse === true,
         dependencies.maxWireBytes,
+        dependencies.onDecodedChunk,
+        dependencies.retainBody ?? true,
       );
     } catch (error) {
       if (error instanceof SafeFetchError) throw error;
@@ -603,6 +682,7 @@ export async function fetchHttpSource(
       status: response.status,
       body: bounded.body,
       bytesRead: bounded.bytesRead,
+      wireBytesRead: bounded.wireBytesRead,
       bodyTruncated: bounded.truncated,
       contentType,
       safeHeaders: selectSafeHeaders(response.headers),

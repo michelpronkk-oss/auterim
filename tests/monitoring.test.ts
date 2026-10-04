@@ -95,6 +95,32 @@ describe("safe HTTP fetcher", () => {
     expect(seenHeaders["User-Agent"]).toMatch(/^AuterimMonitor\//);
   });
 
+  it("streams bounded decoded bytes to a consumer without retaining the response body", async () => {
+    const decoded: Buffer[] = [];
+    const html = "<html><script src='/late.js'></script></html>";
+    const result = await fetchHttpSource(
+      "https://docs.example.com/",
+      {},
+      {
+        resolveHost: publicAddresses,
+        request: async () =>
+          wire(200, gzipSync(Buffer.from(html)), {
+            "content-type": "text/html",
+            "content-encoding": "gzip",
+          }),
+        maxResponseBytes: 1024,
+        maxWireBytes: 1024,
+        allowTruncatedResponse: true,
+        retainBody: false,
+        onDecodedChunk: (chunk) => decoded.push(Buffer.from(chunk)),
+      },
+    );
+    expect(result.body).toEqual(Buffer.alloc(0));
+    expect(Buffer.concat(decoded).toString("utf8")).toBe(html);
+    expect(result.bytesRead).toBe(Buffer.byteLength(html));
+    expect(result.wireBytesRead).toBe(gzipSync(Buffer.from(html)).byteLength);
+  });
+
   it("validates each redirect destination and rejects HTTPS downgrade", async () => {
     const hosts: string[] = [];
     const result = await fetchHttpSource(
@@ -137,6 +163,85 @@ describe("safe HTTP fetcher", () => {
         },
       ),
     ).rejects.toMatchObject({ category: "unsafe_target" });
+  });
+
+  it("bounds public redirect chains and rejects loops and chains over the limit", async () => {
+    const requests: string[] = [];
+    const result = await fetchHttpSource(
+      "https://redirect-0.example/",
+      {},
+      {
+        resolveHost: publicAddresses,
+        request: async (url) => {
+          requests.push(url.hostname);
+          const index = Number(url.hostname.match(/redirect-(\d+)/)?.[1] ?? "0");
+          return index < 3
+            ? wire(302, "", { location: `https://redirect-${index + 1}.example/` })
+            : wire(200, "safe", { "content-type": "text/plain" });
+        },
+      },
+    );
+    expect(result.body.toString()).toBe("safe");
+    expect(requests).toHaveLength(4);
+
+    await expect(
+      fetchHttpSource(
+        "https://loop-a.example/",
+        {},
+        {
+          resolveHost: publicAddresses,
+          request: async (url) =>
+            wire(302, "", {
+              location:
+                url.hostname === "loop-a.example"
+                  ? "https://loop-b.example/"
+                  : "https://loop-a.example/",
+            }),
+        },
+      ),
+    ).rejects.toMatchObject({ category: "redirect_loop" });
+
+    let overLimitRequests = 0;
+    await expect(
+      fetchHttpSource(
+        "https://over-limit-0.example/",
+        {},
+        {
+          resolveHost: publicAddresses,
+          request: async (url) => {
+            overLimitRequests += 1;
+            const index = Number(url.hostname.match(/over-limit-(\d+)/)?.[1] ?? "0");
+            return wire(302, "", { location: `https://over-limit-${index + 1}.example/` });
+          },
+        },
+      ),
+    ).rejects.toMatchObject({ category: "redirect_limit" });
+    expect(overLimitRequests).toBe(4);
+  });
+
+  it("uses the validated public DNS answer for the connection without a second lookup", async () => {
+    let resolveCalls = 0;
+    let pinnedAddresses: Array<{ address: string; family: number }> = [];
+    const result = await fetchHttpSource(
+      "https://rebind.example/",
+      {},
+      {
+        resolveHost: async () => {
+          resolveCalls += 1;
+          return resolveCalls === 1
+            ? [{ address: "93.184.216.34", family: 4 }]
+            : [{ address: "127.0.0.1", family: 4 }];
+        },
+        request: async (_url, _headers, addresses) => {
+          pinnedAddresses = addresses;
+          return wire(200, "public", { "content-type": "text/plain" });
+        },
+      },
+    );
+
+    expect(result.body.toString()).toBe("public");
+    expect(resolveCalls).toBe(1);
+    expect(pinnedAddresses).toEqual([{ address: "93.184.216.34", family: 4 }]);
   });
 
   it("rejects a discovery redirect to a non-standard port before requesting it", async () => {

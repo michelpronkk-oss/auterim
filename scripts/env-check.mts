@@ -105,6 +105,9 @@ try {
   console.log(
     `Preflight live fixture: ${preflightFixtureConfigured ? "enabled and scoped to the Auterim fixture allowlist" : "not configured"}`,
   );
+  console.log(
+    `Discovery browser runtime: ${environment.AUTERIM_DISCOVERY_RUNTIME_ENABLED === "1" ? "enabled" : "disabled"}`,
+  );
   console.log("No secrets were printed. No project discovery or network calls were made.");
 } catch (error) {
   console.error("Environment validation failed:");

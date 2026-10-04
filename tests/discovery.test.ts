@@ -186,11 +186,14 @@ describe("offline URL dependency evaluation", () => {
     });
   });
 
-  it("labels two strong technical provider signals high", async () => {
+  it("keeps static website signals below high confidence without independent runtime observations", async () => {
     const result = await discover(
       '<script src="https://js.stripe.com/v3/"></script><form action="https://checkout.stripe.com/pay"></form>',
     );
-    expect(result.candidates[0]).toMatchObject({ providerSlug: "stripe", confidenceLabel: "high" });
+    expect(result.candidates[0]).toMatchObject({
+      providerSlug: "stripe",
+      confidenceLabel: "medium",
+    });
   });
 
   it("does not treat two correlated response headers as independent confidence", async () => {
@@ -540,7 +543,7 @@ describe("offline URL dependency evaluation", () => {
     expect(result.evidence).toEqual([]);
   });
 
-  it("does not label strong plus multiple medium signals high without two strong signal types", async () => {
+  it("collapses correlated infrastructure and SDK observations into independent families", async () => {
     const result = await discoverWebsiteDependencies("https://company.example/", {
       fetcher: async () => ({
         ...page('<script src="/_vercel/insights/script.js"></script>', { server: "Vercel" }),
@@ -548,7 +551,7 @@ describe("offline URL dependency evaluation", () => {
         redirectEvidence: [{ origin: "https://company.example", safeHeaders: {} }],
       }),
     });
-    expect(result.candidates[0]?.confidence).toBeGreaterThan(0.85);
+    expect(result.candidates[0]?.confidence).toBe(0.808);
     expect(result.candidates[0]?.confidenceLabel).toBe("medium");
   });
 
@@ -565,6 +568,226 @@ describe("offline URL dependency evaluation", () => {
       dnsRecordsUsed: false,
       browserRuntime: false,
     });
+  });
+
+  it("skips runtime browsing when static coverage is strong", async () => {
+    let runtimeCalls = 0;
+    const result = await discoverWebsiteDependencies("https://company.example/", {
+      fetcher: async () =>
+        page(
+          '<script src="https://js.stripe.com/v3/"></script><form action="https://checkout.stripe.com/pay"></form>',
+        ),
+      runtimeEnabled: true,
+      runtimeRunner: async () => {
+        runtimeCalls += 1;
+        return {
+          requests: [],
+          requestsObserved: 0,
+          uniqueHosts: 0,
+          blockedUnsafeRequests: 0,
+          durationMs: 1,
+          status: "complete",
+          memoryDeltaBytes: 0,
+        };
+      },
+    });
+    expect(runtimeCalls).toBe(0);
+    expect(result.coverage.staticCoverage).toMatchObject({
+      quality: "strong",
+      runtimeRequired: false,
+    });
+  });
+
+  it("runs runtime enrichment for weak static coverage without treating one host as independent evidence", async () => {
+    const result = await discoverWebsiteDependencies("https://company.example/", {
+      fetcher: async () =>
+        page(
+          '<script type="application/json" id="runtime-config">{"apiUrl":"https://project.supabase.co"}</script>',
+        ),
+      runtimeEnabled: true,
+      runtimeRunner: async () => ({
+        requests: [
+          { host: "project.supabase.co", resourceType: "fetch" },
+          { host: "us.i.posthog.com", resourceType: "script" },
+          { host: "us.i.posthog.com", resourceType: "fetch" },
+        ],
+        requestsObserved: 7,
+        uniqueHosts: 2,
+        blockedUnsafeRequests: 0,
+        durationMs: 500,
+        status: "complete",
+        memoryDeltaBytes: 1024,
+      }),
+    });
+    expect(result.coverage.runtime).toMatchObject({
+      attempted: true,
+      requestsObserved: 7,
+      uniqueHosts: 2,
+      status: "complete",
+    });
+    expect(result.candidates.map(({ providerSlug }) => providerSlug)).toEqual([
+      "posthog",
+      "supabase",
+    ]);
+    expect(
+      result.candidates.find(({ providerSlug }) => providerSlug === "supabase")?.confidence,
+    ).toBe(0.68);
+    expect(
+      result.candidates.find(({ providerSlug }) => providerSlug === "posthog")?.confidenceLabel,
+    ).toBe("medium");
+    expect(
+      result.evidence.filter(
+        ({ providerSlug, signatureKey }) =>
+          providerSlug === "posthog" && signatureKey === "posthog-runtime-api",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("does not let one static provider clue suppress runtime-only dependencies", async () => {
+    let runtimeCalls = 0;
+    const result = await discoverWebsiteDependencies("https://company.example/", {
+      fetcher: async () =>
+        page(
+          '<script type="application/json" id="runtime-config">{"apiUrl":"https://project.supabase.co"}</script><script src="/app.js"></script>',
+        ),
+      runtimeEnabled: true,
+      runtimeRunner: async () => {
+        runtimeCalls += 1;
+        return {
+          requests: [
+            { host: "company.example", resourceType: "document" },
+            { host: "us.i.posthog.com", resourceType: "fetch" },
+            { host: "us-assets.i.posthog.com", resourceType: "script" },
+          ],
+          requestsObserved: 3,
+          uniqueHosts: 3,
+          blockedUnsafeRequests: 0,
+          durationMs: 10,
+          status: "complete",
+          memoryDeltaBytes: 0,
+        };
+      },
+    });
+
+    expect(runtimeCalls).toBe(1);
+    expect(result.candidates.map(({ providerSlug }) => providerSlug)).toContain("posthog");
+    expect(result.coverage.staticCoverage.runtimeRequired).toBe(true);
+  });
+
+  it("deduplicates a controlled multi-provider fixture across static and runtime surfaces", async () => {
+    const result = await discoverWebsiteDependencies("https://company.example/", {
+      fetcher: async () =>
+        page('<script src="/app.js"></script>', {
+          "x-vercel-id": "iad1::fixture",
+          "content-security-policy":
+            "script-src https://js.stripe.com https://browser.sentry-cdn.com https://us.i.posthog.com; connect-src https://project.supabase.co https://api.stripe.com https://acme.ingest.sentry.io https://us.i.posthog.com",
+        }),
+      runtimeEnabled: true,
+      runtimeRunner: async () => ({
+        requests: [
+          { host: "js.stripe.com", resourceType: "script" },
+          { host: "api.stripe.com", resourceType: "fetch" },
+          { host: "project.supabase.co", resourceType: "xhr" },
+          { host: "browser.sentry-cdn.com", resourceType: "script" },
+          { host: "acme.ingest.sentry.io", resourceType: "fetch" },
+          { host: "us-assets.i.posthog.com", resourceType: "script" },
+          { host: "us.i.posthog.com", resourceType: "fetch" },
+          ...Array.from({ length: 10 }, () => ({
+            host: "us.i.posthog.com",
+            resourceType: "fetch" as const,
+          })),
+        ],
+        requestsObserved: 17,
+        uniqueHosts: 7,
+        blockedUnsafeRequests: 0,
+        durationMs: 600,
+        status: "complete",
+        memoryDeltaBytes: 4096,
+      }),
+    });
+    expect(result.candidates.map(({ providerSlug }) => providerSlug).sort()).toEqual([
+      "posthog",
+      "sentry",
+      "stripe",
+      "supabase",
+      "vercel",
+    ]);
+    expect(
+      result.evidence.filter(
+        ({ providerSlug, signatureKey }) =>
+          providerSlug === "posthog" && signatureKey === "posthog-runtime-api",
+      ),
+    ).toHaveLength(1);
+    expect(
+      result.candidates.find(({ providerSlug }) => providerSlug === "posthog")?.confidenceLabel,
+    ).toBe("high");
+    expect(
+      result.candidates.find(({ providerSlug }) => providerSlug === "supabase")?.confidenceLabel,
+    ).toBe("medium");
+  });
+
+  it("ignores integration-directory copy, provider links, logos, and social embeds", async () => {
+    const result = await discover(
+      '<main>Connect Stripe, Supabase, Sentry and PostHog</main><a href="https://stripe.com">Stripe</a><img src="https://cdn.example/stripe-logo.png"><iframe src="https://www.youtube.com/embed/demo"></iframe><a href="https://github.com/example">GitHub</a>',
+    );
+    expect(result.candidates).toEqual([]);
+    expect(result.evidence).toEqual([]);
+  });
+
+  it("keeps functional marketing-demo integrations unconfirmed", async () => {
+    const result = await discoverWebsiteDependencies("https://company.example/integrations/", {
+      fetcher: async () =>
+        page(
+          '<script src="https://js.stripe.com/v3/"></script><form action="https://checkout.stripe.com/pay"></form>',
+        ),
+      runtimeEnabled: true,
+      runtimeRunner: async () => ({
+        requests: [
+          { host: "js.stripe.com", resourceType: "script" },
+          { host: "checkout.stripe.com", resourceType: "fetch" },
+        ],
+        requestsObserved: 2,
+        uniqueHosts: 2,
+        blockedUnsafeRequests: 0,
+        durationMs: 100,
+        status: "complete",
+        memoryDeltaBytes: 0,
+      }),
+    });
+    expect(
+      result.candidates.find(({ providerSlug }) => providerSlug === "stripe")?.confidenceLabel,
+    ).toBe("medium");
+    expect(result.status).toBe("completed");
+    // Discovery candidates remain suggestions; website/demo evidence never auto-confirms a dependency.
+  });
+
+  it("propagates cancellation swallowed by optional deep asset fetches", async () => {
+    const controller = new AbortController();
+    await expect(
+      discoverWebsiteDependencies("https://company.example/", {
+        deep: true,
+        signal: controller.signal,
+        fetcher: async (url) => {
+          if (url.endsWith("app.js")) controller.abort();
+          return page(
+            '<script src="/app.js"></script><form action="https://checkout.stripe.com/pay"></form>',
+          );
+        },
+      }),
+    ).rejects.toMatchObject({ category: "timeout" });
+  });
+
+  it("keeps useful static candidates when optional runtime browsing is unavailable", async () => {
+    const result = await discoverWebsiteDependencies("https://company.example/", {
+      fetcher: async () => page("", { "cf-ray": "abc" }),
+      runtimeEnabled: true,
+      runtimeRunner: async () => {
+        throw new Error("browser unavailable");
+      },
+    });
+    expect(result.status).toBe("partial");
+    expect(result.candidates.map(({ providerSlug }) => providerSlug)).toContain("cloudflare");
+    expect(result.coverage.runtime.status).toBe("unavailable");
   });
 
   it("surfaces transient homepage failures so the Trigger task can retry", async () => {
@@ -621,9 +844,37 @@ describe("offline URL dependency evaluation", () => {
             status: 200,
             bytesRead: 0,
             truncated: false,
+            referencesExtracted: 0,
             extractionPerformed: true,
             nodeLimitReached: false,
             referenceLimitReached: false,
+          },
+          staticCoverage: {
+            quality: "weak" as const,
+            durationMs: 1,
+            signalFamilies: 0,
+            runtimeRequired: false,
+            resourceGraph: {
+              scriptsFirstParty: 0,
+              scriptsThirdParty: 0,
+              stylesheets: 0,
+              preloads: 0,
+              apiEndpoints: 0,
+              frames: 0,
+              manifests: 0,
+              formActions: 0,
+              otherResources: 0,
+            },
+          },
+          runtime: {
+            attempted: false,
+            durationMs: 0,
+            requestsObserved: 0,
+            uniqueHosts: 0,
+            providerMatches: 0,
+            blockedUnsafeRequests: 0,
+            status: "skipped" as const,
+            memoryDeltaBytes: null,
           },
           headers: { inspected: 0 },
           csp: { inspected: true, hostSources: 0 },
@@ -666,7 +917,118 @@ describe("offline URL dependency evaluation", () => {
     );
     expect(result.status).toBe("completed");
     expect(discoveryAttempts).toBe(2);
-    expect(failedCategories).toEqual(["discovery_failed"]);
+    expect(failedCategories).toEqual(["timeout"]);
+  });
+
+  it("marks persistence errors separately and leaves the original error visible to Trigger retries", async () => {
+    const failed: string[] = [];
+    const repository = {
+      begin: async () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      complete: async () => {
+        throw new Error("completion unavailable");
+      },
+      fail: async (_runId: string, _workspaceId: string, category: string) => {
+        failed.push(category);
+      },
+    };
+    await expect(
+      runWebsiteDependencyDiscovery(
+        {
+          workspaceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          companyId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          websiteUrl: "https://company.example/",
+          deep: false,
+          triggerRunId: "run-persistence-error",
+          attemptNumber: 1,
+        },
+        {
+          repository,
+          discover: async () => ({
+            normalizedUrl: "https://company.example/",
+            status: "completed",
+            outcome: "empty",
+            candidates: [],
+            evidence: [],
+            deepPass: {
+              requested: false,
+              scriptsDiscovered: 0,
+              scriptsAttempted: 0,
+              scriptsFetched: 0,
+              bytesFetched: 0,
+              failures: 0,
+            },
+            coverage: {
+              outcome: "empty",
+              durationMs: 1,
+              html: {
+                attempted: true,
+                status: 200,
+                bytesRead: 0,
+                truncated: false,
+                referencesExtracted: 0,
+                extractionPerformed: true,
+                nodeLimitReached: false,
+                referenceLimitReached: false,
+              },
+              staticCoverage: {
+                quality: "weak",
+                durationMs: 1,
+                signalFamilies: 0,
+                runtimeRequired: false,
+                resourceGraph: {
+                  scriptsFirstParty: 0,
+                  scriptsThirdParty: 0,
+                  stylesheets: 0,
+                  preloads: 0,
+                  apiEndpoints: 0,
+                  frames: 0,
+                  manifests: 0,
+                  formActions: 0,
+                  otherResources: 0,
+                },
+              },
+              runtime: {
+                attempted: false,
+                durationMs: 0,
+                requestsObserved: 0,
+                uniqueHosts: 0,
+                providerMatches: 0,
+                blockedUnsafeRequests: 0,
+                status: "skipped",
+                memoryDeltaBytes: null,
+              },
+              headers: { inspected: 0 },
+              csp: { inspected: true, hostSources: 0 },
+              manifest: { attempted: false, discovered: 0, fetched: 0, failures: 0 },
+              javascript: {
+                attempted: false,
+                scriptsDiscovered: 0,
+                scriptsAttempted: 0,
+                scriptsFetched: 0,
+                bytesFetched: 0,
+                failures: 0,
+                limitReached: false,
+              },
+              incompleteReasons: [],
+            },
+            inspected: {
+              responseHeaders: 0,
+              redirects: 0,
+              htmlNodes: 0,
+              scriptReferences: 0,
+              resourceReferences: 0,
+              cspHosts: 0,
+              inlineConfigUrls: 0,
+              manifestsFetched: 0,
+              jsAssetsFetched: 0,
+              dnsRecordsUsed: false,
+              browserRuntime: false,
+            },
+          }),
+        },
+      ),
+    ).rejects.toThrow("completion unavailable");
+    expect(failed).toEqual(["persistence_error"]);
   });
 
   it("records terminal homepage fetch failures without retrying", async () => {
