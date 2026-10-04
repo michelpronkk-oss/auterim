@@ -67,11 +67,19 @@ export function searchConsoleOAuthConfig() {
     throw new SearchConsoleError("not_configured", false);
   const redirect = new URL(environment.GOOGLE_SEARCH_CONSOLE_REDIRECT_URI!);
   const appOrigin = new URL(environment.NEXT_PUBLIC_APP_URL);
+  const isLocalDevelopmentHost = ["localhost", "127.0.0.1", "[::1]"].includes(
+    appOrigin.hostname.toLowerCase(),
+  );
   if (
     redirect.origin !== appOrigin.origin ||
     redirect.pathname !== "/api/internal/growth/search-console/callback" ||
     redirect.search ||
     redirect.hash ||
+    redirect.username ||
+    redirect.password ||
+    appOrigin.username ||
+    appOrigin.password ||
+    (!isLocalDevelopmentHost && appOrigin.protocol !== "https:") ||
     (appOrigin.protocol === "https:" && redirect.protocol !== "https:")
   )
     throw new SearchConsoleError("not_configured", false);

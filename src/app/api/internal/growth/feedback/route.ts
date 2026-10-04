@@ -5,19 +5,27 @@ import {
   getGrowthFeedbackReadModel,
   syncSearchConsole,
 } from "@/lib/growth-v2/feedback";
+import { isAllowedVerifiedGrowthAdmin } from "@/lib/growth-v2/contract";
 
-async function authorized(request: Request) {
+type AuthorizationResult = { ok: true } | { ok: false; response: Response };
+
+async function authorized(request: Request): Promise<AuthorizationResult> {
   const auth = await authenticateOnboardingRequest(request);
-  if (!auth.ok) return { response: auth.response };
-  const email = auth.user.email?.trim().toLowerCase();
-  if (!email || !searchConsoleAdminEmails().has(email))
-    return { response: Response.json({ error: "forbidden" }, { status: 403 }) };
-  return { userId: auth.user.id };
+  if (!auth.ok) return { ok: false, response: auth.response };
+  if (
+    !isAllowedVerifiedGrowthAdmin(
+      auth.user.email,
+      auth.user.email_confirmed_at,
+      searchConsoleAdminEmails(),
+    )
+  )
+    return { ok: false, response: Response.json({ error: "forbidden" }, { status: 403 }) };
+  return { ok: true };
 }
 
 export async function GET(request: Request) {
   const auth = await authorized(request);
-  if ("response" in auth) return auth.response;
+  if (!auth.ok) return auth.response;
   try {
     return Response.json(await getGrowthFeedbackReadModel(), {
       headers: { "cache-control": "no-store" },
@@ -29,7 +37,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   const auth = await authorized(request);
-  if ("response" in auth) return auth.response;
+  if (!auth.ok) return auth.response;
   try {
     const input = (await request.json()) as { operation?: unknown };
     if (input.operation === "sync")
