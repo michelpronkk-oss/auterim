@@ -42,13 +42,13 @@ const signalLabel: Record<string, string> = {
 
 const checkLabels = [
   "Website infrastructure",
-  "Public technology signals",
+  "Technology signals",
   "External services",
   "Dependency candidates",
 ];
 
 const CHECK_STEP_MS = 520;
-const SCAN_FALLBACK_MESSAGE = "This public website could not be scanned safely.";
+const SCAN_FALLBACK_MESSAGE = "This website could not be scanned safely.";
 
 /** Only messages the scan API wrote for people are shown; transport errors get a plain fallback. */
 class ScanError extends Error {}
@@ -191,7 +191,7 @@ export function HeroAnalyzer() {
           const json = (await response.json().catch(() => null)) as ScanResponse | null;
           if (!response.ok || !json) throw new ScanError(json?.message || SCAN_FALLBACK_MESSAGE);
           if (json.status === "failed" && json.candidates.length === 0)
-            throw new ScanError("Its public pages could not be reached or inspected.");
+            throw new ScanError("Its pages could not be reached or inspected.");
           return json;
         }),
         minimum,
@@ -206,7 +206,7 @@ export function HeroAnalyzer() {
         return {
           name,
           category: entry?.[1][0] ?? "Detected service",
-          signal: signals.join(", ") || "public signal",
+          signal: signals.join(", ") || "site signal",
           high: candidate.confidenceLabel === "high",
         };
       });
@@ -417,12 +417,12 @@ export function HeroAnalyzer() {
                   <span className={s.stageTitle}>
                     {found.length
                       ? `We found ${found.length} likely ${found.length === 1 ? "dependency" : "dependencies"}.`
-                      : "No public provider markers found."}
+                      : "No provider markers found."}
                   </span>
                   <span className={s.stageSub}>
                     {found.length
-                      ? `Each one is based on a public signal from ${domain}.`
-                      : `That doesn't mean ${domain} has no dependencies. Many are not publicly visible.`}
+                      ? `Each one is based on a signal from ${domain}.`
+                      : `That doesn't mean ${domain} has no dependencies. Many don't show up in a scan.`}
                     {partial
                       ? " The scan reached an inspection limit, so results may be incomplete."
                       : ""}
@@ -452,8 +452,8 @@ export function HeroAnalyzer() {
                 ) : null}
                 <div className={s.stageFoot}>
                   <span className={s.footNote}>
-                    Auterim can identify public signals. Confirm what your business actually relies
-                    on to complete your coverage.
+                    Auterim finds what it can. Confirm what your business actually relies on to
+                    complete your coverage.
                   </span>
                   <button type="button" className={s.btnInkSm} onClick={() => setStage("confirm")}>
                     Confirm dependencies →
@@ -513,7 +513,7 @@ export function HeroAnalyzer() {
                         : "Possible"
                       : extra.includes(name)
                         ? "Added by you"
-                        : "Not publicly visible";
+                        : "Not detected";
                     return (
                       <button
                         key={name}
@@ -647,7 +647,7 @@ function IdleDemo({ dt, dPhase }: { dt: number; dPhase: number }) {
         : "Coverage";
   const meta =
     dPhase === 0
-      ? "public signals only"
+      ? "scanning"
       : dPhase === 1
         ? "confirmed by you"
         : `${coveredSources} sources · watching`;
@@ -655,7 +655,7 @@ function IdleDemo({ dt, dPhase }: { dt: number; dPhase: number }) {
     dPhase === 0
       ? "Reading response headers, page markup and script sources."
       : dPhase === 1
-        ? "OpenAI isn't visible publicly. You add what Auterim can't see."
+        ? "OpenAI didn't show up in the scan. You add what Auterim can't see."
         : "Each dependency expands into the sources Auterim will watch.";
   return (
     <div className={s.stageCol}>
@@ -727,7 +727,6 @@ function IdleDemo({ dt, dPhase }: { dt: number; dPhase: number }) {
       </div>
       <div className={s.stageFoot}>
         <span className={s.footNote}>{foot}</span>
-        <span className={s.monoXsMuted}>Example · enter your website to run it</span>
       </div>
     </div>
   );

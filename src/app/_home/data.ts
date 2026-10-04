@@ -150,7 +150,7 @@ export const demoDefs = [
   ["Vercel", "high", "response headers"],
   ["Supabase", "high", "API endpoint"],
   ["Resend", "possible", "embedded URL"],
-  ["OpenAI", "possible", "not publicly visible"],
+  ["OpenAI", "possible", "not detected"],
 ] as const;
 
 export const suggestedProviders = ["OpenAI", "Anthropic", "Dodo", "GitHub", "AWS"];
@@ -235,7 +235,7 @@ export const discoverTable = [
   },
   {
     name: "OpenAI",
-    disc: "Not publicly visible",
+    disc: "Not detected",
     discTone: "hidden",
     conf: "Added manually",
     glyph: "+",

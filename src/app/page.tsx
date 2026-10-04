@@ -199,7 +199,7 @@ export default function Home() {
                 </div>
               </div>
               <div data-reveal="1" className={s.signalsCard}>
-                <span className={s.monoBlueLabelDark}>02 · PUBLIC SIGNALS</span>
+                <span className={s.monoBlueLabelDark}>02 · SIGNALS</span>
                 {publicSignals.map((sig) => (
                   <div key={sig.k} className={s.signalRow}>
                     <span className={s.blinkDot} style={{ animationDelay: sig.delay }} />
@@ -454,9 +454,8 @@ export default function Home() {
           </div>
           <CoverageCatalog />
           <p className={s.disclaimer}>
-            Example source types. Exact sources are confirmed for each dependency during setup.
-            Provider names and marks identify providers only; Auterim is not affiliated with or
-            endorsed by them.
+            Exact sources are confirmed for each dependency during setup. Provider names and marks
+            identify providers only; Auterim is not affiliated with or endorsed by them.
           </p>
         </section>
 
