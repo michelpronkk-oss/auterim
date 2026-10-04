@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { catalog, coverageCategories, mapGroups, mapStatus, mapStatusStyle } from "./data";
 import { ANALYZE_EVENT } from "./hero";
 import { BrandMark, ProviderMark } from "./marks";
@@ -293,6 +293,34 @@ const orbitSlots = [
   y: +(50 + r * Math.sin((a * Math.PI) / 180)).toFixed(2),
 }));
 
+const TOUR_MS = 3200;
+
+function OrbitDetailBody({ provider }: { provider: string }) {
+  const [category, sources] = catalog[provider];
+  return (
+    <>
+      <div className={s.orbitDetailHead}>
+        <ProviderMark provider={provider} size={44} />
+        <div className={s.rowText}>
+          <span className={s.orbitName}>{provider}</span>
+          <span className={s.orbitCat}>{category}</span>
+        </div>
+        <span className={s.orbitCount}>
+          <b>{sources.length}</b> source types
+        </span>
+      </div>
+      <ul className={s.orbitChips}>
+        {sources.map((src, i) => (
+          <li key={src[0]} style={{ animationDelay: `${0.05 + i * 0.04}s` }}>
+            <span aria-hidden="true" className={s.orbitChipDot} />
+            {src[0]}
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
 export function CoverageCatalog() {
   const [category, setCategory] = useState("All");
   const providers = Object.keys(catalog).filter((n) => coverageCategories.includes(catalog[n][0]));
@@ -300,6 +328,31 @@ export function CoverageCatalog() {
   const rows = providers.filter(inCategory);
   const orbitProviders = providers.slice(0, orbitSlots.length);
   const [focus, setFocus] = useState(orbitProviders[0]);
+  // The square tours its logos on its own while it is on screen; a tap takes over for a while.
+  const [touring, setTouring] = useState(false);
+  const [held, setHeld] = useState(false);
+  const orbitRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = orbitRef.current;
+    if (!el || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const io = new IntersectionObserver(([entry]) => setTouring(entry.isIntersecting), {
+      threshold: 0.4,
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+  useEffect(() => {
+    if (!touring || held) return;
+    const id = window.setTimeout(() => {
+      setFocus((cur) => orbitProviders[(orbitProviders.indexOf(cur) + 1) % orbitProviders.length]);
+    }, TOUR_MS);
+    return () => window.clearTimeout(id);
+  }, [touring, held, focus, orbitProviders]);
+  useEffect(() => {
+    if (!held) return;
+    const id = window.setTimeout(() => setHeld(false), 9000);
+    return () => window.clearTimeout(id);
+  }, [held, focus]);
   return (
     <div data-reveal className={s.catalog}>
       <div role="tablist" aria-label="Categories" className={s.catalogTabs}>
@@ -327,7 +380,7 @@ export function CoverageCatalog() {
       </div>
       <div id="coverage-panel" role="tabpanel" className={s.catalogPanel}>
         {/* Phones: every provider floats in one square around Auterim; tap one to see what it covers. */}
-        <div className={s.orbit}>
+        <div ref={orbitRef} className={s.orbit}>
           <div className={s.orbitSquare}>
             <svg aria-hidden="true" viewBox="0 0 100 100" className={s.orbitLines}>
               <circle cx="50" cy="50" r="23" />
@@ -347,9 +400,6 @@ export function CoverageCatalog() {
               <span className={s.pulseRing} />
               <BrandMark size={26} tone="dark" />
             </span>
-            <span aria-hidden="true" className={s.orbitHint}>
-              Tap a logo
-            </span>
             {orbitProviders.map((p, i) => (
               <button
                 key={p}
@@ -364,31 +414,34 @@ export function CoverageCatalog() {
                   animationDelay: `${-((i * 0.83) % 6).toFixed(2)}s`,
                   animationDuration: `${5 + (i % 4) * 0.7}s`,
                 }}
-                onClick={() => setFocus(p)}
+                onClick={() => {
+                  setFocus(p);
+                  setHeld(true);
+                }}
               >
                 <ProviderMark provider={p} size={34} />
               </button>
             ))}
           </div>
-          <div id="coverage-focus" key={focus} className={s.orbitDetail} aria-live="polite">
-            <div className={s.orbitDetailHead}>
-              <ProviderMark provider={focus} size={44} />
-              <div className={s.rowText}>
-                <span className={s.orbitName}>{focus}</span>
-                <span className={s.orbitCat}>{catalog[focus][0]}</span>
+          {/* Every provider's card is laid out invisibly underneath, so the card keeps the
+              height of the tallest one and nothing below it moves while the tour runs. */}
+          <div id="coverage-focus" className={s.orbitDetail} aria-live={held ? "polite" : "off"}>
+            {touring && !held ? (
+              <span
+                key={focus}
+                aria-hidden="true"
+                className={s.orbitProgress}
+                style={{ animationDuration: `${TOUR_MS}ms` }}
+              />
+            ) : null}
+            {orbitProviders.map((p) => (
+              <div key={p} aria-hidden="true" className={s.orbitGhost}>
+                <OrbitDetailBody provider={p} />
               </div>
-              <span className={s.orbitCount}>
-                <b>{catalog[focus][1].length}</b> source types
-              </span>
+            ))}
+            <div key={focus} className={s.orbitDetailBody}>
+              <OrbitDetailBody provider={focus} />
             </div>
-            <ul className={s.orbitChips}>
-              {catalog[focus][1].map((src, i) => (
-                <li key={src[0]} style={{ animationDelay: `${0.05 + i * 0.04}s` }}>
-                  <span aria-hidden="true" className={s.orbitChipDot} />
-                  {src[0]}
-                </li>
-              ))}
-            </ul>
           </div>
         </div>
         <div className={s.catalogTable}>
