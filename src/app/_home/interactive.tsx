@@ -66,7 +66,7 @@ export function ChangeInbox() {
   ];
   const detail = rows[selectedIndex];
   return (
-    <div className={s.inbox}>
+    <div data-reveal className={s.inbox}>
       <div className={s.inboxList}>
         <div className={s.inboxBar}>
           <div className={s.inboxTitle}>
@@ -194,7 +194,7 @@ export function DependencyMap() {
     );
   };
   return (
-    <div className={s.mapGrid}>
+    <div data-reveal className={s.mapGrid}>
       <div className={s.mapCanvas}>
         <div className={s.mapWide}>
           <svg
@@ -284,12 +284,25 @@ export function DependencyMap() {
 }
 
 /** Coverage catalog with category tabs. */
+/** Constellation slots (percent of the square): an inner ring of 6 and an outer ring of 8. */
+const orbitSlots = [
+  ...Array.from({ length: 6 }, (_, i) => ({ r: 23, a: -90 + i * 60 })),
+  ...Array.from({ length: 8 }, (_, i) => ({ r: 39, a: -67.5 + i * 45 })),
+].map(({ r, a }) => ({
+  x: +(50 + r * Math.cos((a * Math.PI) / 180)).toFixed(2),
+  y: +(50 + r * Math.sin((a * Math.PI) / 180)).toFixed(2),
+}));
+
 export function CoverageCatalog() {
   const [category, setCategory] = useState("All");
+  const [picked, setPicked] = useState<string | null>(null);
   const providers = Object.keys(catalog).filter((n) => coverageCategories.includes(catalog[n][0]));
-  const rows = providers.filter((p) => category === "All" || catalog[p][0] === category);
+  const inCategory = (p: string) => category === "All" || catalog[p][0] === category;
+  const rows = providers.filter(inCategory);
+  const focus = picked && inCategory(picked) ? picked : rows[0];
+  const orbitProviders = providers.slice(0, orbitSlots.length);
   return (
-    <div className={s.catalog}>
+    <div data-reveal className={s.catalog}>
       <div role="tablist" aria-label="Categories" className={s.catalogTabs}>
         {["All", ...coverageCategories].map((name) => {
           const on = category === name;
@@ -313,27 +326,94 @@ export function CoverageCatalog() {
           );
         })}
       </div>
-      <div id="coverage-panel" role="tabpanel" className={s.catalogTable}>
-        <div className={s.catalogHead}>
-          <span>PROVIDER</span>
-          <span className={s.catalogSrcsHead}>SOURCE TYPES</span>
-          <span>COVERAGE</span>
-        </div>
-        {rows.map((p) => (
-          <div key={`${category}-${p}`} className={s.catalogRow}>
-            <div className={s.catalogProvider}>
-              <ProviderMark provider={p} size={28} />
-              <div className={s.rowText}>
-                <span className={s.rowName}>{p}</span>
-                <span className={s.catalogCat}>{catalog[p][0]}</span>
-              </div>
-            </div>
-            <span className={s.catalogSrcs}>
-              {catalog[p][1].map((src) => src[0].toLowerCase()).join(" · ")}
+      <div id="coverage-panel" role="tabpanel" className={s.catalogPanel}>
+        {/* Phones: every provider floats in one square around Auterim; the category dims the rest. */}
+        <div className={s.orbit}>
+          <div className={s.orbitSquare}>
+            <svg aria-hidden="true" viewBox="0 0 100 100" className={s.orbitLines}>
+              <circle cx="50" cy="50" r="23" />
+              <circle cx="50" cy="50" r="39" />
+              {orbitProviders.map((p, i) => (
+                <line
+                  key={p}
+                  x1="50"
+                  y1="50"
+                  x2={orbitSlots[i].x}
+                  y2={orbitSlots[i].y}
+                  className={
+                    p === focus ? s.orbitLineOn : inCategory(p) ? s.orbitLine : s.orbitLineOff
+                  }
+                />
+              ))}
+            </svg>
+            <span aria-hidden="true" className={s.orbitCore}>
+              <span className={s.pulseRing} />
+              <BrandMark size={26} tone="dark" />
             </span>
-            <span className={s.catalogN}>{catalog[p][1].length} types</span>
+            {orbitProviders.map((p, i) => {
+              const active = inCategory(p);
+              return (
+                <button
+                  key={p}
+                  type="button"
+                  aria-label={`${p}, ${catalog[p][0]}, ${catalog[p][1].length} source types`}
+                  aria-pressed={p === focus}
+                  disabled={!active}
+                  className={
+                    p === focus
+                      ? `${s.orbitTile} ${s.orbitTileOn}`
+                      : active
+                        ? s.orbitTile
+                        : `${s.orbitTile} ${s.orbitTileOff}`
+                  }
+                  style={{
+                    left: `${orbitSlots[i].x}%`,
+                    top: `${orbitSlots[i].y}%`,
+                    animationDelay: `${-((i * 0.83) % 6).toFixed(2)}s`,
+                    animationDuration: `${5 + (i % 4) * 0.7}s`,
+                  }}
+                  onClick={() => setPicked(p)}
+                >
+                  <ProviderMark provider={p} size={34} />
+                </button>
+              );
+            })}
           </div>
-        ))}
+          {focus ? (
+            <div key={focus} className={s.orbitDetail} aria-live="polite">
+              <ProviderMark provider={focus} size={36} />
+              <div className={s.rowText}>
+                <span className={s.orbitName}>{focus}</span>
+                <span className={s.orbitSrcs}>
+                  {catalog[focus][1].map((src) => src[0].toLowerCase()).join(" · ")}
+                </span>
+              </div>
+              <span className={s.catalogN}>{catalog[focus][1].length} types</span>
+            </div>
+          ) : null}
+        </div>
+        <div className={s.catalogTable}>
+          <div className={s.catalogHead}>
+            <span>PROVIDER</span>
+            <span className={s.catalogSrcsHead}>SOURCE TYPES</span>
+            <span>COVERAGE</span>
+          </div>
+          {rows.map((p) => (
+            <div key={`${category}-${p}`} className={s.catalogRow}>
+              <div className={s.catalogProvider}>
+                <ProviderMark provider={p} size={28} />
+                <div className={s.rowText}>
+                  <span className={s.rowName}>{p}</span>
+                  <span className={s.catalogCat}>{catalog[p][0]}</span>
+                </div>
+              </div>
+              <span className={s.catalogSrcs}>
+                {catalog[p][1].map((src) => src[0].toLowerCase()).join(" · ")}
+              </span>
+              <span className={s.catalogN}>{catalog[p][1].length} types</span>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
