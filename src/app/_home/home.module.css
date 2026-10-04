@@ -3590,3 +3590,16 @@ button.orbitTile:focus-visible {
     display: none;
   }
 }
+
+/* ---------- Phones: even line lengths for headlines and intros ---------- */
+@media (max-width: 560px) {
+  .h1,
+  .h2,
+  .h2Quiet,
+  .h2Final,
+  .heroLede,
+  .lede,
+  .ledeDark {
+    text-wrap: balance;
+  }
+}
