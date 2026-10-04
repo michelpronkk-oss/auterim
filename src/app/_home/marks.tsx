@@ -60,9 +60,7 @@ export function BrandMark({
 
 /** Lettered fallback tints for providers without an openly licensed glyph. */
 const providerTint: Record<string, string> = {
-  OpenAI: "#10A37F",
   Postmark: "#F5C300",
-  AWS: "#FF9900",
 };
 
 function monogram(name: string) {
@@ -106,7 +104,17 @@ export function ProviderMark({
         style={{ width: size, height: size, borderRadius: radius }}
       >
         <svg viewBox="0 0 24 24" width={Math.round(size * 0.56)} height={Math.round(size * 0.56)}>
-          <path d={logo.path} fill={fill} />
+          {logo.path ? (
+            <path d={logo.path} fill={fill} fillRule={logo.evenOdd ? "evenodd" : undefined} />
+          ) : null}
+          {logo.parts?.map((part) => (
+            <path
+              key={part.d.slice(0, 24)}
+              d={part.d}
+              fill={part.fill ?? fill}
+              fillRule={logo.evenOdd ? "evenodd" : undefined}
+            />
+          ))}
         </svg>
       </span>
     );
