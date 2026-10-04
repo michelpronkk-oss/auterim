@@ -221,6 +221,9 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
     kind === "settings" ? "/api/connectors" : null,
   );
   const [preference, setPreference] = useState<Record<string, unknown> | null>(null);
+  const [growthAdmin, setGrowthAdmin] = useState(false);
+  const [growthConnectionBusy, setGrowthConnectionBusy] = useState(false);
+  const [growthConnectionNotice, setGrowthConnectionNotice] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [filters, setFilters] = useState("all");
@@ -233,6 +236,21 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
       .then((result) => setPreference(result.preferences))
       .catch(() => setNotice("Notification preferences are temporarily unavailable."));
   }, [api, kind, workspaceId]);
+
+  useEffect(() => {
+    if (kind !== "settings") return;
+    let cancelled = false;
+    void api("/api/internal/growth/feedback")
+      .then(() => {
+        if (!cancelled) setGrowthAdmin(true);
+      })
+      .catch(() => {
+        if (!cancelled) setGrowthAdmin(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, kind]);
 
   async function updatePreference(key: string, value: unknown) {
     if (!preference) return;
@@ -271,6 +289,27 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
     } catch (error) {
       setNotice(messageFor(error));
       setBusy(false);
+    }
+  }
+
+  async function connectSearchConsole() {
+    setGrowthConnectionBusy(true);
+    setGrowthConnectionNotice("");
+    try {
+      const result = await api<{ authorizationUrl: string }>(
+        "/api/internal/growth/search-console/oauth",
+        { headers: { accept: "application/json" } },
+      );
+      const authorizationUrl = new URL(result.authorizationUrl);
+      if (
+        authorizationUrl.origin !== "https://accounts.google.com" ||
+        authorizationUrl.pathname !== "/o/oauth2/v2/auth"
+      )
+        throw new Error("search_console_authorization_url_invalid");
+      window.location.assign(authorizationUrl.toString());
+    } catch (error) {
+      setGrowthConnectionNotice(messageFor(error));
+      setGrowthConnectionBusy(false);
     }
   }
   async function disconnect(provider: string, installationId: string) {
@@ -943,6 +982,25 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
           subtitle="Manage workspace integrations, notification preferences, and account access."
         />
         <div className="settings-grid">
+          {growthAdmin && (
+            <section className="surface-card">
+              <p className="card-kicker">INTERNAL GROWTH</p>
+              <h2>Search Console feedback</h2>
+              <p>Connect the Auterim domain property using read-only Search Console access.</p>
+              <button
+                className="button-secondary"
+                disabled={growthConnectionBusy}
+                onClick={() => void connectSearchConsole()}
+              >
+                {growthConnectionBusy ? "Connecting…" : "Connect Search Console"}
+              </button>
+              {growthConnectionNotice && (
+                <p className="inline-error" role="alert">
+                  {growthConnectionNotice}
+                </p>
+              )}
+            </section>
+          )}
           <section className="surface-card">
             <div className="section-heading">
               <div>

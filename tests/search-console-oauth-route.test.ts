@@ -57,7 +57,7 @@ describe("Search Console OAuth start route", () => {
     });
     mocks.authorizationUrl.mockImplementation(
       ({ state, challenge }: { state: string; challenge: string }) =>
-        `https://accounts.google.com/o/oauth2/v2/auth?state=${state}&code_challenge=${challenge}`,
+        `https://accounts.google.com/o/oauth2/v2/auth?state=${state}&code_challenge=${challenge}&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fwebmasters.readonly`,
     );
     mocks.authenticate.mockResolvedValue({
       ok: true,
@@ -136,5 +136,28 @@ describe("Search Console OAuth start route", () => {
     expect(response.status).toBe(401);
     expect(mocks.createBinding).not.toHaveBeenCalled();
     expect(mocks.insert).not.toHaveBeenCalled();
+  });
+
+  it("supports an authenticated same-origin client handoff without exposing tokens", async () => {
+    const response = await GET(
+      new Request("https://auterim.com/api/internal/growth/search-console/oauth", {
+        headers: { accept: "application/json" },
+      }),
+    );
+    const body = (await response.json()) as { authorizationUrl: string };
+    const authorizationUrl = new URL(body.authorizationUrl);
+
+    expect(response.status).toBe(200);
+    expect(authorizationUrl.origin).toBe("https://accounts.google.com");
+    expect(authorizationUrl.pathname).toBe("/o/oauth2/v2/auth");
+    expect(authorizationUrl.searchParams.get("scope")).toBe(
+      "https://www.googleapis.com/auth/webmasters.readonly",
+    );
+    expect(authorizationUrl.searchParams.get("state")).toBe("test-state");
+    expect(response.headers.get("set-cookie")).toContain("HttpOnly");
+    expect(response.headers.get("set-cookie")).toContain("Secure");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(JSON.stringify(body)).not.toContain("actor-access-token-fixture");
+    expect(JSON.stringify(body)).not.toContain("browser-only-secret");
   });
 });

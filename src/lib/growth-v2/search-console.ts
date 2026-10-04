@@ -379,7 +379,10 @@ async function freshAccessToken() {
       }),
     });
     if (response.status === 400 || response.status === 401) {
-      const errorBody = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+      const errorBody: Record<string, unknown> = await readBoundedSearchConsoleJson(
+        response,
+        64 * 1024,
+      ).catch(() => ({}));
       if (errorBody.error === "invalid_grant")
         throw new SearchConsoleError("reauth_required", false);
       throw new SearchConsoleError("invalid_response", false);

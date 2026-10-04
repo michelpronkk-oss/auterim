@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { searchConsoleOAuthConfig, SearchConsoleError } from "@/lib/growth-v2/search-console";
+import { createHash } from "node:crypto";
+import {
+  createOAuthBinding,
+  decryptOAuthActorToken,
+  decryptOAuthVerifier,
+  searchConsoleOAuthConfig,
+  SearchConsoleError,
+} from "@/lib/growth-v2/search-console";
 
 function configureOAuth(appUrl: string, redirectUri: string) {
   vi.stubEnv("GOOGLE_SEARCH_CONSOLE_CLIENT_ID", "test-client-id");
@@ -57,5 +64,34 @@ describe("Search Console OAuth configuration", () => {
     expect(searchConsoleOAuthConfig().redirectUri).toBe(
       "http://localhost:3000/api/internal/growth/search-console/callback",
     );
+  });
+
+  it("creates encrypted PKCE and actor bindings without returning either credential in plaintext", () => {
+    configureOAuth(
+      "https://auterim.com",
+      "https://auterim.com/api/internal/growth/search-console/callback",
+    );
+
+    const binding = createOAuthBinding("supabase-access-token-fixture");
+    const verifier = decryptOAuthVerifier({
+      ...binding.encryptedVerifier,
+      stateHash: binding.stateHash,
+    });
+    const actorToken = decryptOAuthActorToken({
+      ...binding.encryptedActorToken,
+      stateHash: binding.stateHash,
+    });
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+
+    expect(binding.state).toHaveLength(43);
+    expect(binding.browserSecret).toHaveLength(43);
+    expect(binding.stateHash).toBe(createHash("sha256").update(binding.state).digest("hex"));
+    expect(binding.browserHash).toBe(
+      createHash("sha256").update(binding.browserSecret).digest("hex"),
+    );
+    expect(binding.challenge).toBe(challenge);
+    expect(actorToken).toBe("supabase-access-token-fixture");
+    expect(JSON.stringify(binding.encryptedActorToken)).not.toContain(actorToken);
+    expect(JSON.stringify(binding.encryptedVerifier)).not.toContain(verifier);
   });
 });

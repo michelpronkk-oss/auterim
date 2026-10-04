@@ -49,11 +49,22 @@ export async function GET(request: Request) {
     });
     const secure =
       new URL(getEnvironment().NEXT_PUBLIC_APP_URL).protocol === "https:" ? " Secure;" : "";
+    const cookie = `auterim_gsc_state=${binding.browserSecret}; Path=/api/internal/growth/search-console/callback; Max-Age=300; HttpOnly; SameSite=Lax;${secure}`;
+    if (request.headers.get("accept")?.includes("application/json"))
+      return Response.json(
+        { authorizationUrl },
+        {
+          headers: {
+            "set-cookie": cookie,
+            "cache-control": "no-store",
+          },
+        },
+      );
     return new Response(null, {
       status: 302,
       headers: {
         location: authorizationUrl,
-        "set-cookie": `auterim_gsc_state=${binding.browserSecret}; Path=/api/internal/growth/search-console/callback; Max-Age=300; HttpOnly; SameSite=Lax;${secure}`,
+        "set-cookie": cookie,
         "cache-control": "no-store",
       },
     });
