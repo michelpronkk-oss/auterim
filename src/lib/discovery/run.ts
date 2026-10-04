@@ -26,9 +26,11 @@ export async function runWebsiteDependencyDiscovery(
     return {
       runId,
       status: result.status,
+      outcome: result.outcome,
       candidateCount: result.candidates.length,
       evidenceCount: result.evidence.length,
       deepPass: result.deepPass,
+      coverage: result.coverage,
       failureCategory: result.failureCategory ?? null,
     };
   } catch (error) {

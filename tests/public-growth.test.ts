@@ -85,7 +85,41 @@ describe("public acquisition surfaces", () => {
         },
       ],
       evidence: [],
-      deepPass: { requested: false, scriptsFetched: 0, bytesFetched: 0 },
+      outcome: "complete",
+      coverage: {
+        outcome: "complete",
+        durationMs: 1,
+        html: {
+          attempted: true,
+          status: 200,
+          bytesRead: 0,
+          truncated: false,
+          extractionPerformed: true,
+          nodeLimitReached: false,
+          referenceLimitReached: false,
+        },
+        headers: { inspected: 0 },
+        csp: { inspected: true, hostSources: 0 },
+        manifest: { attempted: false, discovered: 0, fetched: 0, failures: 0 },
+        javascript: {
+          attempted: false,
+          scriptsDiscovered: 0,
+          scriptsAttempted: 0,
+          scriptsFetched: 0,
+          bytesFetched: 0,
+          failures: 0,
+          limitReached: false,
+        },
+        incompleteReasons: [],
+      },
+      deepPass: {
+        requested: false,
+        scriptsDiscovered: 0,
+        scriptsAttempted: 0,
+        scriptsFetched: 0,
+        bytesFetched: 0,
+        failures: 0,
+      },
       inspected: {
         responseHeaders: 0,
         redirects: 0,
@@ -172,6 +206,11 @@ describe("public acquisition surfaces", () => {
     );
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body).toEqual({ status: "failed", candidateCount: 0, candidates: [] });
+    expect(body).toMatchObject({
+      status: "failed",
+      outcome: "failed",
+      candidateCount: 0,
+      candidates: [],
+    });
   });
 });

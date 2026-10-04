@@ -9,8 +9,19 @@ import {
 } from "@/lib/discovery/normalize-website-url";
 
 type Scan = {
-  status: "completed" | "failed";
+  status: "completed" | "partial" | "failed";
+  outcome: "complete" | "partial" | "empty" | "failed";
   candidateCount: number;
+  coverage: {
+    durationMs: number;
+    htmlBytesRead: number;
+    htmlTruncated: boolean;
+    htmlExtractionPerformed: boolean;
+    scriptsDiscovered: number;
+    scriptsAttempted: number;
+    scriptsFetched: number;
+    deepBytesFetched: number;
+  };
   candidates: Array<{
     provider: string;
     confidence: number;
@@ -117,6 +128,17 @@ export function StackScanner() {
               </p>
             </div>
           </div>
+          {scan.status === "partial" && (
+            <p className="public-alert" role="status">
+              This scan reached an inspection limit. It kept the public signals it could verify;
+              results may be incomplete.
+            </p>
+          )}
+          {scan.status === "failed" && (
+            <p className="public-alert" role="status">
+              The page could not be fully inspected. No dependency suggestions are confirmed.
+            </p>
+          )}
           {scan.candidates.length ? (
             <ul className="scan-candidate-list">
               {scan.candidates.map((candidate) => (

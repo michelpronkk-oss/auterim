@@ -127,6 +127,24 @@ const growthSearchConsoleScopeMigration = await readFile(
   ),
   "utf8",
 );
+const partialDiscoveryMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261011010000_preserve_partial_discovery.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
+const discoveryOutcomeConsistencyMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261011020000_discovery_outcome_consistency.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase() {
   const db = new PGlite();
@@ -157,6 +175,8 @@ async function makeDatabase() {
   await db.exec(connectorMigration);
   await db.exec(growthFeedbackMigration);
   await db.exec(growthSearchConsoleScopeMigration);
+  await db.exec(partialDiscoveryMigration);
+  await db.exec(discoveryOutcomeConsistencyMigration);
   return db;
 }
 
@@ -535,7 +555,8 @@ describe("Auterim migration and monitoring transaction", () => {
       `select public.complete_url_dependency_discovery_run(
         $1,$2,$3,'completed',null,false,0,0,
         '[{"provider_slug":"stripe","signature_key":"stripe-js-v3","signal_type":"script_host","strength":"strong","source_origin":"https://discovery.example"}]'::jsonb,
-        '[{"provider_slug":"stripe","confidence":0.72,"confidence_label":"medium","evidence_summary":[{"signatureKey":"stripe-js-v3"}]}]'::jsonb
+        '[{"provider_slug":"stripe","confidence":0.72,"confidence_label":"medium","evidence_summary":[{"signatureKey":"stripe-js-v3"}]}]'::jsonb,
+        '{"outcome":"complete"}'::jsonb
       )`,
       [run.rows[0]!.id, workspaceId, companyId],
     );
@@ -578,6 +599,67 @@ describe("Auterim migration and monitoring transaction", () => {
       [run.rows[0]!.id],
     );
     expect(completedAfterLateFailure.rows[0]!.status).toBe("completed");
+
+    const partialRun = await db.query<{ id: string }>(
+      `insert into public.dependency_discovery_runs (
+        workspace_id,company_id,website_url,trigger_run_id,attempt_number,deep_pass_requested
+      ) values ($1,$2,'https://discovery.example/','partial-discovery-run',1,true) returning id`,
+      [workspaceId, companyId],
+    );
+    const safeCoverage = {
+      outcome: "partial",
+      durationMs: 1200,
+      html: { attempted: true, status: 200, bytesRead: 2097152, truncated: true },
+      javascript: {
+        scriptsDiscovered: 2,
+        scriptsAttempted: 2,
+        scriptsFetched: 1,
+        bytesFetched: 4096,
+      },
+    };
+    await db.query(
+      `select public.complete_url_dependency_discovery_run(
+        $1,$2,$3,'partial',null,true,1,4096,'[]'::jsonb,'[]'::jsonb,$4::jsonb
+      )`,
+      [partialRun.rows[0]!.id, workspaceId, companyId, JSON.stringify(safeCoverage)],
+    );
+    await expect(
+      db.query(
+        `select public.complete_url_dependency_discovery_run(
+          $1,$2,$3,'partial',null,true,1,4096,'[]'::jsonb,'[]'::jsonb,$4::jsonb
+        )`,
+        [
+          partialRun.rows[0]!.id,
+          "00000000-0000-4000-8000-000000000099",
+          "00000000-0000-4000-8000-000000000098",
+          JSON.stringify(safeCoverage),
+        ],
+      ),
+    ).rejects.toBeTruthy();
+    const storedPartial = await db.query<{ status: string; coverage: unknown }>(
+      "select status,coverage from public.dependency_discovery_runs where id=$1",
+      [partialRun.rows[0]!.id],
+    );
+    expect(storedPartial.rows[0]).toMatchObject({ status: "partial", coverage: safeCoverage });
+    const inconsistentRun = await db.query<{ id: string }>(
+      `insert into public.dependency_discovery_runs (
+        workspace_id,company_id,website_url,trigger_run_id,attempt_number
+      ) values ($1,$2,'https://discovery.example/','inconsistent-outcome-run',1) returning id`,
+      [workspaceId, companyId],
+    );
+    await expect(
+      db.query(
+        `select public.complete_url_dependency_discovery_run(
+          $1,$2,$3,'partial',null,true,0,0,'[]'::jsonb,'[]'::jsonb,'{"outcome":"complete"}'::jsonb
+        )`,
+        [inconsistentRun.rows[0]!.id, workspaceId, companyId],
+      ),
+    ).rejects.toBeTruthy();
+    const stillRunning = await db.query<{ status: string }>(
+      "select status from public.dependency_discovery_runs where id=$1",
+      [inconsistentRun.rows[0]!.id],
+    );
+    expect(stillRunning.rows[0]!.status).toBe("running");
     await db.query(
       `select public.upsert_discovered_dependency_candidate(
         $1,$2,$3,0.99,'high','[{"signatureKey":"new-evidence"}]'::jsonb

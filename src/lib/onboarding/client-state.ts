@@ -17,6 +17,11 @@ export const candidateSchema = z.object({
         "document_host",
         "embedded_url",
         "markup_marker",
+        "resource_host",
+        "csp_host",
+        "api_endpoint",
+        "js_sdk",
+        "redirect_host",
       ]),
       strength: z.enum(["strong", "medium", "weak"]),
       sourceOrigin: z.string(),
@@ -47,7 +52,48 @@ export const onboardingReadModelSchema = z
       websiteUrl: z.string().nullable(),
     }),
     discovery: z.object({
-      status: z.enum(["running", "completed", "failed"]).nullable(),
+      status: z.enum(["running", "completed", "partial", "failed"]).nullable(),
+      coverage: z
+        .object({
+          outcome: z.enum(["complete", "partial", "empty", "failed"]).optional(),
+          durationMs: z.number().int().nonnegative().optional(),
+          html: z
+            .object({
+              attempted: z.boolean(),
+              status: z.number().int().nullable(),
+              bytesRead: z.number().int().nonnegative(),
+              truncated: z.boolean(),
+              extractionPerformed: z.boolean(),
+              nodeLimitReached: z.boolean(),
+              referenceLimitReached: z.boolean(),
+            })
+            .optional(),
+          headers: z.object({ inspected: z.number().int().nonnegative() }).optional(),
+          csp: z
+            .object({ inspected: z.boolean(), hostSources: z.number().int().nonnegative() })
+            .optional(),
+          manifest: z
+            .object({
+              attempted: z.boolean(),
+              discovered: z.number().int().nonnegative(),
+              fetched: z.number().int().nonnegative(),
+              failures: z.number().int().nonnegative(),
+            })
+            .optional(),
+          javascript: z
+            .object({
+              attempted: z.boolean(),
+              scriptsDiscovered: z.number().int().nonnegative(),
+              scriptsAttempted: z.number().int().nonnegative(),
+              scriptsFetched: z.number().int().nonnegative(),
+              bytesFetched: z.number().int().nonnegative(),
+              failures: z.number().int().nonnegative(),
+              limitReached: z.boolean(),
+            })
+            .optional(),
+          incompleteReasons: z.array(z.string()).optional(),
+        })
+        .optional(),
       candidates: z.array(candidateSchema),
     }),
     confirmedDependencies: z.array(dependencySchema),

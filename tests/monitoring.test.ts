@@ -1,14 +1,22 @@
 import { describe, expect, it } from "vitest";
+import { performance } from "node:perf_hooks";
+import { gzipSync } from "node:zlib";
 import { deterministicDiff, hashContent, normalizeContent } from "@/lib/monitoring/content";
 import { fetchHttpSource, isPublicAddress, SafeFetchError } from "@/lib/monitoring/fetcher";
 
 const publicAddresses = async () => [{ address: "93.184.216.34", family: 4 }];
-const wire = (status: number, body = "", headers: Record<string, string> = {}) => ({
+const wire = (
+  status: number,
+  body: string | Buffer = "",
+  headers: Record<string, string> = {},
+  cancel?: () => void,
+) => ({
   status,
   headers,
   body: (async function* () {
-    if (body) yield Buffer.from(body);
+    if (body.length) yield Buffer.isBuffer(body) ? body : Buffer.from(body);
   })(),
+  cancel,
 });
 
 describe("deterministic content pipeline", () => {
@@ -75,6 +83,10 @@ describe("safe HTTP fetcher", () => {
       },
     );
     expect(result.body.toString()).toBe("<p>Pricing</p>");
+    expect(result).toMatchObject({
+      bytesRead: Buffer.byteLength("<p>Pricing</p>"),
+      bodyTruncated: false,
+    });
     expect(result.etag).toBe('"v2"');
     expect(seenHeaders).toMatchObject({
       "If-None-Match": '"v1"',
@@ -254,6 +266,151 @@ describe("safe HTTP fetcher", () => {
         },
       ),
     ).rejects.toMatchObject({ category: "unsafe_target" });
+  });
+
+  it("retains a bounded prefix when an eligible response exceeds its body budget", async () => {
+    let cancelled = false;
+    const result = await fetchHttpSource(
+      "https://example.com/",
+      {},
+      {
+        resolveHost: publicAddresses,
+        maxResponseBytes: 8,
+        allowTruncatedResponse: true,
+        request: async () =>
+          wire(200, "abcdefghijk", { "content-type": "text/html", "content-length": "999" }, () => {
+            cancelled = true;
+          }),
+      },
+    );
+    expect(result.body.toString()).toBe("abcdefgh");
+    expect(result).toMatchObject({ bytesRead: 8, bodyTruncated: true });
+    expect(cancelled).toBe(true);
+  });
+
+  it("applies the byte limit to actual chunked bytes when Content-Length is missing or low", async () => {
+    for (const contentLength of [undefined, "2"]) {
+      const headers: Record<string, string> = { "content-type": "text/html" };
+      if (contentLength) headers["content-length"] = contentLength;
+      const result = await fetchHttpSource(
+        "https://example.com/",
+        {},
+        {
+          resolveHost: publicAddresses,
+          maxResponseBytes: 6,
+          allowTruncatedResponse: true,
+          request: async () => ({
+            status: 200,
+            headers,
+            body: (async function* () {
+              yield Buffer.from("abc");
+              yield Buffer.from("defghi");
+            })(),
+          }),
+        },
+      );
+      expect(result.body.toString()).toBe("abcdef");
+      expect(result).toMatchObject({ bytesRead: 6, bodyTruncated: true });
+    }
+  });
+
+  it("enforces the decompressed byte budget for compressed responses", async () => {
+    const expanded = Buffer.from(`<head><script src="/app.js"></script>${"x".repeat(200_000)}`);
+    const compressed = gzipSync(expanded);
+    const result = await fetchHttpSource(
+      "https://example.com/",
+      {},
+      {
+        resolveHost: publicAddresses,
+        maxResponseBytes: 128,
+        allowTruncatedResponse: true,
+        request: async () =>
+          wire(200, compressed, {
+            "content-type": "text/html",
+            "content-encoding": "gzip",
+            "content-length": String(compressed.byteLength),
+          }),
+      },
+    );
+    expect(result.body.toString()).toContain('<script src="/app.js">');
+    expect(result.body.byteLength).toBe(128);
+    expect(result.bodyTruncated).toBe(true);
+  });
+
+  it("bounds encoded wire bytes and cancels oversized bodies", async () => {
+    let cancelled = false;
+    const result = await fetchHttpSource(
+      "https://example.com/",
+      {},
+      {
+        resolveHost: publicAddresses,
+        maxResponseBytes: 100,
+        maxWireBytes: 4,
+        allowTruncatedResponse: true,
+        request: async () =>
+          wire(200, "abcdefgh", { "content-type": "text/html" }, () => {
+            cancelled = true;
+          }),
+      },
+    );
+    expect(result).toMatchObject({ bytesRead: 4, bodyTruncated: true });
+    expect(result.body.toString()).toBe("abcd");
+    expect(cancelled).toBe(true);
+  });
+
+  it("applies one absolute deadline across redirect hops", async () => {
+    let requests = 0;
+    await expect(
+      fetchHttpSource(
+        "https://start.example.com/",
+        {},
+        {
+          resolveHost: publicAddresses,
+          timeoutMs: 1_000,
+          dnsTimeoutMs: 1_000,
+          deadlineAt: performance.now() + 20,
+          request: async () => {
+            requests += 1;
+            await new Promise((resolve) => setTimeout(resolve, 30));
+            return wire(302, "", { location: "https://end.example.com/" });
+          },
+        },
+      ),
+    ).rejects.toMatchObject({ category: "timeout" });
+    expect(requests).toBe(1);
+  });
+
+  it("cancels early response bodies for redirects and rejected content types", async () => {
+    let redirectCancelled = false;
+    await fetchHttpSource(
+      "https://start.example.com/",
+      {},
+      {
+        resolveHost: publicAddresses,
+        request: async (url) =>
+          url.hostname === "start.example.com"
+            ? wire(302, "body", { location: "https://end.example.com/" }, () => {
+                redirectCancelled = true;
+              })
+            : wire(200, "ok", { "content-type": "text/html" }),
+      },
+    );
+    expect(redirectCancelled).toBe(true);
+    let typeCancelled = false;
+    await expect(
+      fetchHttpSource(
+        "https://example.com/",
+        {},
+        {
+          resolveHost: publicAddresses,
+          request: async () =>
+            wire(200, "{}", { "content-type": "application/json" }, () => {
+              typeCancelled = true;
+            }),
+        },
+      ),
+    ).rejects.toMatchObject({ category: "invalid_content_type" });
+    expect(typeCancelled).toBe(true);
   });
 
   it("bounds DNS resolution before starting the HTTP request", async () => {

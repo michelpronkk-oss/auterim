@@ -25,7 +25,9 @@ export async function POST(request: Request) {
       const onboarding = z
         .object({
           currentStep: z.string(),
-          discovery: z.object({ status: z.enum(["running", "completed", "failed"]).nullable() }),
+          discovery: z.object({
+            status: z.enum(["running", "completed", "partial", "failed"]).nullable(),
+          }),
         })
         .parse(status.data);
       if (

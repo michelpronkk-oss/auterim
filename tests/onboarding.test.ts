@@ -9,6 +9,8 @@ const migrationPaths = [
   "20261004010000_customer_impact_intelligence.sql",
   "20261004020000_url_dependency_discovery.sql",
   "20261004030000_onboarding_activation_backend.sql",
+  "20261011010000_preserve_partial_discovery.sql",
+  "20261011020000_discovery_outcome_consistency.sql",
   "20261005000000_preflight_breakage_prevention.sql",
   "20261005010000_preflight_claim_privilege_hardening.sql",
   "20261006000000_auth_accounts_billing_entitlements.sql",
@@ -103,6 +105,47 @@ async function addClassifiedChange(
 }
 
 describe("onboarding activation backend", () => {
+  it("resumes from a partial discovery that predates the onboarding row", async () => {
+    const db = await database();
+    await db.query("insert into auth.users(id) values ($1)", [ownerId]);
+    await asUser(db, ownerId);
+    const workspace = await db.query<{ id: string }>(
+      "insert into public.workspaces(name,created_by) values ('Existing workspace',$1) returning id",
+      [ownerId],
+    );
+    const workspaceId = workspace.rows[0]!.id;
+    await db.query(
+      "insert into public.workspace_members(workspace_id,user_id,role) values ($1,$2,'owner')",
+      [workspaceId, ownerId],
+    );
+    const company = await db.query<{ id: string }>(
+      `insert into public.companies(workspace_id,name,slug,website_url,website_domain)
+       values ($1,'Existing Inc','existing-inc','https://existing.example/','existing.example') returning id`,
+      [workspaceId],
+    );
+    await db.query(
+      `insert into public.dependency_discovery_runs(
+        workspace_id,company_id,website_url,trigger_run_id,attempt_number
+      ) values ($1,$2,'https://existing.example/','partial-before-onboarding',1)`,
+      [workspaceId, company.rows[0]!.id],
+    );
+    await db.query(
+      `update public.dependency_discovery_runs
+       set status='partial',coverage='{"outcome":"partial"}'::jsonb,finished_at=now()
+       where workspace_id=$1 and company_id=$2`,
+      [workspaceId, company.rows[0]!.id],
+    );
+    const resumed = await db.query<{ value: Record<string, unknown> }>(
+      `select public.start_workspace_onboarding(
+        $1,'Existing workspace','Existing Inc','https://existing.example/','existing.example',
+        'partial-discovery-resume',$2
+      ) as value`,
+      [ownerId, workspaceId],
+    );
+    expect(resumed.rows[0]!.value.state).toBe("dependencies_review");
+    await db.close();
+  });
+
   it("resumes safely, preserves discovery provenance, enforces membership, and activates once", async () => {
     const db = await database();
     await db.query("insert into auth.users(id) values ($1),($2)", [ownerId, otherId]);
@@ -540,6 +583,51 @@ describe("onboarding activation backend", () => {
         )
       ).rows[0]!.state,
     ).toBe("context_setup");
+
+    await db.query(
+      "update public.workspace_onboarding set state='discovery_running' where workspace_id=$1",
+      [workspaceId],
+    );
+    const failedAttempt = await db.query<{ id: string }>(`
+      insert into public.dependency_discovery_runs(
+        workspace_id,company_id,website_url,trigger_run_id,attempt_number
+      ) values ('${workspaceId}'::uuid,'${companyId}'::uuid,'https://example.com/','onboarding-retry-failed',1)
+      returning id
+    `);
+    await db.query(
+      "update public.dependency_discovery_runs set status='failed',finished_at=now() where id=$1",
+      [failedAttempt.rows[0]!.id],
+    );
+    expect(
+      (
+        await db.query<{ state: string }>(
+          "select state from public.workspace_onboarding where workspace_id=$1",
+          [workspaceId],
+        )
+      ).rows[0]!.state,
+    ).toBe("company_created");
+    await db.query(
+      "update public.workspace_onboarding set state='discovery_running' where workspace_id=$1",
+      [workspaceId],
+    );
+    const partialAttempt = await db.query<{ id: string }>(`
+      insert into public.dependency_discovery_runs(
+        workspace_id,company_id,website_url,trigger_run_id,attempt_number
+      ) values ('${workspaceId}'::uuid,'${companyId}'::uuid,'https://example.com/','onboarding-retry-partial',1)
+      returning id
+    `);
+    await db.query(
+      "update public.dependency_discovery_runs set status='partial',finished_at=now() where id=$1",
+      [partialAttempt.rows[0]!.id],
+    );
+    expect(
+      (
+        await db.query<{ state: string }>(
+          "select state from public.workspace_onboarding where workspace_id=$1",
+          [workspaceId],
+        )
+      ).rows[0]!.state,
+    ).toBe("dependencies_review");
     await db.query("select public.add_onboarding_dependency_manually($1,'openai')", [workspaceId]);
     await db.query("select public.add_onboarding_dependency_manually($1,'openai')", [workspaceId]);
     expect(
@@ -558,12 +646,11 @@ describe("onboarding activation backend", () => {
         )
       ).rows[0]!.origin,
     ).toBe("manual");
-
     const result = await db.query<{ value: Record<string, unknown> }>(
       "select public.get_onboarding_status($1) as value",
       [workspaceId],
     );
-    expect(result.rows[0]!.value.currentStep).toBe("context_setup");
+    expect(result.rows[0]!.value.currentStep).toBe("dependencies_review");
     await db.close();
   });
 

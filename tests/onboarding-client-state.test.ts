@@ -87,10 +87,64 @@ describe("onboarding client state", () => {
     );
   });
 
+  it("accepts partial scan coverage and newer persisted discovery signal types", () => {
+    const result = readModel({
+      discovery: {
+        status: "partial",
+        coverage: {
+          durationMs: 900,
+          html: {
+            attempted: true,
+            status: 200,
+            bytesRead: 2_097_152,
+            truncated: true,
+            extractionPerformed: true,
+            nodeLimitReached: false,
+            referenceLimitReached: false,
+          },
+          javascript: {
+            attempted: true,
+            scriptsDiscovered: 2,
+            scriptsAttempted: 2,
+            scriptsFetched: 1,
+            bytesFetched: 4096,
+            failures: 1,
+            limitReached: false,
+          },
+          incompleteReasons: ["html_truncated", "javascript_unavailable"],
+        },
+        candidates: [
+          {
+            candidateId: "00000000-0000-4000-8000-000000000102",
+            dependencyId: "00000000-0000-4000-8000-000000000103",
+            providerName: "Vercel",
+            category: "hosting",
+            confidence: 0.68,
+            confidenceLabel: "medium",
+            evidenceSummary: [
+              {
+                signatureKey: "vercel-api-endpoint",
+                signalType: "api_endpoint",
+                strength: "strong",
+                sourceOrigin: "https://example.com",
+              },
+            ],
+            suggestedStatus: "candidate",
+          },
+        ],
+      },
+    });
+    expect(result.discovery.status).toBe("partial");
+    expect(result.discovery.coverage?.html?.truncated).toBe(true);
+    expect(result.discovery.candidates[0]?.evidenceSummary[0]?.signalType).toBe("api_endpoint");
+    expect(resolveOnboardingStep(result)).toBe("dependencies");
+  });
+
   it.each([
     ["discovery pending", "company_created", null, "discovery"],
     ["discovery running", "discovery_running", "running", "discovery"],
     ["empty completed discovery", "discovery_running", "completed", "dependencies"],
+    ["partial discovery", "discovery_running", "partial", "dependencies"],
     ["failed discovery", "discovery_running", "failed", "dependencies"],
   ] as const)(
     "resolves %s without falling back to Company",

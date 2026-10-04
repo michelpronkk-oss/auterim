@@ -43,6 +43,7 @@ it("runs a bounded live URL dependency evaluation against selected public sites"
       status: result.status,
       failureCategory: result.failureCategory ?? null,
       deepPass: result.deepPass,
+      coverage: result.coverage,
       inspected: result.inspected,
       evidence: result.evidence.map(({ providerSlug, signatureKey, signalType, strength }) => ({
         providerSlug,
@@ -72,8 +73,13 @@ it("runs a bounded live URL dependency evaluation against selected public sites"
     `LIVE_DISCOVERY_EVALUATION ${JSON.stringify({ sites: selectedTargets.length, requests, results })}\n`,
   );
   expect(
-    results.filter((result) => result.status !== "completed").map((result) => result.site),
+    results.filter((result) => result.status === "failed").map((result) => result.site),
   ).toEqual([]);
+  expect(
+    results
+      .filter((result) => result.status === "partial")
+      .every((result) => result.coverage.incompleteReasons.length > 0),
+  ).toBe(true);
   const failedExpectations = results.filter((result) => result.expectedDetected === false);
   expect(failedExpectations.map((result) => result.site)).toEqual([]);
 }, 90_000);

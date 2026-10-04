@@ -66,6 +66,7 @@ export class SupabaseUrlDiscoveryRepository {
       p_deep_pass_requested: result.deepPass.requested,
       p_deep_scripts_fetched: result.deepPass.scriptsFetched,
       p_deep_bytes_fetched: result.deepPass.bytesFetched,
+      p_coverage: result.coverage,
       p_evidence: result.evidence.map(evidenceRpcRow),
       p_candidates: result.candidates.map(candidateRpcRow),
     });

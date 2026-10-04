@@ -1,5 +1,6 @@
 import "server-only";
 import { parse } from "parse5";
+import { performance } from "node:perf_hooks";
 import { fetchHttpSource, SafeFetchError } from "@/lib/monitoring/fetcher";
 import {
   canonicalizePublicWebsiteUrl,
@@ -21,6 +22,8 @@ export const discoveryLimits = {
   maxDeepScripts: 4,
   maxScriptBytes: 96 * 1024,
   maxDeepBytes: 384 * 1024,
+  maxParallelDeepAssets: 2,
+  maxScanDurationMs: 45_000,
 } as const;
 
 export type DiscoveryEvidence = {
@@ -42,10 +45,44 @@ export type DiscoveryCandidate = {
 
 export type UrlDiscoveryResult = {
   normalizedUrl: string;
-  status: "completed" | "failed";
+  status: "completed" | "partial" | "failed";
+  outcome: "complete" | "partial" | "empty" | "failed";
   candidates: DiscoveryCandidate[];
   evidence: DiscoveryEvidence[];
-  deepPass: { requested: boolean; scriptsFetched: number; bytesFetched: number };
+  deepPass: {
+    requested: boolean;
+    scriptsDiscovered: number;
+    scriptsAttempted: number;
+    scriptsFetched: number;
+    bytesFetched: number;
+    failures: number;
+  };
+  coverage: {
+    outcome: "complete" | "partial" | "empty" | "failed";
+    durationMs: number;
+    html: {
+      attempted: boolean;
+      status: number | null;
+      bytesRead: number;
+      truncated: boolean;
+      extractionPerformed: boolean;
+      nodeLimitReached: boolean;
+      referenceLimitReached: boolean;
+    };
+    headers: { inspected: number };
+    csp: { inspected: boolean; hostSources: number };
+    manifest: { attempted: boolean; discovered: number; fetched: number; failures: number };
+    javascript: {
+      attempted: boolean;
+      scriptsDiscovered: number;
+      scriptsAttempted: number;
+      scriptsFetched: number;
+      bytesFetched: number;
+      failures: number;
+      limitReached: boolean;
+    };
+    incompleteReasons: string[];
+  };
   inspected: {
     responseHeaders: number;
     redirects: number;
@@ -95,10 +132,13 @@ function sanitizeSourceOrigin(value: string): string | null {
 function collectConfigUrls(
   value: unknown,
   urls: Set<string>,
-  budget: { remaining: number },
+  budget: { remaining: number; limited: boolean },
   depth = 0,
 ) {
-  if (depth > 8 || budget.remaining <= 0) return;
+  if (depth > 8 || budget.remaining <= 0) {
+    budget.limited = true;
+    return;
+  }
   if (Array.isArray(value)) {
     for (const item of value) collectConfigUrls(item, urls, budget, depth + 1);
     return;
@@ -121,29 +161,37 @@ function collectConfigUrls(
 }
 
 function parseConfigJson(value: string, urls: Set<string>) {
-  if (Buffer.byteLength(value, "utf8") > 32 * 1024) return;
+  if (Buffer.byteLength(value, "utf8") > 32 * 1024) return true;
+  const budget = { remaining: 500, limited: false };
   try {
-    collectConfigUrls(JSON.parse(value), urls, { remaining: 500 });
+    collectConfigUrls(JSON.parse(value), urls, budget);
   } catch {
     // A malformed public config block is ignored; its source text is never retained.
   }
+  return budget.limited;
 }
 
 function collectNodeText(node: HtmlNode, maxBytes: number) {
   const values: string[] = [];
   const stack = [node];
   let size = 0;
-  while (stack.length && size < maxBytes) {
+  let visited = 0;
+  while (stack.length && size < maxBytes && visited < 500) {
     const current = stack.pop()!;
+    visited += 1;
     if (current.value) {
       const remaining = maxBytes - size;
-      const value = current.value.slice(0, remaining);
+      const value = Buffer.from(current.value, "utf8").subarray(0, remaining).toString("utf8");
       values.push(value);
       size += Buffer.byteLength(value, "utf8");
     }
-    for (const child of [...(current.childNodes ?? [])].reverse()) stack.push(child);
+    const children = current.childNodes ?? [];
+    const allowed = Math.max(0, 500 - visited - stack.length);
+    for (let index = Math.min(children.length, allowed) - 1; index >= 0; index -= 1) {
+      stack.push(children[index]!);
+    }
   }
-  return values.join("");
+  return { value: values.join(""), truncated: stack.length > 0 || visited >= 500 };
 }
 
 function collectReferences(html: string, baseUrl: string) {
@@ -155,6 +203,8 @@ function collectReferences(html: string, baseUrl: string) {
   const formActions: string[] = [];
   const manifests: string[] = [];
   const inlineConfigUrls = new Set<string>();
+  let scriptReferenceLimitReached = false;
+  let inlineConfigLimitReached = false;
   const baseSearch = findFirstBaseHref(tree);
   const firstBaseHref = baseSearch.href;
   let effectiveBase = baseUrl;
@@ -177,6 +227,7 @@ function collectReferences(html: string, baseUrl: string) {
   }
   const stack = [tree];
   let nodesVisited = 0;
+  let referenceLimitReached = false;
   while (
     stack.length > 0 &&
     resources.length < discoveryLimits.maxReferenceUrls &&
@@ -190,7 +241,9 @@ function collectReferences(html: string, baseUrl: string) {
     if (tagName === "script") {
       const scriptType = attrs.get("type")?.toLowerCase() ?? "";
       const source = attrs.get("src");
-      if (source && scripts.length < 30) {
+      if (source && scripts.length >= 30) {
+        scriptReferenceLimitReached = true;
+      } else if (source) {
         const normalized = normalizeReference(source, effectiveBase);
         if (normalized) {
           scripts.push(normalized);
@@ -204,7 +257,9 @@ function collectReferences(html: string, baseUrl: string) {
           attrs.has("data-config") ||
           attrs.get("data-purpose")?.toLowerCase() === "config")
       ) {
-        parseConfigJson(collectNodeText(node, 32 * 1024), inlineConfigUrls);
+        const text = collectNodeText(node, 32 * 1024);
+        if (text.truncated || parseConfigJson(text.value, inlineConfigUrls))
+          inlineConfigLimitReached = true;
       }
     } else if (tagName === "link") {
       const rel = attrs.get("rel")?.toLowerCase().split(/\s+/) ?? [];
@@ -260,7 +315,16 @@ function collectReferences(html: string, baseUrl: string) {
       if (normalized) resources.push(normalized);
     }
     // Reverse-push so traversal and the 30-script cap preserve document order.
-    for (const child of [...(node.childNodes ?? [])].reverse()) stack.push(child);
+    const children = node.childNodes ?? [];
+    const remainingNodes = discoveryLimits.maxHtmlNodes - nodesVisited - stack.length;
+    for (
+      let index = children.length - 1;
+      index >= 0 && stack.length < discoveryLimits.maxHtmlNodes - nodesVisited;
+      index -= 1
+    ) {
+      stack.push(children[index]!);
+    }
+    if (children.length > Math.max(0, remainingNodes)) referenceLimitReached = true;
   }
   return {
     scriptUrls: [...new Set(scripts)].slice(0, 30),
@@ -270,7 +334,16 @@ function collectReferences(html: string, baseUrl: string) {
     formActionUrls: [...new Set(formActions)].slice(0, discoveryLimits.maxReferenceUrls),
     manifestUrls: [...new Set(manifests)].slice(0, discoveryLimits.maxManifests),
     inlineConfigUrls: [...inlineConfigUrls].slice(0, discoveryLimits.maxInlineConfigUrls),
+    scriptReferenceLimitReached,
+    inlineConfigLimitReached:
+      inlineConfigLimitReached || inlineConfigUrls.size > discoveryLimits.maxInlineConfigUrls,
     nodesVisited: nodesVisited + baseSearch.nodesVisited,
+    nodeLimitReached:
+      (nodesVisited >= discoveryLimits.maxHtmlNodes && stack.length > 0) ||
+      baseSearch.nodeLimitReached,
+    referenceLimitReached:
+      referenceLimitReached ||
+      (resources.length >= discoveryLimits.maxReferenceUrls && stack.length > 0),
   };
 }
 
@@ -305,11 +378,19 @@ function findFirstBaseHref(tree: HtmlNode) {
     nodesVisited += 1;
     if (node.tagName === "base") {
       const href = node.attrs?.find((attribute) => attribute.name === "href")?.value;
-      if (href !== undefined) return { href, nodesVisited };
+      if (href !== undefined) return { href, nodesVisited, nodeLimitReached: false };
     }
-    for (const child of [...(node.childNodes ?? [])].reverse()) stack.push(child);
+    const children = node.childNodes ?? [];
+    const allowed = Math.max(0, discoveryLimits.maxHtmlNodes - nodesVisited - stack.length);
+    for (let index = Math.min(children.length, allowed) - 1; index >= 0; index -= 1) {
+      stack.push(children[index]!);
+    }
   }
-  return { href: null, nodesVisited };
+  return {
+    href: null,
+    nodesVisited,
+    nodeLimitReached: nodesVisited >= discoveryLimits.maxHtmlNodes && stack.length > 0,
+  };
 }
 
 function collectEmbeddedUrls(source: string): string[] {
@@ -550,6 +631,18 @@ export async function discoverWebsiteDependencies(
 ): Promise<UrlDiscoveryResult> {
   const normalizedUrl = normalizePublicWebsiteUrl(rawUrl);
   const fetcher = options.fetcher ?? fetchHttpSource;
+  const startedAt = performance.now();
+  const deadlineAt = startedAt + discoveryLimits.maxScanDurationMs;
+  const fetchBounds = () => {
+    const remainingMs = Math.floor(deadlineAt - performance.now());
+    if (remainingMs <= 0)
+      throw new SafeFetchError("scan_deadline", "The discovery time budget ended.");
+    return {
+      timeoutMs: Math.min(10_000, remainingMs),
+      dnsTimeoutMs: Math.min(3_000, remainingMs),
+      deadlineAt,
+    };
+  };
   let page;
   try {
     page = await fetcher(
@@ -558,6 +651,8 @@ export async function discoverWebsiteDependencies(
       {
         restrictToStandardPorts: true,
         maxResponseBytes: discoveryLimits.maxHtmlBytes,
+        allowTruncatedResponse: true,
+        ...fetchBounds(),
       },
     );
   } catch (error) {
@@ -574,9 +669,46 @@ export async function discoverWebsiteDependencies(
     return {
       normalizedUrl,
       status: "failed",
+      outcome: "failed",
       candidates: [],
       evidence: [],
-      deepPass: { requested: options.deep === true, scriptsFetched: 0, bytesFetched: 0 },
+      deepPass: {
+        requested: options.deep === true,
+        scriptsDiscovered: 0,
+        scriptsAttempted: 0,
+        scriptsFetched: 0,
+        bytesFetched: 0,
+        failures: 0,
+      },
+      coverage: {
+        outcome: "failed",
+        durationMs: Math.min(
+          discoveryLimits.maxScanDurationMs,
+          Math.ceil(performance.now() - startedAt),
+        ),
+        html: {
+          attempted: true,
+          status: null,
+          bytesRead: 0,
+          truncated: false,
+          extractionPerformed: false,
+          nodeLimitReached: false,
+          referenceLimitReached: false,
+        },
+        headers: { inspected: 0 },
+        csp: { inspected: false, hostSources: 0 },
+        manifest: { attempted: false, discovered: 0, fetched: 0, failures: 0 },
+        javascript: {
+          attempted: options.deep === true,
+          scriptsDiscovered: 0,
+          scriptsAttempted: 0,
+          scriptsFetched: 0,
+          bytesFetched: 0,
+          failures: 0,
+          limitReached: false,
+        },
+        incompleteReasons: [],
+      },
       inspected: emptyInspection(),
       failureCategory: error instanceof SafeFetchError ? error.category : "fetch_failed",
     };
@@ -586,9 +718,46 @@ export async function discoverWebsiteDependencies(
     return {
       normalizedUrl,
       status: "failed",
+      outcome: "failed",
       candidates: [],
       evidence: [],
-      deepPass: { requested: options.deep === true, scriptsFetched: 0, bytesFetched: 0 },
+      deepPass: {
+        requested: options.deep === true,
+        scriptsDiscovered: 0,
+        scriptsAttempted: 0,
+        scriptsFetched: 0,
+        bytesFetched: 0,
+        failures: 0,
+      },
+      coverage: {
+        outcome: "failed",
+        durationMs: Math.min(
+          discoveryLimits.maxScanDurationMs,
+          Math.ceil(performance.now() - startedAt),
+        ),
+        html: {
+          attempted: true,
+          status: page.status,
+          bytesRead: page.bytesRead,
+          truncated: page.bodyTruncated,
+          extractionPerformed: false,
+          nodeLimitReached: false,
+          referenceLimitReached: false,
+        },
+        headers: { inspected: 0 },
+        csp: { inspected: false, hostSources: 0 },
+        manifest: { attempted: false, discovered: 0, fetched: 0, failures: 0 },
+        javascript: {
+          attempted: options.deep === true,
+          scriptsDiscovered: 0,
+          scriptsAttempted: 0,
+          scriptsFetched: 0,
+          bytesFetched: 0,
+          failures: 0,
+          limitReached: false,
+        },
+        incompleteReasons: [],
+      },
       inspected: emptyInspection(page.redirectEvidence?.length ?? 0),
       failureCategory: "unsafe_target",
     };
@@ -634,14 +803,31 @@ export async function discoverWebsiteDependencies(
   }
 
   let scriptsFetched = 0;
+  let scriptsAttempted = 0;
+  let scriptsDiscovered = 0;
+  let scriptFailures = 0;
+  let scriptTruncated = false;
   let bytesFetched = 0;
   let manifestsFetched = 0;
+  let manifestFailures = 0;
+  let manifestTruncated = false;
   const manifestConfigUrls = new Set<string>();
+  const sameOriginScripts = options.deep
+    ? references.scriptUrls.filter((scriptUrl) => {
+        try {
+          return new URL(scriptUrl).origin === pageOrigin;
+        } catch {
+          return false;
+        }
+      })
+    : [];
+  scriptsDiscovered = sameOriginScripts.length;
   if (options.deep) {
     for (const manifestUrl of references.manifestUrls) {
       if (manifestsFetched >= discoveryLimits.maxManifests) break;
       try {
         if (new URL(manifestUrl).origin !== pageOrigin) continue;
+        const bounds = fetchBounds();
         const manifest = await fetcher(
           manifestUrl,
           {},
@@ -650,31 +836,42 @@ export async function discoverWebsiteDependencies(
             restrictToStandardPorts: true,
             acceptedContentTypes: ["application/manifest+json", "application/json"],
             maxResponseBytes: discoveryLimits.maxManifestBytes,
+            allowTruncatedResponse: true,
+            ...bounds,
           },
         );
         manifestsFetched += 1;
         bytesFetched += manifest.body.byteLength;
+        manifestTruncated ||= manifest.bodyTruncated;
+        if (manifest.bodyTruncated) manifestFailures += 1;
         parseConfigJson(manifest.body.toString("utf8"), manifestConfigUrls);
       } catch {
         // Manifests are optional public metadata and cannot fail the homepage scan.
+        manifestFailures += 1;
       }
     }
   }
 
-  if (options.deep) {
-    const sameOrigin = references.scriptUrls.filter((scriptUrl) => {
+  const selectedScripts = sameOriginScripts.slice(0, discoveryLimits.maxDeepScripts);
+  const scriptLimitReached = sameOriginScripts.length > selectedScripts.length;
+  const scriptBudgets = selectedScripts.map((_, index) =>
+    Math.min(
+      discoveryLimits.maxScriptBytes,
+      Math.floor(
+        Math.max(0, discoveryLimits.maxDeepBytes - bytesFetched) /
+          Math.max(1, selectedScripts.length - index),
+      ),
+    ),
+  );
+  const scriptResults = await mapWithConcurrency(
+    selectedScripts.map((url, index) => ({ url, maxBytes: scriptBudgets[index]! })),
+    discoveryLimits.maxParallelDeepAssets,
+    async ({ url, maxBytes }) => {
+      if (maxBytes <= 0) return { script: null, failure: true };
       try {
-        return new URL(scriptUrl).origin === pageOrigin;
-      } catch {
-        return false;
-      }
-    });
-    for (const scriptUrl of sameOrigin.slice(0, discoveryLimits.maxDeepScripts)) {
-      const remaining = discoveryLimits.maxDeepBytes - bytesFetched;
-      if (remaining <= 0) break;
-      try {
+        scriptsAttempted += 1;
         const script = await fetcher(
-          scriptUrl,
+          url,
           {},
           {
             allowedOrigins: [pageOrigin],
@@ -684,7 +881,9 @@ export async function discoverWebsiteDependencies(
               "application/javascript",
               "application/x-javascript",
             ],
-            maxResponseBytes: Math.min(discoveryLimits.maxScriptBytes, remaining),
+            maxResponseBytes: maxBytes,
+            allowTruncatedResponse: true,
+            ...fetchBounds(),
           },
         );
         if (
@@ -692,33 +891,39 @@ export async function discoverWebsiteDependencies(
             script.contentType ?? "",
           )
         ) {
-          continue;
+          return { script: null, failure: true };
         }
-        if (script.body.byteLength > Math.min(discoveryLimits.maxScriptBytes, remaining)) continue;
-        scriptsFetched += 1;
-        bytesFetched += script.body.byteLength;
-        const parsed = inspectJavaScript(script.body.toString("utf8"));
-        const scriptOrigin = sanitizeSourceOrigin(script.finalUrl);
-        if (scriptOrigin) {
-          matchEvidence(
-            {
-              headers: script.safeHeaders,
-              scriptUrls: [],
-              resourceUrls: [],
-              embeddedUrls: [],
-              javascriptUrls: parsed.urls,
-              javascriptSources: [parsed.code],
-              cspHosts: parseContentSecurityPolicy(script.safeHeaders),
-              siteOrigin: pageOrigin,
-            },
-            scriptOrigin,
-            seen,
-            evidence,
-          );
-        }
+        return { script, failure: false };
       } catch {
-        // Deep evidence is optional; an inaccessible or unsuitable asset cannot fail fast discovery.
+        return { script: null, failure: true };
       }
+    },
+  );
+  for (const { script, failure } of scriptResults) {
+    if (failure) scriptFailures += 1;
+    if (!script) continue;
+    scriptsFetched += 1;
+    bytesFetched += script.body.byteLength;
+    scriptTruncated ||= script.bodyTruncated;
+    if (script.bodyTruncated) scriptFailures += 1;
+    const parsed = inspectJavaScript(script.body.toString("utf8"));
+    const scriptOrigin = sanitizeSourceOrigin(script.finalUrl);
+    if (scriptOrigin) {
+      matchEvidence(
+        {
+          headers: script.safeHeaders,
+          scriptUrls: [],
+          resourceUrls: [],
+          embeddedUrls: [],
+          javascriptUrls: parsed.urls,
+          javascriptSources: [parsed.code],
+          cspHosts: parseContentSecurityPolicy(script.safeHeaders),
+          siteOrigin: pageOrigin,
+        },
+        scriptOrigin,
+        seen,
+        evidence,
+      );
     }
   }
 
@@ -738,19 +943,75 @@ export async function discoverWebsiteDependencies(
     );
   }
 
+  const responseHeaders =
+    Object.keys(page.safeHeaders).length +
+    (page.redirectEvidence ?? []).reduce(
+      (count, redirect) => count + Object.keys(redirect.safeHeaders).length,
+      0,
+    );
+  const incompleteReasons: string[] = [];
+  if (page.bodyTruncated) incompleteReasons.push("html_truncated");
+  if (references.nodeLimitReached) incompleteReasons.push("html_node_limit");
+  if (references.referenceLimitReached) incompleteReasons.push("reference_limit");
+  if (references.scriptReferenceLimitReached) incompleteReasons.push("script_reference_limit");
+  if (references.inlineConfigLimitReached) incompleteReasons.push("inline_config_limit");
+  if (manifestFailures > 0) incompleteReasons.push("manifest_unavailable");
+  if (manifestTruncated) incompleteReasons.push("manifest_truncated");
+  if (scriptFailures > 0) incompleteReasons.push("javascript_unavailable");
+  if (scriptTruncated) incompleteReasons.push("javascript_truncated");
+  if (scriptLimitReached) incompleteReasons.push("deep_script_limit");
+  if (performance.now() >= deadlineAt) incompleteReasons.push("scan_time_budget");
+  const partial = incompleteReasons.length > 0;
+  const candidates = makeCandidates(evidence);
+  const outcome = partial ? "partial" : candidates.length === 0 ? "empty" : "complete";
+  const durationMs = Math.ceil(performance.now() - startedAt);
   return {
     normalizedUrl,
-    status: "completed",
-    candidates: makeCandidates(evidence),
+    status: partial ? "partial" : "completed",
+    outcome,
+    candidates,
     evidence,
-    deepPass: { requested: options.deep === true, scriptsFetched, bytesFetched },
+    deepPass: {
+      requested: options.deep === true,
+      scriptsDiscovered,
+      scriptsAttempted,
+      scriptsFetched,
+      bytesFetched,
+      failures: scriptFailures + manifestFailures,
+    },
+    coverage: {
+      outcome,
+      durationMs,
+      html: {
+        attempted: true,
+        status: page.status,
+        bytesRead: page.bytesRead,
+        truncated: page.bodyTruncated,
+        extractionPerformed: true,
+        nodeLimitReached: references.nodeLimitReached,
+        referenceLimitReached: references.referenceLimitReached,
+      },
+      headers: { inspected: responseHeaders },
+      csp: { inspected: true, hostSources: cspHosts.length },
+      manifest: {
+        attempted: options.deep === true && references.manifestUrls.length > 0,
+        discovered: references.manifestUrls.length,
+        fetched: manifestsFetched,
+        failures: manifestFailures,
+      },
+      javascript: {
+        attempted: options.deep === true,
+        scriptsDiscovered,
+        scriptsAttempted,
+        scriptsFetched,
+        bytesFetched,
+        failures: scriptFailures,
+        limitReached: scriptLimitReached,
+      },
+      incompleteReasons,
+    },
     inspected: {
-      responseHeaders:
-        Object.keys(page.safeHeaders).length +
-        (page.redirectEvidence ?? []).reduce(
-          (count, redirect) => count + Object.keys(redirect.safeHeaders).length,
-          0,
-        ),
+      responseHeaders,
       redirects: page.redirectEvidence?.length ?? 0,
       htmlNodes: references.nodesVisited,
       scriptReferences: references.scriptUrls.length,
@@ -763,4 +1024,23 @@ export async function discoverWebsiteDependencies(
       browserRuntime: false,
     },
   };
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  operation: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(items.length, concurrency) }, async () => {
+      while (true) {
+        const index = cursor++;
+        if (index >= items.length) return;
+        results[index] = await operation(items[index]!);
+      }
+    }),
+  );
+  return results;
 }

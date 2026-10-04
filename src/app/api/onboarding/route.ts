@@ -28,7 +28,7 @@ export async function GET(request: Request) {
   const workspaceId = new URL(request.url).searchParams.get("workspaceId");
   const parsed = workspaceIdSchema.safeParse(workspaceId);
   if (!parsed.success) return Response.json({ error: "invalid_workspace_id" }, { status: 400 });
-  const { data, error } = await auth.client.rpc("get_onboarding_status", {
+  const { data, error } = await auth.client.rpc("get_onboarding_status_with_discovery_coverage", {
     p_workspace_id: parsed.data,
   });
   if (error) return onboardingError(error);

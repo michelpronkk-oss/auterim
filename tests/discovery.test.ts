@@ -1,16 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
+  discoveryLimits,
   discoverWebsiteDependencies,
   normalizePublicWebsiteUrl,
   type UrlDiscoveryResult,
 } from "@/lib/discovery/discovery";
 import { runWebsiteDependencyDiscovery } from "@/lib/discovery/run";
 import { discoveryWebsiteUrlSchema } from "@/lib/discovery/schema";
-import { SafeFetchError, type FetchResult } from "@/lib/monitoring/fetcher";
+import { fetchHttpSource, SafeFetchError, type FetchResult } from "@/lib/monitoring/fetcher";
 
 const page = (html: string, safeHeaders: Record<string, string> = {}): FetchResult => ({
   status: 200,
   body: Buffer.from(html),
+  bytesRead: Buffer.byteLength(html),
+  bodyTruncated: false,
   contentType: "text/html",
   safeHeaders,
   etag: null,
@@ -306,7 +309,15 @@ describe("offline URL dependency evaluation", () => {
 
   it("leaves the optional deep pass off by default", async () => {
     const result = await discover('<script src="/app.js"></script>');
-    expect(result.deepPass).toEqual({ requested: false, scriptsFetched: 0, bytesFetched: 0 });
+    expect(result.deepPass).toMatchObject({
+      requested: false,
+      scriptsDiscovered: 0,
+      scriptsAttempted: 0,
+      scriptsFetched: 0,
+      bytesFetched: 0,
+      failures: 0,
+    });
+    expect(result.outcome).toBe("empty");
   });
 
   it("deep pass fetches same-origin scripts only and stays within its request cap", async () => {
@@ -334,12 +345,122 @@ describe("offline URL dependency evaluation", () => {
   });
 
   it("does not fail the fast result when an optional deep script fails", async () => {
-    const result = await discover('<script src="/app.js"></script>', {}, true, (url) => {
-      if (url.endsWith("app.js")) throw new Error("network failure");
-      return page('<script src="/app.js"></script>');
-    });
-    expect(result.status).toBe("completed");
+    const result = await discover(
+      '<script src="/app.js"></script>',
+      { server: "Vercel" },
+      true,
+      (url) => {
+        if (url.endsWith("app.js")) throw new Error("network failure");
+        return page('<script src="/app.js"></script>');
+      },
+    );
+    expect(result.status).toBe("partial");
     expect(result.deepPass.scriptsFetched).toBe(0);
+    expect(result.deepPass.failures).toBe(1);
+    expect(result.candidates.map(({ providerSlug }) => providerSlug)).toContain("vercel");
+  });
+
+  it("retains bounded oversized HTML and runs the deep pass using head scripts", async () => {
+    const html =
+      '<!doctype html><html><head><script src="/_vercel/insights/script.js"></script><script src="/app.js"></script></head><body>' +
+      "x".repeat(discoveryLimits.maxHtmlBytes + 32);
+    const fetcher: typeof fetchHttpSource = (url, validators, bounds) =>
+      fetchHttpSource(url, validators, {
+        ...bounds,
+        resolveHost: async () => [{ address: "93.184.216.34", family: 4 }],
+        request: async (requestUrl) => ({
+          status: 200,
+          headers:
+            requestUrl.pathname === "/"
+              ? {
+                  "content-type": "text/html",
+                  "content-length": String(Buffer.byteLength(html)),
+                  server: "Vercel",
+                }
+              : { "content-type": "application/javascript" },
+          body: (async function* () {
+            yield Buffer.from(requestUrl.pathname === "/" ? html : "Sentry.init({});");
+          })(),
+        }),
+      });
+    const result = await discoverWebsiteDependencies("https://company.example/", {
+      deep: true,
+      fetcher,
+    });
+    expect(result).toMatchObject({
+      status: "partial",
+      outcome: "partial",
+      coverage: {
+        html: {
+          status: 200,
+          bytesRead: discoveryLimits.maxHtmlBytes,
+          truncated: true,
+          extractionPerformed: true,
+        },
+      },
+      deepPass: {
+        requested: true,
+        scriptsDiscovered: 2,
+        scriptsAttempted: 2,
+        scriptsFetched: 2,
+      },
+    });
+    expect(result.deepPass.bytesFetched).toBeGreaterThan(0);
+    expect(result.evidence.map(({ providerSlug }) => providerSlug)).toContain("vercel");
+    expect(result.evidence.map(({ providerSlug }) => providerSlug)).toContain("sentry");
+  });
+
+  it("reports an oversized no-signal document as partial rather than empty or failed", async () => {
+    const html = `<html><head><title>Example</title></head><body>${"x".repeat(discoveryLimits.maxHtmlBytes + 1)}`;
+    const result = await discoverWebsiteDependencies("https://company.example/", {
+      fetcher: async () => ({
+        ...page(html.slice(0, discoveryLimits.maxHtmlBytes)),
+        bodyTruncated: true,
+      }),
+    });
+    expect(result).toMatchObject({
+      status: "partial",
+      outcome: "partial",
+      candidates: [],
+      evidence: [],
+    });
+    expect(result.coverage.html.extractionPerformed).toBe(true);
+  });
+
+  it("keeps root evidence and successful scripts when another optional script fails", async () => {
+    const result = await discoverWebsiteDependencies("https://company.example/", {
+      deep: true,
+      fetcher: async (url) => {
+        if (url.endsWith("/"))
+          return page(
+            '<head><script src="/bad.js"></script><script src="/good.js"></script></head>',
+            {
+              server: "Vercel",
+            },
+          );
+        if (url.endsWith("/bad.js")) throw new Error("optional failure");
+        return { ...page("Sentry.init({});"), contentType: "application/javascript" };
+      },
+    });
+    expect(result.status).toBe("partial");
+    expect(result.deepPass).toMatchObject({ scriptsAttempted: 2, scriptsFetched: 1, failures: 1 });
+    expect(result.evidence.map(({ providerSlug }) => providerSlug)).toEqual(
+      expect.arrayContaining(["vercel", "sentry"]),
+    );
+  });
+
+  it("marks malformed truncated HTML as inspected without parser failure", async () => {
+    const result = await discoverWebsiteDependencies("https://company.example/", {
+      fetcher: async () => ({
+        ...page(
+          '<html><head><script src="/_vercel/insights/script.js"></script><meta name="api-url" content="https://api.openai.com/v1">',
+        ),
+        bodyTruncated: true,
+      }),
+    });
+    expect(result.status).toBe("partial");
+    expect(result.coverage.html.extractionPerformed).toBe(true);
+    expect(result.evidence.map(({ providerSlug }) => providerSlug)).toContain("vercel");
   });
 
   it("treats URLs embedded in deep script source as weak evidence", async () => {
@@ -481,9 +602,43 @@ describe("offline URL dependency evaluation", () => {
       return {
         normalizedUrl: "https://company.example/",
         status: "completed" as const,
+        outcome: "empty" as const,
         candidates: [],
         evidence: [],
-        deepPass: { requested: false, scriptsFetched: 0, bytesFetched: 0 },
+        deepPass: {
+          requested: false,
+          scriptsDiscovered: 0,
+          scriptsAttempted: 0,
+          scriptsFetched: 0,
+          bytesFetched: 0,
+          failures: 0,
+        },
+        coverage: {
+          outcome: "empty" as const,
+          durationMs: 1,
+          html: {
+            attempted: true,
+            status: 200,
+            bytesRead: 0,
+            truncated: false,
+            extractionPerformed: true,
+            nodeLimitReached: false,
+            referenceLimitReached: false,
+          },
+          headers: { inspected: 0 },
+          csp: { inspected: true, hostSources: 0 },
+          manifest: { attempted: false, discovered: 0, fetched: 0, failures: 0 },
+          javascript: {
+            attempted: false,
+            scriptsDiscovered: 0,
+            scriptsAttempted: 0,
+            scriptsFetched: 0,
+            bytesFetched: 0,
+            failures: 0,
+            limitReached: false,
+          },
+          incompleteReasons: [],
+        },
         inspected: {
           responseHeaders: 0,
           redirects: 0,

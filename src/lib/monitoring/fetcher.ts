@@ -3,6 +3,9 @@ import { lookup } from "node:dns/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
+import { performance } from "node:perf_hooks";
+import { Readable } from "node:stream";
+import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 
 export const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_REDIRECTS = 3;
@@ -12,6 +15,8 @@ const USER_AGENT = "AuterimMonitor/1.0 (+https://auterim.com/monitoring)";
 export type FetchResult = {
   status: number;
   body: Buffer;
+  bytesRead: number;
+  bodyTruncated: boolean;
   contentType: string | null;
   safeHeaders: Record<string, string>;
   redirectEvidence?: Array<{ origin: string; safeHeaders: Record<string, string> }>;
@@ -35,6 +40,7 @@ type WireResponse = {
   status: number;
   headers: Record<string, string | string[] | undefined>;
   body: AsyncIterable<Uint8Array>;
+  cancel?: () => void;
 };
 
 type FetchDependencies = {
@@ -47,9 +53,13 @@ type FetchDependencies = {
   ) => Promise<WireResponse>;
   acceptedContentTypes?: readonly string[];
   maxResponseBytes?: number;
+  allowTruncatedResponse?: boolean;
   allowedOrigins?: readonly string[];
   restrictToStandardPorts?: boolean;
   dnsTimeoutMs?: number;
+  timeoutMs?: number;
+  deadlineAt?: number;
+  maxWireBytes?: number;
 };
 
 function parseIPv4(value: string): number[] {
@@ -227,6 +237,10 @@ function nodeRequest(
           status: response.statusCode ?? 0,
           headers: responseHeaders,
           body: response,
+          cancel: () => {
+            response.destroy();
+            req.destroy();
+          },
         });
       },
     );
@@ -235,21 +249,142 @@ function nodeRequest(
   });
 }
 
-async function readBounded(response: WireResponse, maxBytes: number): Promise<Buffer> {
+function cancelResponse(response: WireResponse) {
+  try {
+    response.cancel?.();
+    const body = response.body as AsyncIterable<Uint8Array> & { destroy?: () => void };
+    body.destroy?.();
+  } catch {
+    // Cancellation is best-effort; the original bounded result/error stays authoritative.
+  }
+}
+
+function isZlibError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    error.code.startsWith("Z_")
+  );
+}
+
+function decompressorFor(response: WireResponse) {
+  const raw = response.headers["content-encoding"];
+  const encoding = (Array.isArray(raw) ? raw[0] : raw)?.trim().toLowerCase() ?? "identity";
+  if (encoding === "" || encoding === "identity") return null;
+  if (encoding === "gzip" || encoding === "x-gzip") return createGunzip();
+  if (encoding === "deflate") return createInflate();
+  if (encoding === "br") return createBrotliDecompress();
+  throw new SafeFetchError(
+    "invalid_content_encoding",
+    "The source response encoding is unsupported.",
+  );
+}
+
+async function readBounded(
+  response: WireResponse,
+  maxBytes: number,
+  allowTruncated: boolean,
+  maxWireBytes = Math.max(maxBytes * 2, 64 * 1024),
+): Promise<{ body: Buffer; bytesRead: number; truncated: boolean }> {
+  if (
+    !Number.isInteger(maxBytes) ||
+    maxBytes <= 0 ||
+    !Number.isInteger(maxWireBytes) ||
+    maxWireBytes <= 0
+  ) {
+    cancelResponse(response);
+    throw new SafeFetchError("invalid_size_limit", "The source response size limit is invalid.");
+  }
+  let wireBytesRead = 0;
+  let wireTruncated = false;
+  const boundedWireBody = async function* () {
+    for await (const rawChunk of response.body) {
+      const chunk = Buffer.from(rawChunk as Uint8Array);
+      const remaining = maxWireBytes - wireBytesRead;
+      if (chunk.byteLength > remaining) {
+        if (remaining > 0) {
+          wireBytesRead += remaining;
+          yield chunk.subarray(0, remaining);
+        }
+        wireTruncated = true;
+        return;
+      }
+      wireBytesRead += chunk.byteLength;
+      yield chunk;
+    }
+  };
+  const source = Readable.from(boundedWireBody(), { objectMode: false });
+  let stream: Readable = source;
+  let decoder:
+    | ReturnType<typeof createGunzip>
+    | ReturnType<typeof createInflate>
+    | ReturnType<typeof createBrotliDecompress>
+    | null;
+  try {
+    decoder = decompressorFor(response);
+  } catch (error) {
+    source.destroy();
+    cancelResponse(response);
+    throw error;
+  }
+  if (decoder) {
+    source.pipe(decoder);
+    stream = decoder;
+  }
+  const cancel = () => {
+    stream.destroy();
+    if (stream !== source) source.destroy();
+    cancelResponse(response);
+  };
   const chunks: Buffer[] = [];
   let size = 0;
-  for await (const chunk of response.body) {
-    size += chunk.byteLength;
-    if (size > maxBytes) {
+  try {
+    for await (const chunk of stream) {
+      const bytes = Buffer.from(chunk as Uint8Array);
+      const remaining = maxBytes - size;
+      if (bytes.byteLength > remaining) {
+        if (remaining > 0) {
+          chunks.push(bytes.subarray(0, remaining));
+          size += remaining;
+        }
+        cancel();
+        if (!allowTruncated) {
+          throw new SafeFetchError(
+            "response_too_large",
+            "The source response exceeded the configured size limit.",
+            response.status,
+          );
+        }
+        return { body: Buffer.concat(chunks, size), bytesRead: size, truncated: true };
+      }
+      if (bytes.byteLength > 0) {
+        chunks.push(bytes);
+        size += bytes.byteLength;
+      }
+    }
+  } catch (error) {
+    cancel();
+    if (wireTruncated && allowTruncated)
+      return { body: Buffer.concat(chunks, size), bytesRead: size, truncated: true };
+    if (wireTruncated)
       throw new SafeFetchError(
         "response_too_large",
         "The source response exceeded the configured size limit.",
         response.status,
       );
-    }
-    chunks.push(Buffer.from(chunk));
+    throw error;
   }
-  return Buffer.concat(chunks, size);
+  if (wireTruncated) {
+    cancel();
+    if (!allowTruncated)
+      throw new SafeFetchError(
+        "response_too_large",
+        "The source response exceeded the configured size limit.",
+        response.status,
+      );
+  }
+  return { body: Buffer.concat(chunks, size), bytesRead: size, truncated: wireTruncated };
 }
 
 function isTimeout(error: unknown): boolean {
@@ -313,6 +448,13 @@ export async function fetchHttpSource(
       throw new SafeFetchError("redirect_loop", "The source redirected in a loop.");
     visited.add(current.href);
 
+    const remainingBudget = () =>
+      dependencies.deadlineAt === undefined
+        ? Number.POSITIVE_INFINITY
+        : Math.floor(dependencies.deadlineAt - performance.now());
+    const initialRemaining = remainingBudget();
+    if (initialRemaining <= 0) throw new SafeFetchError("timeout", "The source request timed out.");
+
     let addresses: Array<{ address: string; family: number }>;
     let dnsTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -321,7 +463,7 @@ export async function fetchHttpSource(
         new Promise<never>((_, reject) => {
           dnsTimeout = setTimeout(
             () => reject(new SafeFetchError("dns_error", "The source hostname lookup timed out.")),
-            dependencies.dnsTimeoutMs ?? 3_000,
+            Math.min(dependencies.dnsTimeoutMs ?? 3_000, initialRemaining),
           );
         }),
       ]);
@@ -340,15 +482,19 @@ export async function fetchHttpSource(
 
     let response: WireResponse;
     try {
+      const requestRemaining = remainingBudget();
+      if (requestRemaining <= 0)
+        throw new SafeFetchError("timeout", "The source request timed out.");
       response = await request(
         current,
         {
           "User-Agent": USER_AGENT,
           Accept: "text/html,application/xhtml+xml,text/plain;q=0.9",
+          "Accept-Encoding": "gzip, deflate, br",
           ...(current.origin === originalOrigin ? Object.fromEntries(conditional) : {}),
         },
         addresses,
-        REQUEST_TIMEOUT_MS,
+        Math.min(dependencies.timeoutMs ?? REQUEST_TIMEOUT_MS, requestRemaining),
       );
     } catch (error) {
       if (error instanceof SafeFetchError) throw error;
@@ -362,6 +508,7 @@ export async function fetchHttpSource(
       const locationValue = response.headers.location;
       const location = Array.isArray(locationValue) ? locationValue[0] : locationValue;
       if (!location || redirectCount === MAX_REDIRECTS) {
+        cancelResponse(response);
         throw new SafeFetchError(
           "redirect_limit",
           "The source exceeded the redirect limit.",
@@ -372,6 +519,7 @@ export async function fetchHttpSource(
         origin: current.origin,
         safeHeaders: selectSafeHeaders(response.headers),
       });
+      cancelResponse(response);
       try {
         current = new URL(location, current);
       } catch {
@@ -397,9 +545,12 @@ export async function fetchHttpSource(
     );
 
     if (response.status === 304) {
+      cancelResponse(response);
       return {
         status: 304,
         body: Buffer.alloc(0),
+        bytesRead: 0,
+        bodyTruncated: false,
         contentType,
         safeHeaders: {},
         redirectEvidence,
@@ -409,6 +560,7 @@ export async function fetchHttpSource(
       };
     }
     if (response.status < 200 || response.status >= 300) {
+      cancelResponse(response);
       throw new SafeFetchError(
         "http_error",
         `The source returned HTTP ${response.status}.`,
@@ -421,6 +573,7 @@ export async function fetchHttpSource(
       "text/plain",
     ];
     if (!contentType || !acceptedContentTypes.includes(contentType)) {
+      cancelResponse(response);
       throw new SafeFetchError(
         "invalid_content_type",
         "The source did not return HTML or plain text.",
@@ -428,17 +581,29 @@ export async function fetchHttpSource(
       );
     }
 
-    let body: Buffer;
+    let bounded: { body: Buffer; bytesRead: number; truncated: boolean };
     try {
-      body = await readBounded(response, dependencies.maxResponseBytes ?? MAX_RESPONSE_BYTES);
+      bounded = await readBounded(
+        response,
+        dependencies.maxResponseBytes ?? MAX_RESPONSE_BYTES,
+        dependencies.allowTruncatedResponse === true,
+        dependencies.maxWireBytes,
+      );
     } catch (error) {
       if (error instanceof SafeFetchError) throw error;
       if (isTimeout(error)) throw new SafeFetchError("timeout", "The source response timed out.");
+      if (isZlibError(error))
+        throw new SafeFetchError(
+          "invalid_content_encoding",
+          "The source response encoding is invalid.",
+        );
       throw new SafeFetchError("network_error", "The source response could not be read.");
     }
     return {
       status: response.status,
-      body,
+      body: bounded.body,
+      bytesRead: bounded.bytesRead,
+      bodyTruncated: bounded.truncated,
       contentType,
       safeHeaders: selectSafeHeaders(response.headers),
       redirectEvidence,

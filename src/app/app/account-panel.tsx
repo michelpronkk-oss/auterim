@@ -394,7 +394,9 @@ function FirstWorkspaceOnboarding({
           ? "notifications_setup"
           : "activation";
   const discoverySettled =
-    onboarding.discovery.status === "completed" || onboarding.discovery.status === "failed";
+    onboarding.discovery.status === "completed" ||
+    onboarding.discovery.status === "partial" ||
+    onboarding.discovery.status === "failed";
   const unresolvedCandidates = onboarding.discovery.candidates.filter(
     (candidate) => candidate.suggestedStatus === "candidate",
   );
@@ -640,6 +642,18 @@ function FirstWorkspaceOnboarding({
               </button>
             </div>
           )}
+          {onboarding.discovery.status === "partial" && (
+            <p className="onboarding-status" role="status">
+              Auterim inspected the public signals available within its scan limits.
+            </p>
+          )}
+          {onboarding.discovery.status === "partial" &&
+            onboarding.discovery.candidates.length === 0 && (
+              <p className="onboarding-status">
+                No dependencies were identified from the available public signals. Add the services
+                your company uses below.
+              </p>
+            )}
           {onboarding.discovery.status === "completed" &&
             onboarding.discovery.candidates.length === 0 && (
               <p className="onboarding-status">
