@@ -2,6 +2,22 @@
 
 Auterim inspects public website technology signals to suggest dependencies for customer review. It does not establish that a provider is used in production, infer business criticality, or confirm a dependency. Every result remains a suggestion until a workspace member confirms it. Discovery is deterministic and uses registered signatures rather than an LLM.
 
+## Previous single-surface limitation
+
+Earlier versions scanned only the submitted website URL and bounded same-origin public resources, which could miss dependencies used only by an application shell. Company-surface discovery now considers explicit first-party links from the root page under the bounded rules below.
+
+## Company-surface discovery
+
+The company scan first completes the submitted root URL, then considers only a bounded set of explicit `<a href>` links collected by the streaming extractor. It never derives hostnames such as `app.example.com` by guessing. A candidate must use standard-port HTTPS and share the registrable domain calculated by `tldts` with private suffixes enabled. The link target is normalized to its origin root before any fetch, so path and query content are not retained. Association is only a candidate-selection signal; every request still goes through the existing canonical safe fetcher and its DNS, IP pinning, redirect, size, and deadline controls.
+
+Classification uses deterministic host/path tokens and a bounded anchor label category. App, dashboard, customer portal, and explicitly labeled sign-in surfaces can be selected. Docs, blogs, status, support, API, and integration-directory links are classified and accounted for but not scanned for dependency inference. The root plus at most two additional surfaces are selected, in stable priority and hostname order. Additional surfaces are scanned sequentially and are not recursively expanded.
+
+All surfaces share one 18-second deadline, an eight MiB decoded and 16 MiB wire safe-fetch budget, a 48-call safe-fetch ceiling, and one eight-second browser-runtime window capped at 60 mediated requests, 20 hosts, five MiB decoded bytes, and eight MiB wire bytes. Existing per-surface static and runtime limits remain in force. Each browser context remains isolated and the same deny-proxy and route-before-page architecture applies. If a selected surface cannot be scanned inside the company budget, coverage becomes partial; already collected evidence is retained.
+
+Evidence rows retain the provider signature, signal family, normalized source origin, surface type, and hostname. Candidate identity remains company/provider; numeric confidence uses the strongest individual surface so unrelated application shells do not combine evidence strength. Root marketing evidence is eligible only for hosting/infrastructure observations; app/auth/dashboard/portal evidence can support dependency suggestions. Provider-like evidence that does not become a suggestion is recorded as a bounded suppression reason in run coverage. Suppressed observation counts preserve distinct signature/origin clues; coverage exposes normalized hosts only and onboarding returns aggregate counts. No page body, raw anchor text, arbitrary path, or query value is stored.
+
+The `dependency_discovery_evidence` RLS policy and service-role write path remain unchanged. The surface provenance columns inherit the existing run/workspace foreign key and member read policy. Company coverage is limited to 24 summarized surfaces and 100 suppressed observations per run, and the database bounds its serialized size.
+
 ## Static extractor and resource graph
 
 The homepage is fetched through `fetchHttpSource`, which validates public DNS answers, pins the selected address, validates every redirect, rejects non-standard ports and HTTPS downgrades, and enforces encoded and decoded response bounds. Decoded HTML is streamed into `htmlparser2`; the extractor does not build or retain a DOM or a complete response body. Its budgets cap HTML at 4 MiB, traversal at 20,000 nodes, general references at 64, script references at 30, inline configuration at 32 KiB/32 URLs, and inline JSON traversal at 500 keys. Script references have their own budget so unrelated resources cannot crowd them out. Base URL handling, entity decoding, malformed input, and split stream chunks are covered by fixtures.
@@ -50,4 +66,4 @@ Earlier TrustMRR and Cal.com production scans used the pre-runtime extractor. Th
 
 ## Database change
 
-Migration `20261012000000_runtime_dependency_discovery.sql` extends the discovery evidence signal-type constraint for runtime observations. It does not add tenant data tables, alter candidate confirmation semantics, or change existing RLS ownership.
+Migration `20261012000000_runtime_dependency_discovery.sql` extends the discovery evidence signal-type constraint for runtime observations. Migration `20261004144308_company_surface_discovery.sql` adds bounded surface provenance and evidence deduplication across surface identity. Migration `20261014000000_company_surface_discovery_finalize.sql` updates the coverage bound and completion/read RPCs after their migration prerequisites, while validating DNS names and bracketed IPv6 origins. These migrations add no tenant data table and do not alter candidate confirmation semantics or existing RLS ownership.

@@ -35,6 +35,17 @@ export const discoverWebsiteDependenciesTask = schemaTask({
       runtimeHosts: result.coverage.runtime.uniqueHosts,
       runtimeMatches: result.coverage.runtime.providerMatches,
       runtimeBlocked: result.coverage.runtime.blockedUnsafeRequests,
+      companySurfacesObserved: result.companyCoverage?.surfacesObserved ?? 1,
+      companySurfacesSelected: result.companyCoverage?.surfacesSelected ?? 1,
+      companySurfacesScanned: result.companyCoverage?.surfacesScanned ?? 1,
+      companyProvidersObserved: result.companyCoverage?.providersObserved ?? result.evidenceCount,
+      companyProvidersSuppressed: result.companyCoverage?.providersSuppressed ?? 0,
+      companyProvidersSuggested:
+        result.companyCoverage?.providersSuggested ?? result.candidateCount,
+      companyStaticBytes:
+        result.companyCoverage?.totalStaticBytes ?? result.coverage.html.bytesRead,
+      companyRuntimeDurationMs:
+        result.companyCoverage?.totalRuntimeDurationMs ?? result.coverage.runtime.durationMs,
       totalDurationMs: result.coverage.durationMs,
     });
     return result;

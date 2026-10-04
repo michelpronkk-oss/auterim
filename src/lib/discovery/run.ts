@@ -1,9 +1,6 @@
 import "server-only";
-import {
-  discoverWebsiteDependencies,
-  normalizePublicWebsiteUrl,
-  type UrlDiscoveryResult,
-} from "@/lib/discovery/discovery";
+import { normalizePublicWebsiteUrl, type UrlDiscoveryResult } from "@/lib/discovery/discovery";
+import { discoverCompanySurfaceDependencies } from "@/lib/discovery/company-surfaces";
 import { SafeFetchError } from "@/lib/monitoring/fetcher";
 import { SupabaseUrlDiscoveryRepository } from "@/lib/discovery/repository";
 
@@ -20,13 +17,13 @@ export async function runWebsiteDependencyDiscovery(
   },
   dependencies: {
     repository?: Pick<SupabaseUrlDiscoveryRepository, "begin" | "complete" | "fail">;
-    discover?: typeof discoverWebsiteDependencies;
+    discover?: typeof discoverCompanySurfaceDependencies;
   } = {},
 ) {
   const websiteUrl = normalizePublicWebsiteUrl(input.websiteUrl);
   const repository = dependencies.repository ?? new SupabaseUrlDiscoveryRepository();
   const runId = await repository.begin({ ...input, websiteUrl });
-  const discover = dependencies.discover ?? discoverWebsiteDependencies;
+  const discover = dependencies.discover ?? discoverCompanySurfaceDependencies;
   let result: UrlDiscoveryResult;
   try {
     result = await discover(websiteUrl, {
@@ -62,6 +59,7 @@ export async function runWebsiteDependencyDiscovery(
     outcome: result.outcome,
     candidateCount: result.candidates.length,
     evidenceCount: result.evidence.length,
+    companyCoverage: result.companyCoverage ?? null,
     deepPass: result.deepPass,
     coverage: result.coverage,
     failureCategory: result.failureCategory ?? null,

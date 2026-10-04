@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { discoverWebsiteDependencies } from "../src/lib/discovery/discovery.ts";
+import { discoverCompanySurfaceDependencies } from "../src/lib/discovery/company-surfaces.ts";
 import { fetchHttpSource } from "../src/lib/monitoring/fetcher.ts";
 
 const targets: Array<{
@@ -9,7 +9,7 @@ const targets: Array<{
   expectedAbsentProvider?: string;
 }> = [
   { name: "Cal.com", url: "https://cal.com/", expectedProvider: null },
-  { name: "TrustMRR", url: "https://trustmrr.com/", expectedProvider: null },
+  { name: "TrustMRR", url: "https://trustmrr.com/", expectedProvider: "vercel" },
   { name: "Vercel", url: "https://vercel.com/", expectedProvider: "vercel" },
   {
     name: "Stripe",
@@ -32,7 +32,7 @@ it("runs a bounded live URL dependency evaluation against selected public sites"
   const results = [];
   let requests = 0;
   for (const target of selectedTargets) {
-    const result = await discoverWebsiteDependencies(target.url, {
+    const result = await discoverCompanySurfaceDependencies(target.url, {
       deep: target.name === "TrustMRR" || target.name === "Cal.com",
       runtimeEnabled: target.name === "TrustMRR" || target.name === "Cal.com",
       fetcher: async (...args) => {
@@ -52,6 +52,9 @@ it("runs a bounded live URL dependency evaluation against selected public sites"
       deepPass: result.deepPass,
       runtime: result.coverage.runtime,
       coverage: result.coverage,
+      companyCoverage: result.companyCoverage ?? null,
+      surfaces: result.companyCoverage?.surfaces ?? [],
+      suppressedObservations: result.companyCoverage?.suppressedObservations ?? [],
       inspected: result.inspected,
       evidence: result.evidence.map(({ providerSlug, signatureKey, signalType, strength }) => ({
         providerSlug,

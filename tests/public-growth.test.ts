@@ -80,6 +80,8 @@ describe("public acquisition surfaces", () => {
               signalType: "response_header",
               strength: "strong",
               sourceOrigin: "https://customer.example",
+              surfaceType: "ROOT_MARKETING",
+              surfaceHost: "customer.example",
             },
           ],
         },

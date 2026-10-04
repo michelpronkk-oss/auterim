@@ -36,7 +36,23 @@ export type DiscoveryEvidence = {
   signalType: DiscoverySignalType;
   strength: "strong" | "medium" | "weak";
   sourceOrigin: string;
+  surfaceType: DiscoverySurfaceType;
+  surfaceHost: string;
 };
+
+export type DiscoverySurfaceType =
+  | "ROOT_MARKETING"
+  | "PRODUCT_APP"
+  | "AUTH_APP"
+  | "DASHBOARD"
+  | "CUSTOMER_PORTAL"
+  | "FIRST_PARTY_API"
+  | "DOCS"
+  | "BLOG"
+  | "STATUS"
+  | "SUPPORT"
+  | "INTEGRATION_DIRECTORY"
+  | "UNKNOWN";
 
 export type DiscoveryCandidate = {
   providerSlug: string;
@@ -63,12 +79,75 @@ export type RuntimeDiscoveryResult = {
   memoryDeltaBytes: number | null;
 };
 
+export type DiscoveryRuntimeBudget = {
+  deadlineAt: number | null;
+  requests: number;
+  hosts: Set<string>;
+  responseBytes: number;
+  wireBytes: number;
+  reservedResponseBytes: number;
+  reservedWireBytes: number;
+  maxRequests: number;
+  maxHosts: number;
+  maxResponseBytes: number;
+  maxWireBytes: number;
+};
+
 export type UrlDiscoveryResult = {
   normalizedUrl: string;
   status: "completed" | "partial" | "failed";
   outcome: "complete" | "partial" | "empty" | "failed";
   candidates: DiscoveryCandidate[];
   evidence: DiscoveryEvidence[];
+  surfaceLinks?: Array<{ url: string; labelKind: "app_cta" | "auth_cta" | "other" }>;
+  finalHost?: string;
+  companyCoverage?: {
+    surfacesObserved: number;
+    surfacesClassified: number;
+    surfacesSelected: number;
+    surfacesScanned: number;
+    surfaces: Array<{
+      host: string;
+      type: DiscoverySurfaceType;
+      association: "submitted_url" | "root_link";
+      selected: boolean;
+      selectionReason:
+        | "root_surface"
+        | "high_discovery_value"
+        | "low_value_or_excluded"
+        | "integration_directory_excluded"
+        | "surface_limit";
+      status: "scanned" | "skipped" | "failed";
+      staticBytes?: number;
+      staticDurationMs?: number;
+      scriptBytes?: number;
+      runtimeDurationMs?: number;
+      runtimeRequests?: number;
+    }>;
+    providersObserved: number;
+    providersSuggested: number;
+    providersSuppressed: number;
+    suppressionReasonCounts: Record<string, number>;
+    suppressedObservations: Array<{
+      providerSlug: string;
+      surfaceType: DiscoverySurfaceType;
+      surfaceHost: string;
+      sourceHost: string;
+      sourceOrigin: string;
+      signatureKey: string;
+      evidenceFamily: string;
+      reason: string;
+    }>;
+    totalDurationMs: number;
+    totalStaticBytes: number;
+    totalStaticWireBytes: number;
+    totalScriptBytes: number;
+    totalRuntimeBytes: number;
+    totalRuntimeWireBytes: number;
+    totalRuntimeDurationMs: number;
+    totalRuntimeRequests: number;
+    totalRuntimeHosts: number;
+  };
   deepPass: {
     requested: boolean;
     scriptsDiscovered: number;
@@ -463,10 +542,12 @@ function matchEvidence(
   sourceOrigin: string,
   seen: Set<string>,
   target: DiscoveryEvidence[],
+  surfaceType: DiscoverySurfaceType,
+  surfaceHost = new URL(sourceOrigin).hostname.toLowerCase(),
 ) {
   for (const signature of providerSignatureRegistry) {
     if (!signature.matches(input)) continue;
-    const key = `${signature.providerSlug}:${signature.signatureKey}:${sourceOrigin}`;
+    const key = `${surfaceType}:${surfaceHost}:${signature.providerSlug}:${signature.signatureKey}:${sourceOrigin}`;
     if (seen.has(key)) continue;
     seen.add(key);
     target.push({
@@ -476,67 +557,80 @@ function matchEvidence(
       signalType: signature.signalType,
       strength: signature.strength,
       sourceOrigin,
+      surfaceType,
+      surfaceHost,
     });
   }
 }
 
-function makeCandidates(evidence: DiscoveryEvidence[]): DiscoveryCandidate[] {
+export function makeCandidates(evidence: DiscoveryEvidence[]): DiscoveryCandidate[] {
   const grouped = new Map<string, DiscoveryEvidence[]>();
   for (const item of evidence)
     grouped.set(item.providerSlug, [...(grouped.get(item.providerSlug) ?? []), item]);
   return [...grouped.entries()]
     .map(([providerSlug, items]) => {
       if (items.every((item) => item.strength === "weak")) return null;
-      const strongestByFamily = new Map<string, number>();
-      for (const item of items) {
-        const family = evidenceFamily(item.signalType);
-        strongestByFamily.set(
-          family,
-          Math.max(strongestByFamily.get(family) ?? 0, scoreStrength(item.strength)),
+      const bySurface = new Map<string, DiscoveryEvidence[]>();
+      for (const item of items)
+        bySurface.set(item.surfaceHost, [...(bySurface.get(item.surfaceHost) ?? []), item]);
+      const scores = [...bySurface.values()].map((surfaceEvidence) => {
+        const strongestByFamily = new Map<string, number>();
+        for (const item of surfaceEvidence) {
+          const family = evidenceFamily(item.signalType);
+          strongestByFamily.set(
+            family,
+            Math.max(strongestByFamily.get(family) ?? 0, scoreStrength(item.strength)),
+          );
+        }
+        const rawConfidence = Number(
+          (
+            1 -
+            [...strongestByFamily.values()].reduce((remainder, score) => remainder * (1 - score), 1)
+          ).toFixed(3),
         );
-      }
-      const rawConfidence = Number(
-        (
-          1 -
-          [...strongestByFamily.values()].reduce((remainder, score) => remainder * (1 - score), 1)
-        ).toFixed(3),
-      );
-      const strongFamilies = new Set(
-        items
-          .filter((item) => item.strength === "strong")
-          .map((item) => evidenceFamily(item.signalType)),
-      ).size;
-      const hasDirectUse = items.some(
-        (item) =>
-          item.strength === "strong" &&
-          ["sdk", "provider_endpoint"].includes(evidenceFamily(item.signalType)),
-      );
-      const runtimeEvidence = items.filter(
-        (item) => item.strength === "strong" && isRuntimeSignal(item.signalType),
-      );
-      const runtimeHosts = new Set(
-        runtimeEvidence.map((item) => {
-          try {
-            return new URL(item.sourceOrigin).hostname.toLowerCase();
-          } catch {
-            return item.sourceOrigin;
-          }
-        }),
-      );
-      const runtimeFamilies = new Set(
-        runtimeEvidence.map((item) => evidenceFamily(item.signalType)),
-      );
-      const independentlyObservedRuntimeUse = runtimeHosts.size >= 2 && runtimeFamilies.size >= 2;
+        const surfaceFamilies = new Set(
+          surfaceEvidence
+            .filter((item) => item.strength === "strong")
+            .map((item) => evidenceFamily(item.signalType)),
+        );
+        const surfaceHasDirectUse = surfaceEvidence.some(
+          (item) =>
+            item.strength === "strong" &&
+            ["sdk", "provider_endpoint"].includes(evidenceFamily(item.signalType)),
+        );
+        const runtimeEvidence = surfaceEvidence.filter(
+          (item) => item.strength === "strong" && isRuntimeSignal(item.signalType),
+        );
+        const runtimeHosts = new Set(
+          runtimeEvidence.map((item) => {
+            try {
+              return new URL(item.sourceOrigin).hostname.toLowerCase();
+            } catch {
+              return item.sourceOrigin;
+            }
+          }),
+        );
+        const runtimeFamilies = new Set(
+          runtimeEvidence.map((item) => evidenceFamily(item.signalType)),
+        );
+        return {
+          rawConfidence,
+          high:
+            surfaceFamilies.size >= 2 &&
+            surfaceHasDirectUse &&
+            rawConfidence >= 0.85 &&
+            runtimeHosts.size >= 2 &&
+            runtimeFamilies.size >= 2,
+        };
+      });
+      const rawConfidence = Math.max(...scores.map((score) => score.rawConfidence));
       const confidence = rawConfidence;
-      const label =
-        strongFamilies >= 2 &&
-        hasDirectUse &&
-        rawConfidence >= 0.85 &&
-        independentlyObservedRuntimeUse
-          ? "high"
-          : rawConfidence >= 0.5
-            ? "medium"
-            : "low";
+      const independentlyHighOnOneSurface = scores.some((score) => score.high);
+      const label = independentlyHighOnOneSurface
+        ? "high"
+        : rawConfidence >= 0.5
+          ? "medium"
+          : "low";
       return {
         providerSlug,
         providerName: items[0]!.providerName,
@@ -557,7 +651,12 @@ export async function discoverWebsiteDependencies(
   options: {
     deep?: boolean;
     fetcher?: typeof fetchHttpSource;
+    runtimeFetcher?: typeof fetchHttpSource;
     runtimeEnabled?: boolean;
+    surfaceType?: DiscoverySurfaceType;
+    globalDeadlineAt?: number;
+    runtimeDeadlineAt?: number;
+    runtimeBudget?: DiscoveryRuntimeBudget;
     runtimeRunner?: (
       url: string,
       options: { deadlineAt: number; signal?: AbortSignal },
@@ -572,15 +671,21 @@ export async function discoverWebsiteDependencies(
           | "contentType"
           | "finalUrl"
         >;
+        fetcher?: typeof fetchHttpSource;
+        sharedBudget?: DiscoveryRuntimeBudget;
       },
     ) => Promise<RuntimeDiscoveryResult>;
     signal?: AbortSignal;
   } = {},
 ): Promise<UrlDiscoveryResult> {
   const normalizedUrl = normalizePublicWebsiteUrl(rawUrl);
+  const surfaceType = options.surfaceType ?? "ROOT_MARKETING";
   const fetcher = options.fetcher ?? fetchHttpSource;
   const startedAt = performance.now();
-  const deadlineAt = startedAt + discoveryLimits.maxScanDurationMs;
+  const deadlineAt = Math.min(
+    startedAt + discoveryLimits.maxScanDurationMs,
+    options.globalDeadlineAt ?? Number.POSITIVE_INFINITY,
+  );
   const fetchBounds = () => {
     const remainingMs = Math.floor(deadlineAt - performance.now());
     if (remainingMs <= 0)
@@ -635,10 +740,12 @@ export async function discoverWebsiteDependencies(
     }
     return {
       normalizedUrl,
+      finalHost: new URL(normalizedUrl).hostname.toLowerCase(),
       status: "failed",
       outcome: "failed",
       candidates: [],
       evidence: [],
+      surfaceLinks: [],
       deepPass: {
         requested: options.deep === true,
         scriptsDiscovered: 0,
@@ -704,10 +811,12 @@ export async function discoverWebsiteDependencies(
   if (!pageOrigin) {
     return {
       normalizedUrl,
+      finalHost: new URL(page.finalUrl).hostname.toLowerCase(),
       status: "failed",
       outcome: "failed",
       candidates: [],
       evidence: [],
+      surfaceLinks: [],
       deepPass: {
         requested: options.deep === true,
         scriptsDiscovered: 0,
@@ -781,6 +890,7 @@ export async function discoverWebsiteDependencies(
   const redirectOrigins = page.redirectEvidence?.length ? [pageOrigin] : [];
   const evidence: DiscoveryEvidence[] = [];
   const seen = new Set<string>();
+  const scannedHost = new URL(normalizedUrl).hostname.toLowerCase();
   matchEvidence(
     {
       headers: page.safeHeaders,
@@ -798,6 +908,8 @@ export async function discoverWebsiteDependencies(
     pageOrigin,
     seen,
     evidence,
+    surfaceType,
+    scannedHost,
   );
   for (const redirect of page.redirectEvidence ?? []) {
     matchEvidence(
@@ -811,6 +923,8 @@ export async function discoverWebsiteDependencies(
       redirect.origin,
       seen,
       evidence,
+      surfaceType,
+      scannedHost,
     );
   }
 
@@ -937,6 +1051,8 @@ export async function discoverWebsiteDependencies(
         scriptOrigin,
         seen,
         evidence,
+        surfaceType,
+        scannedHost,
       );
     }
   }
@@ -954,6 +1070,8 @@ export async function discoverWebsiteDependencies(
       pageOrigin,
       seen,
       evidence,
+      surfaceType,
+      scannedHost,
     );
   }
 
@@ -1011,9 +1129,16 @@ export async function discoverWebsiteDependencies(
     const runtimeStartedAt = performance.now();
     runtimeSummary = { ...runtimeSummary, attempted: true, status: "unavailable" };
     try {
+      if (options.runtimeBudget && options.runtimeBudget.deadlineAt === null) {
+        options.runtimeBudget.deadlineAt = Math.min(
+          performance.now() + discoveryLimits.maxRuntimeDurationMs,
+          options.globalDeadlineAt ?? Number.POSITIVE_INFINITY,
+        );
+      }
       const deadlineAt = Math.min(
         startedAt + discoveryLimits.maxScanDurationMs,
         performance.now() + discoveryLimits.maxRuntimeDurationMs,
+        options.runtimeBudget?.deadlineAt ?? options.runtimeDeadlineAt ?? Number.POSITIVE_INFINITY,
       );
       const runner =
         options.runtimeRunner ??
@@ -1021,7 +1146,11 @@ export async function discoverWebsiteDependencies(
       const runtimeResult = await runner(
         page.finalUrl,
         { deadlineAt, signal: options.signal },
-        { initialDocument: page },
+        {
+          initialDocument: page,
+          fetcher: options.runtimeFetcher ?? fetcher,
+          sharedBudget: options.runtimeBudget,
+        },
       );
       if (options.signal?.aborted)
         throw new SafeFetchError("timeout", "The discovery task was cancelled.");
@@ -1047,6 +1176,8 @@ export async function discoverWebsiteDependencies(
           `https://${request.host}`,
           seen,
           evidence,
+          surfaceType,
+          scannedHost,
         );
       }
       runtimeSummary = {
@@ -1082,10 +1213,12 @@ export async function discoverWebsiteDependencies(
   const durationMs = Math.ceil(performance.now() - startedAt);
   return {
     normalizedUrl,
+    finalHost: new URL(page.finalUrl).hostname.toLowerCase(),
     status: partial ? "partial" : "completed",
     outcome,
     candidates,
     evidence,
+    surfaceLinks: references.surfaceLinks,
     deepPass: {
       requested: options.deep === true,
       scriptsDiscovered,

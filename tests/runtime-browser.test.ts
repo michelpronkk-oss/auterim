@@ -141,6 +141,40 @@ describe("bounded runtime dependency discovery", () => {
     );
   });
 
+  it("enforces one shared runtime request/host/byte budget across browser scans", async () => {
+    const harness = browserHarness(async (route, frame) => {
+      await route(harness.makeRoute("https://app.example/", "document", frame).value);
+      await route(harness.makeRoute("https://api.example/data", "fetch", frame).value);
+    });
+    const fetcher = vi.fn(async (url: string) => response(url, "ok", "text/html"));
+    const sharedBudget = {
+      deadlineAt: null,
+      requests: 0,
+      hosts: new Set<string>(),
+      responseBytes: 0,
+      wireBytes: 0,
+      reservedResponseBytes: 0,
+      reservedWireBytes: 0,
+      maxRequests: 1,
+      maxHosts: 1,
+      maxResponseBytes: 1024,
+      maxWireBytes: 64 * 1024,
+    };
+    const result = await inspectPublicLandingPage(
+      "https://app.example/",
+      { deadlineAt: performance.now() + 20_000 },
+      {
+        launch: async () => harness.browser as unknown as Browser,
+        fetcher: fetcher as never,
+        sharedBudget,
+      },
+    );
+    expect(sharedBudget.requests).toBe(1);
+    expect(sharedBudget.hosts).toEqual(new Set(["app.example"]));
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(result.requestsBlocked).toBeGreaterThan(0);
+  });
+
   it("blocks unsafe schemes, POSTs, frames, and generic assets before any fetch", async () => {
     const harness = browserHarness(async (route, frame) => {
       const unsafeScheme = harness.makeRoute("file:///etc/passwd", "document", frame);

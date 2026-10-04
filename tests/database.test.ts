@@ -163,8 +163,23 @@ const onboardingWorkspaceIdempotencyMigration = await readFile(
   ),
   "utf8",
 );
+const companySurfaceMigration = await readFile(
+  fileURLToPath(
+    new URL("../supabase/migrations/20261004144308_company_surface_discovery.sql", import.meta.url),
+  ),
+  "utf8",
+);
+const companySurfaceFinalizeMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261014000000_company_surface_discovery_finalize.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
-async function makeDatabase() {
+async function makeDatabase(applyCompanySurfaceMigration = true) {
   const db = new PGlite();
   await db.exec(`
     create role anon;
@@ -184,6 +199,7 @@ async function makeDatabase() {
   await db.exec(discoveryMigration);
   await db.exec(discoverySignalsMigration);
   await db.exec(onboardingMigration);
+  if (applyCompanySurfaceMigration) await db.exec(companySurfaceMigration);
   await db.exec(preflightMigration);
   await db.exec(preflightPrivilegeMigration);
   await db.exec(billingMigration);
@@ -197,6 +213,7 @@ async function makeDatabase() {
   await db.exec(discoveryOutcomeConsistencyMigration);
   await db.exec(runtimeDiscoveryMigration);
   await db.exec(onboardingWorkspaceIdempotencyMigration);
+  if (applyCompanySurfaceMigration) await db.exec(companySurfaceFinalizeMigration);
   return db;
 }
 
@@ -289,6 +306,52 @@ class PGliteMonitoringRepository implements MonitoringRepository {
 }
 
 describe("Auterim migration and monitoring transaction", () => {
+  it("backfills existing discovery evidence before validating surface provenance", async () => {
+    const db = await makeDatabase(false);
+    const userId = "11111111-1111-4111-8111-111111111111";
+    const workspaceId = "22222222-2222-4222-8222-222222222222";
+    const companyId = "33333333-3333-4333-8333-333333333333";
+    await db.query("insert into auth.users(id) values ($1)", [userId]);
+    await db.query(
+      "insert into public.workspaces(id,name,created_by) values ($1,'Old workspace',$2)",
+      [workspaceId, userId],
+    );
+    await db.query(
+      "insert into public.companies(id,workspace_id,name,slug) values ($1,$2,'Old company','old-company')",
+      [companyId, workspaceId],
+    );
+    const run = await db.query<{ id: string }>(
+      `insert into public.dependency_discovery_runs (
+        workspace_id,company_id,website_url,trigger_run_id,attempt_number
+      ) values ($1,$2,'https://old-company.example/','pre-surface-run',1) returning id`,
+      [workspaceId, companyId],
+    );
+    await db.query(
+      `insert into public.dependency_discovery_evidence (
+        workspace_id,run_id,provider_slug,signature_key,signal_type,strength,source_origin
+      ) values ($1,$2,'stripe','old-stripe-sdk','script_host','strong','https://api.stripe.com')`,
+      [workspaceId, run.rows[0]!.id],
+    );
+    await db.query(
+      `insert into public.dependency_discovery_evidence (
+        workspace_id,run_id,provider_slug,signature_key,signal_type,strength,source_origin
+      ) values ($1,$2,'stripe','old-stripe-ipv6','script_host','strong','https://[2606:4700:4700::1111]')`,
+      [workspaceId, run.rows[0]!.id],
+    );
+
+    await db.exec(companySurfaceMigration);
+    await db.exec(companySurfaceFinalizeMigration);
+    const backfilled = await db.query<{ surface_host: string; surface_type: string }>(
+      "select surface_host,surface_type from public.dependency_discovery_evidence where run_id=$1 order by signature_key",
+      [run.rows[0]!.id],
+    );
+    expect(backfilled.rows).toEqual([
+      { surface_host: "[2606:4700:4700::1111]", surface_type: "ROOT_MARKETING" },
+      { surface_host: "api.stripe.com", surface_type: "ROOT_MARKETING" },
+    ]);
+    await db.close();
+  });
+
   let db: PGlite;
   let repository: PGliteMonitoringRepository;
   let sourceId: string;
@@ -300,6 +363,27 @@ describe("Auterim migration and monitoring transaction", () => {
       `select source.id from public.source_catalog source join public.dependency_catalog dependency on dependency.id=source.dependency_id where dependency.slug='openai'`,
     );
     sourceId = result.rows[0]!.id;
+  });
+
+  it("stores bounded surface provenance under the existing tenant RLS boundary", async () => {
+    const result = await db.query<{
+      row_security: boolean;
+      surface_type: boolean;
+      surface_host: boolean;
+    }>(
+      `select cls.relrowsecurity as row_security,
+        exists(select 1 from information_schema.columns where table_schema='public' and table_name='dependency_discovery_evidence' and column_name='surface_type') as surface_type,
+        exists(select 1 from information_schema.columns where table_schema='public' and table_name='dependency_discovery_evidence' and column_name='surface_host') as surface_host
+       from pg_class cls where cls.oid='public.dependency_discovery_evidence'::regclass`,
+    );
+    expect(result.rows[0]).toEqual({ row_security: true, surface_type: true, surface_host: true });
+    await expect(
+      db.query(
+        `insert into public.dependency_discovery_evidence
+          (workspace_id,run_id,provider_slug,signature_key,signal_type,strength,source_origin,surface_type,surface_host)
+         values ('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002','openai','bad-host','api_endpoint','strong','https://example.com','PRODUCT_APP','https://example.com/path')`,
+      ),
+    ).rejects.toBeTruthy();
   });
 
   it("applies the migration and enforces tenant isolation and global write boundaries", async () => {
@@ -574,7 +658,7 @@ describe("Auterim migration and monitoring transaction", () => {
     await db.query(
       `select public.complete_url_dependency_discovery_run(
         $1,$2,$3,'completed',null,false,0,0,
-        '[{"provider_slug":"stripe","signature_key":"stripe-js-v3","signal_type":"script_host","strength":"strong","source_origin":"https://discovery.example"}]'::jsonb,
+        '[{"provider_slug":"stripe","signature_key":"stripe-js-v3","signal_type":"script_host","strength":"strong","source_origin":"https://discovery.example","surface_type":"ROOT_MARKETING","surface_host":"discovery.example"}]'::jsonb,
         '[{"provider_slug":"stripe","confidence":0.72,"confidence_label":"medium","evidence_summary":[{"signatureKey":"stripe-js-v3"}]}]'::jsonb,
         '{"outcome":"complete"}'::jsonb
       )`,
@@ -592,16 +676,24 @@ describe("Auterim migration and monitoring transaction", () => {
     ].entries()) {
       await db.query(
         `insert into public.dependency_discovery_evidence (
-          workspace_id,run_id,provider_slug,signature_key,signal_type,strength,source_origin
-        ) values ($1,$2,'stripe',$3,$4,'medium','https://discovery.example')`,
+          workspace_id,run_id,provider_slug,signature_key,signal_type,strength,source_origin,surface_type,surface_host
+        ) values ($1,$2,'stripe',$3,$4,'medium','https://discovery.example','ROOT_MARKETING','discovery.example')`,
         [workspaceId, run.rows[0]!.id, `m11-signal-${index}`, signalType],
       );
     }
     await expect(
       db.query(
         `insert into public.dependency_discovery_evidence (
-          workspace_id,run_id,provider_slug,signature_key,signal_type,strength,source_origin
-        ) values ($1,$2,'stripe','m11-unknown-signal','unknown_type','medium','https://discovery.example')`,
+          workspace_id,run_id,provider_slug,signature_key,signal_type,strength,source_origin,surface_type,surface_host
+        ) values ($1,$2,'stripe','m11-unknown-signal','unknown_type','medium','https://discovery.example','ROOT_MARKETING','discovery.example')`,
+        [workspaceId, run.rows[0]!.id],
+      ),
+    ).rejects.toBeTruthy();
+    await expect(
+      db.query(
+        `insert into public.dependency_discovery_evidence (
+          workspace_id,run_id,provider_slug,signature_key,signal_type,strength,source_origin,surface_type,surface_host
+        ) values ($1,$2,'stripe','m11-mismatched-host','resource_host','medium','https://api.stripe.com','PRODUCT_APP','discovery.example')`,
         [workspaceId, run.rows[0]!.id],
       ),
     ).rejects.toBeTruthy();

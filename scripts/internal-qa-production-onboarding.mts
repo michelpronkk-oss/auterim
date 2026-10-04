@@ -6,7 +6,19 @@ type QaSupabaseClient = SupabaseClient;
 
 const expectedProjectRef = "lnljaacbptrubppoypaz";
 const productionOrigin = "https://auterim.com";
-const websiteUrl = "https://cal.com/";
+const requestedWebsiteUrl = process.env.AUTERIM_INTERNAL_QA_WEBSITE_URL ?? "https://cal.com/";
+const websiteUrlParsed = new URL(requestedWebsiteUrl);
+const allowedQaHosts = new Set(["cal.com", "www.cal.com", "trustmrr.com", "www.trustmrr.com"]);
+if (
+  websiteUrlParsed.protocol !== "https:" ||
+  !allowedQaHosts.has(websiteUrlParsed.hostname) ||
+  websiteUrlParsed.pathname !== "/" ||
+  websiteUrlParsed.search ||
+  websiteUrlParsed.hash
+) {
+  throw new Error("unsupported_production_qa_website");
+}
+const websiteUrl = `${websiteUrlParsed.origin}/`;
 const timestamp = new Date()
   .toISOString()
   .replace(/[-:.TZ]/g, "")

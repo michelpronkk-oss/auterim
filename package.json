@@ -15,7 +15,7 @@
     "test:run": "vitest run",
     "eval:semantic": "vitest run tests/classification.test.ts",
     "eval:semantic:live": "vitest run --config vitest.live.config.mts",
-    "eval:discovery": "vitest run tests/discovery.test.ts tests/streaming-html.test.ts tests/runtime-browser.test.ts tests/runtime-browser-egress.test.ts tests/monitoring.test.ts",
+    "eval:discovery": "vitest run tests/discovery.test.ts tests/company-surfaces.test.ts tests/streaming-html.test.ts tests/runtime-browser.test.ts tests/runtime-browser-egress.test.ts tests/monitoring.test.ts",
     "eval:discovery:live": "vitest run --config vitest.discovery-live.config.mts",
     "eval:impact": "vitest run tests/impact.test.ts",
     "eval:impact:live": "vitest run --config vitest.impact-live.config.mts",
@@ -41,6 +41,7 @@
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "resend": "6.32.0",
+    "tldts": "^7.4.16",
     "zod": "4.6.5"
   },
   "devDependencies": {

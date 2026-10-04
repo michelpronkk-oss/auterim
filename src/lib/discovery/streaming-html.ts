@@ -26,6 +26,8 @@ export type RawStreamingReferences = {
   inlineConfigLimitReached: boolean;
 };
 
+export type SurfaceLinkReference = { url: string; labelKind: "app_cta" | "auth_cta" | "other" };
+
 const CONFIG_ID =
   /^(?:__(?:app|runtime|public|client|provider)?[-_]?config__|(?:app|runtime|public|client|provider)?[-_]?config)$/i;
 const CONFIG_META_KEY =
@@ -46,6 +48,7 @@ export class StreamingHtmlReferenceExtractor {
   private readonly formActions = new Set<string>();
   private readonly manifests = new Set<string>();
   private readonly inlineConfigUrls = new Set<string>();
+  private readonly surfaceLinks = new Map<string, SurfaceLinkReference["labelKind"]>();
   private readonly parser: Parser;
   private inlineConfigScript = false;
   private inlineConfigBuffer = "";
@@ -58,6 +61,9 @@ export class StreamingHtmlReferenceExtractor {
   private inlineConfigLimitReached = false;
   private finished = false;
   private bytesWritten = 0;
+  private activeAnchorHref: string | null = null;
+  private activeAnchorText = "";
+  private insideIgnoredTextTag = false;
 
   constructor(
     private readonly limits: StreamingReferenceLimits,
@@ -112,6 +118,7 @@ export class StreamingHtmlReferenceExtractor {
       formActionUrls: normalize(this.formActions, this.limits.maxReferences),
       manifestUrls: normalize(this.manifests, 1),
       inlineConfigUrls: [...this.inlineConfigUrls].slice(0, this.limits.maxInlineConfigUrls),
+      surfaceLinks: [...this.surfaceLinks].map(([url, labelKind]) => ({ url, labelKind })),
       nodesVisited: this.nodesVisited,
       nodeLimitReached: this.nodeLimitReached,
       referenceLimitReached: this.referenceLimitReached,
@@ -158,7 +165,13 @@ export class StreamingHtmlReferenceExtractor {
       this.parser.pause();
       return;
     }
+    if (name === "script" || name === "style" || name === "noscript")
+      this.insideIgnoredTextTag = true;
     if (name === "base" && this.baseHref === null && attrs.href) this.baseHref = attrs.href;
+    if (name === "a" && attrs.href && this.surfaceLinks.size < 64) {
+      this.activeAnchorHref = attrs.href;
+      this.activeAnchorText = "";
+    }
     if (name === "script") {
       const source = attrs.src;
       const type = (attrs.type ?? "").toLowerCase();
@@ -205,6 +218,9 @@ export class StreamingHtmlReferenceExtractor {
   }
 
   private onText(text: string) {
+    if (this.activeAnchorHref && !this.insideIgnoredTextTag && this.activeAnchorText.length < 160) {
+      this.activeAnchorText += text.slice(0, 160 - this.activeAnchorText.length);
+    }
     if (!this.inlineConfigScript || !text) return;
     const bytes = Buffer.byteLength(text, "utf8");
     const remaining = this.limits.maxInlineConfigBytes - this.inlineConfigBytes;
@@ -222,6 +238,26 @@ export class StreamingHtmlReferenceExtractor {
   }
 
   private onCloseTag(name: string) {
+    if (name === "script" || name === "style" || name === "noscript")
+      this.insideIgnoredTextTag = false;
+    if (name === "a" && this.activeAnchorHref) {
+      const normalized = this.normalizeUrl(this.activeAnchorHref, this.documentUrl);
+      if (normalized && !this.surfaceLinks.has(normalized)) {
+        const words = this.activeAnchorText
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, " ")
+          .trim();
+        const labelKind =
+          /\b(open|launch|go to|visit|use) (the )?(app|product|dashboard|workspace)\b/.test(words)
+            ? "app_cta"
+            : /\b(sign in|log in|login|authenticate)\b/.test(words)
+              ? "auth_cta"
+              : "other";
+        this.surfaceLinks.set(normalized, labelKind);
+      }
+      this.activeAnchorHref = null;
+      this.activeAnchorText = "";
+    }
     if (name !== "script" || !this.inlineConfigScript) return;
     if (this.onInlineConfig(this.inlineConfigBuffer, this.inlineConfigUrls)) {
       this.inlineConfigLimitReached = true;

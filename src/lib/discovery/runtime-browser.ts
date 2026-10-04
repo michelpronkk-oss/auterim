@@ -3,7 +3,11 @@ import { chromium, type Browser, type BrowserContext, type Page, type Route } fr
 import { createServer, type Server, type Socket } from "node:net";
 import { performance } from "node:perf_hooks";
 import { fetchHttpSource, SafeFetchError, type FetchResult } from "@/lib/monitoring/fetcher";
-import type { RuntimeDiscoveryResult, RuntimeRequestObservation } from "@/lib/discovery/discovery";
+import type {
+  DiscoveryRuntimeBudget,
+  RuntimeDiscoveryResult,
+  RuntimeRequestObservation,
+} from "@/lib/discovery/discovery";
 
 export const runtimeDiscoveryLimits = {
   maxDurationMs: 8_000,
@@ -27,6 +31,7 @@ type RuntimeBrowserDependencies = {
     FetchResult,
     "status" | "body" | "bytesRead" | "wireBytesRead" | "bodyTruncated" | "contentType" | "finalUrl"
   >;
+  sharedBudget?: DiscoveryRuntimeBudget;
 };
 
 type DenyProxy = { url: string; close: () => Promise<void> };
@@ -303,7 +308,11 @@ export async function inspectPublicLandingPage(
       }
       if (
         requestsObserved >= runtimeDiscoveryLimits.maxRequests ||
-        (!hosts.has(target.hostname) && hosts.size >= runtimeDiscoveryLimits.maxHosts)
+        (!hosts.has(target.hostname) && hosts.size >= runtimeDiscoveryLimits.maxHosts) ||
+        (dependencies.sharedBudget &&
+          (dependencies.sharedBudget.requests >= dependencies.sharedBudget.maxRequests ||
+            (!dependencies.sharedBudget.hosts.has(target.hostname) &&
+              dependencies.sharedBudget.hosts.size >= dependencies.sharedBudget.maxHosts)))
       ) {
         bounded = true;
         requestsBlocked += 1;
@@ -316,15 +325,29 @@ export async function inspectPublicLandingPage(
         await route.abort("blockedbyclient").catch(() => undefined);
         return;
       }
-      const remainingBytes =
-        runtimeDiscoveryLimits.maxTotalResponseBytes - totalResponseBytes - reservedResponseBytes;
+      const sharedResponseRemaining = dependencies.sharedBudget
+        ? dependencies.sharedBudget.maxResponseBytes -
+          dependencies.sharedBudget.responseBytes -
+          dependencies.sharedBudget.reservedResponseBytes
+        : Number.POSITIVE_INFINITY;
+      const remainingBytes = Math.min(
+        runtimeDiscoveryLimits.maxTotalResponseBytes - totalResponseBytes - reservedResponseBytes,
+        sharedResponseRemaining,
+      );
       const byteBudget = Math.min(maxResponseBytes(resourceType), remainingBytes);
       const usesInitialDocument =
         !initialDocumentUsed &&
         resourceType === "document" &&
         dependencies.initialDocument?.finalUrl === target.href;
-      const remainingWireBytes =
-        runtimeDiscoveryLimits.maxTotalWireBytes - totalWireBytes - reservedWireBytes;
+      const sharedWireRemaining = dependencies.sharedBudget
+        ? dependencies.sharedBudget.maxWireBytes -
+          dependencies.sharedBudget.wireBytes -
+          dependencies.sharedBudget.reservedWireBytes
+        : Number.POSITIVE_INFINITY;
+      const remainingWireBytes = Math.min(
+        runtimeDiscoveryLimits.maxTotalWireBytes - totalWireBytes - reservedWireBytes,
+        sharedWireRemaining,
+      );
       const wireByteBudget = usesInitialDocument
         ? 0
         : Math.min(Math.max(byteBudget * 2, 64 * 1024), 4 * 1024 * 1024, remainingWireBytes);
@@ -336,6 +359,12 @@ export async function inspectPublicLandingPage(
       }
       requestsObserved += 1;
       hosts.add(target.hostname);
+      if (dependencies.sharedBudget) {
+        dependencies.sharedBudget.requests += 1;
+        dependencies.sharedBudget.hosts.add(target.hostname);
+        dependencies.sharedBudget.reservedResponseBytes += byteBudget;
+        dependencies.sharedBudget.reservedWireBytes += wireByteBudget;
+      }
       inFlight += 1;
       reservedResponseBytes += byteBudget;
       reservedWireBytes += wireByteBudget;
@@ -376,6 +405,10 @@ export async function inspectPublicLandingPage(
         wireBytesCharged = initialDocumentResponse
           ? 0
           : Math.min(wireByteBudget, response.wireBytesRead ?? response.bytesRead);
+        if (dependencies.sharedBudget) {
+          dependencies.sharedBudget.responseBytes += response.bytesRead;
+          dependencies.sharedBudget.wireBytes += wireBytesCharged;
+        }
         if (response.bodyTruncated) bounded = true;
         if (response.contentType && response.body.byteLength > 0) {
           observations.set(`${target.hostname}:${resourceType}`, {
@@ -414,6 +447,12 @@ export async function inspectPublicLandingPage(
         // responses), since the fetcher may have consumed bytes before throwing.
         if (!completedFetch) totalResponseBytes += byteBudget;
         totalWireBytes += wireBytesCharged;
+        if (dependencies.sharedBudget) {
+          if (!completedFetch) dependencies.sharedBudget.responseBytes += byteBudget;
+          dependencies.sharedBudget.wireBytes += wireBytesCharged;
+          dependencies.sharedBudget.reservedResponseBytes -= byteBudget;
+          dependencies.sharedBudget.reservedWireBytes -= wireByteBudget;
+        }
         reservedResponseBytes -= byteBudget;
         reservedWireBytes -= wireByteBudget;
         inFlight -= 1;

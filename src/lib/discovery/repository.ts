@@ -66,7 +66,10 @@ export class SupabaseUrlDiscoveryRepository {
       p_deep_pass_requested: result.deepPass.requested,
       p_deep_scripts_fetched: result.deepPass.scriptsFetched,
       p_deep_bytes_fetched: result.deepPass.bytesFetched,
-      p_coverage: result.coverage,
+      p_coverage: {
+        ...result.coverage,
+        ...(result.companyCoverage ? { company: result.companyCoverage } : {}),
+      },
       p_evidence: result.evidence.map(evidenceRpcRow),
       p_candidates: result.candidates.map(candidateRpcRow),
     });
@@ -91,6 +94,8 @@ function evidenceRpcRow(item: DiscoveryEvidence) {
     signal_type: item.signalType,
     strength: item.strength,
     source_origin: item.sourceOrigin,
+    surface_type: item.surfaceType,
+    surface_host: item.surfaceHost,
   };
 }
 
@@ -104,10 +109,14 @@ function candidateRpcRow(candidate: DiscoveryCandidate) {
 }
 
 function evidenceSummary(evidence: DiscoveryEvidence[]) {
-  return evidence.slice(0, 50).map(({ signatureKey, signalType, strength, sourceOrigin }) => ({
-    signatureKey,
-    signalType,
-    strength,
-    sourceOrigin,
-  }));
+  return evidence
+    .slice(0, 50)
+    .map(({ signatureKey, signalType, strength, sourceOrigin, surfaceType, surfaceHost }) => ({
+      signatureKey,
+      signalType,
+      strength,
+      sourceOrigin,
+      surfaceType,
+      surfaceHost,
+    }));
 }
