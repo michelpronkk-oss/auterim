@@ -676,9 +676,10 @@ function IdleDemo({ dt, dPhase }: { dt: number; dPhase: number }) {
               transform: r.shown ? "none" : "translateY(8px)",
               maxHeight: r.shown ? 160 : 0,
               marginBottom: r.shown ? 8 : 0,
+              // Inset rings stay inside the row, so the panel edge never clips them.
               boxShadow: r.covered
-                ? "0 0 0 1.5px rgba(47,91,216,.45)"
-                : "0 0 0 1px rgba(14,27,46,.08)",
+                ? "inset 0 0 0 1.5px rgba(47,91,216,.45)"
+                : "inset 0 0 0 1px rgba(14,27,46,.08)",
             }}
           >
             <div className={s.demoRowMain}>
