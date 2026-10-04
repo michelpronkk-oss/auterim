@@ -159,11 +159,20 @@ export function ChangeInbox() {
 }
 
 /** Dependency map with a selectable provider and its monitored sources. */
+/** Short status words for the two-column phone tiles. */
+const tileStatus = {
+  protected: "Protected",
+  watching: "Watching",
+  change: "Changed",
+  review: "Review",
+};
+
 export function DependencyMap() {
   const [selected, setSelected] = useState("OpenAI");
   const status = mapStatusStyle[mapStatus[selected]];
   const sources = catalog[selected][1];
-  const item = (name: string, compact: boolean) => {
+  const needsYou = Object.values(mapStatus).filter((v) => v === "change" || v === "review").length;
+  const item = (name: string) => {
     const st = mapStatusStyle[mapStatus[name]];
     const on = selected === name;
     return (
@@ -175,22 +184,13 @@ export function DependencyMap() {
         onClick={() => setSelected(name)}
       >
         <ProviderMark provider={name} size={26} />
-        {compact ? (
-          <>
-            <span className={s.mapItemNameWide}>{name}</span>
-            <span className={s.mapItemStatus} style={{ color: st.color }}>
-              {st.glyph} {st.label}
-            </span>
-          </>
-        ) : (
-          <span className={s.rowText}>
-            <span className={s.mapItemName}>{name}</span>
-            <span className={s.mapItemStatus} style={{ color: st.color }}>
-              <span>{st.glyph}</span>
-              {st.label}
-            </span>
+        <span className={s.rowText}>
+          <span className={s.mapItemName}>{name}</span>
+          <span className={s.mapItemStatus} style={{ color: st.color }}>
+            <span>{st.glyph}</span>
+            {st.label}
           </span>
-        )}
+        </span>
       </button>
     );
   };
@@ -233,21 +233,48 @@ export function DependencyMap() {
               style={{ left: `${g.left}%`, top: `${g.top}%` }}
             >
               <span className={s.mapGroupName}>{g.name}</span>
-              {g.items.map((name) => item(name, false))}
+              {g.items.map((name) => item(name))}
             </div>
           ))}
         </div>
+        {/* Phones: one header for the company, then every dependency as a tile in a grid. */}
         <div className={s.mapNarrow}>
           <div className={s.mapNarrowRoot}>
-            <BrandMark size={20} tone="dark" />
-            <span>Your company</span>
-          </div>
-          {mapGroups.map((g) => (
-            <div key={g.name} className={s.mapNarrowGroup}>
-              <span className={s.mapGroupName}>{g.name}</span>
-              {g.items.map((name) => item(name, true))}
+            <BrandMark size={22} tone="dark" />
+            <div className={s.rowText}>
+              <span className={s.mapCenterName}>Your company</span>
+              <span className={s.mapCenterMeta}>7 dependencies</span>
             </div>
-          ))}
+            <span className={s.mapNeeds}>
+              <span aria-hidden="true" className={s.mapNeedsDot} />
+              {needsYou} need you
+            </span>
+          </div>
+          <div className={s.mapTiles}>
+            {mapGroups.flatMap((g) =>
+              g.items.map((name) => {
+                const st = mapStatusStyle[mapStatus[name]];
+                const on = selected === name;
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    aria-pressed={on}
+                    className={on ? `${s.mapTile} ${s.mapTileOn}` : s.mapTile}
+                    onClick={() => setSelected(name)}
+                  >
+                    <ProviderMark provider={name} size={30} />
+                    <span className={s.rowText}>
+                      <span className={s.mapTileName}>{name}</span>
+                      <span className={s.mapTileStatus} style={{ color: st.color }}>
+                        {st.glyph} {tileStatus[mapStatus[name]]}
+                      </span>
+                    </span>
+                  </button>
+                );
+              }),
+            )}
+          </div>
         </div>
       </div>
       <div className={s.mapSide} aria-live="polite">

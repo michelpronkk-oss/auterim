@@ -2351,12 +2351,6 @@
   font-weight: 500;
   color: var(--ink);
 }
-.mapItemNameWide {
-  flex: 1;
-  font-size: 13.5px;
-  font-weight: 500;
-  color: var(--ink);
-}
 .mapItemStatus {
   display: flex;
   align-items: center;
@@ -2367,21 +2361,90 @@
 .mapNarrowRoot {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 12px 14px;
+  gap: 12px;
+  padding: 14px 14px 14px 16px;
   border-radius: 14px;
-  background: var(--navy);
+  background:
+    radial-gradient(120% 140% at 0% 0%, rgba(79, 125, 243, 0.28), transparent 55%), var(--navy);
   color: var(--cream);
-  font-size: 15px;
-  font-weight: 500;
+  box-shadow: 0 16px 32px -20px rgba(11, 22, 38, 0.7);
 }
-.mapNarrowGroup {
-  display: flex;
-  flex-direction: column;
+.mapNeeds {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
-  margin-left: 14px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(217, 165, 74, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(217, 165, 74, 0.3);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: #e6b866;
+  white-space: nowrap;
+}
+.mapNeedsDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #e6b866;
+  animation: pulse 2s ease-in-out infinite;
+}
+.mapTiles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+@media (min-width: 600px) {
+  .mapTiles {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+.mapTiles > .mapTile:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+.mapTile {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
   padding: 10px;
-  border-left: 1px dashed rgba(14, 27, 46, 0.2);
+  border: 0;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(14, 27, 46, 0.08);
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    box-shadow 0.2s,
+    background 0.2s,
+    transform 0.15s;
+}
+.mapTile:active {
+  transform: scale(0.97);
+}
+.mapTileOn {
+  background: #f3f6fe;
+  box-shadow:
+    0 0 0 1.5px var(--blue),
+    0 10px 24px -14px rgba(47, 91, 216, 0.6);
+}
+.mapTileName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.mapTileStatus {
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 9.5px;
 }
 .mapSide {
   min-width: 0;
@@ -3588,5 +3651,32 @@ button.orbitTile:focus-visible {
 @media (max-width: 899px) {
   .catalogTabs {
     display: none;
+  }
+}
+
+/* ---------- 07: phone map ---------- */
+/* The phone panel lists sources as a quiet ruled list instead of boxed rows. */
+@media (max-width: 899px) {
+  .legend {
+    display: none !important;
+  }
+
+  .mapSide {
+    gap: 10px;
+    padding: 18px;
+  }
+  .mapSideList {
+    gap: 0;
+  }
+  .mapSideRow {
+    align-items: center;
+    padding: 11px 2px;
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+    border-top: 1px solid rgba(143, 163, 194, 0.14);
+  }
+  .mapSideFoot {
+    padding-top: 4px;
   }
 }
