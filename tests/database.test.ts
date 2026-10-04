@@ -154,6 +154,15 @@ const runtimeDiscoveryMigration = await readFile(
   ),
   "utf8",
 );
+const onboardingWorkspaceIdempotencyMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261013000000_prevent_implicit_multiple_onboarding_workspaces.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase() {
   const db = new PGlite();
@@ -187,6 +196,7 @@ async function makeDatabase() {
   await db.exec(partialDiscoveryMigration);
   await db.exec(discoveryOutcomeConsistencyMigration);
   await db.exec(runtimeDiscoveryMigration);
+  await db.exec(onboardingWorkspaceIdempotencyMigration);
   return db;
 }
 

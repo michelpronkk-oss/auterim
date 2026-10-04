@@ -15,6 +15,8 @@ const migrationPaths = [
   "20261005010000_preflight_claim_privilege_hardening.sql",
   "20261006000000_auth_accounts_billing_entitlements.sql",
   "20261007000000_protection_value_notifications.sql",
+  "20261012000000_runtime_dependency_discovery.sql",
+  "20261013000000_prevent_implicit_multiple_onboarding_workspaces.sql",
 ];
 const migrations = await Promise.all(
   migrationPaths.map((name) =>
@@ -105,6 +107,81 @@ async function addClassifiedChange(
 }
 
 describe("onboarding activation backend", () => {
+  it("keeps first-time onboarding to one workspace and one canonical company", async () => {
+    const db = await database();
+    await db.query("insert into auth.users(id) values ($1)", [ownerId]);
+    await asUser(db, ownerId);
+
+    const first = await start(db, "one-workspace-first-submit");
+    const replay = await start(db, "one-workspace-first-submit");
+    expect(replay).toMatchObject({
+      workspaceId: first.workspaceId,
+      companyId: first.companyId,
+      replayed: true,
+    });
+
+    await expect(
+      db.query(
+        `select public.start_workspace_onboarding(
+          $1,'Changed workspace','Changed Inc','https://changed.example/','changed.example','one-workspace-new-key',null
+        )`,
+        [ownerId],
+      ),
+    ).rejects.toThrow();
+    await expect(
+      db.query(
+        `select public.start_workspace_onboarding(
+          $1,'Changed workspace','Changed Inc','https://example.com/','example.com','one-workspace-first-submit',null
+        )`,
+        [ownerId],
+      ),
+    ).rejects.toThrow();
+
+    const resumed = await db.query<{ value: Record<string, unknown> }>(
+      `select public.start_workspace_onboarding(
+        $1,'Changed workspace','Changed Inc','https://example.com/','example.com','one-workspace-explicit-resume',$2
+      ) as value`,
+      [ownerId, first.workspaceId],
+    );
+    expect(resumed.rows[0]!.value).toMatchObject({
+      workspaceId: first.workspaceId,
+      companyId: first.companyId,
+      replayed: false,
+    });
+
+    const counts = await db.query<{ workspaces: number; owners: number; companies: number }>(
+      `select
+        (select count(*)::int from public.workspaces where created_by=$1) as workspaces,
+        (select count(*)::int from public.workspace_members where user_id=$1 and role='owner') as owners,
+        (select count(*)::int from public.companies where workspace_id=$2) as companies`,
+      [ownerId, first.workspaceId],
+    );
+    expect(counts.rows[0]).toEqual({ workspaces: 1, owners: 1, companies: 1 });
+    await db.close();
+  });
+
+  it("serializes concurrent first-time submissions with different retry keys", async () => {
+    const db = await database();
+    await db.query("insert into auth.users(id) values ($1)", [ownerId]);
+    await asUser(db, ownerId);
+
+    const attempts = await Promise.allSettled([
+      start(db, "concurrent-workspace-submit-a"),
+      start(db, "concurrent-workspace-submit-b"),
+    ]);
+    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+    expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
+    const counts = await db.query<{ workspaces: number; owners: number; companies: number }>(
+      `select
+        (select count(*)::int from public.workspaces where created_by=$1) as workspaces,
+        (select count(*)::int from public.workspace_members where user_id=$1 and role='owner') as owners,
+        (select count(*)::int from public.companies c join public.workspaces w on w.id=c.workspace_id where w.created_by=$1) as companies`,
+      [ownerId],
+    );
+    expect(counts.rows[0]).toEqual({ workspaces: 1, owners: 1, companies: 1 });
+    await db.close();
+  });
+
   it("resumes from a partial discovery that predates the onboarding row", async () => {
     const db = await database();
     await db.query("insert into auth.users(id) values ($1)", [ownerId]);

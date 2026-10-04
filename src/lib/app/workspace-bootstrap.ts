@@ -14,3 +14,10 @@ export function resolveWorkspaceBootstrapState(input: {
   if (input.selectedWorkspaceActive === undefined) return "LOADING";
   return input.selectedWorkspaceActive ? "READY" : "NEEDS_ONBOARDING";
 }
+
+export function shouldShowWorkspaceSelector(input: {
+  workspaceCount: number;
+  selectedWorkspaceActive: boolean;
+}) {
+  return input.selectedWorkspaceActive && input.workspaceCount > 1;
+}

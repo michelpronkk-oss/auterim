@@ -7,6 +7,7 @@ import type { FormEvent } from "react";
 import { z } from "zod";
 import type { Session } from "@supabase/supabase-js";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { shouldShowWorkspaceSelector } from "@/lib/app/workspace-bootstrap";
 import {
   PLAN_CATALOG,
   type PlanSlug,
@@ -1360,7 +1361,10 @@ export function AccountPanel({
               canManageWorkspace={account?.role === "owner" || account?.role === "admin"}
             />
           )}
-        {workspaces.length > 1 && (
+        {shouldShowWorkspaceSelector({
+          workspaceCount: workspaces.length,
+          selectedWorkspaceActive: Boolean(account?.onboarding.activation),
+        }) && (
           <label className="workspace-select">
             Workspace
             <select
