@@ -96,22 +96,6 @@
     transform: rotate(360deg);
   }
 }
-@keyframes sweep {
-  0% {
-    left: -20%;
-    opacity: 0;
-  }
-  15% {
-    opacity: 1;
-  }
-  85% {
-    opacity: 1;
-  }
-  100% {
-    left: 100%;
-    opacity: 0;
-  }
-}
 @keyframes streamUp {
   from {
     transform: translateY(0);
@@ -698,6 +682,107 @@
   grid-area: 1 / 1;
   min-width: 0;
 }
+/* The live layer fills the reserved height and pins its footer, so rows arriving never move it. */
+.panelLayer {
+  display: flex;
+  flex-direction: column;
+}
+/* Only the ghosts size the panel; the idle demo's loop can never grow it, even mid-transition. */
+.panelLayer:has(> .stageCol > .demoHead) {
+  contain: size;
+  overflow: hidden;
+}
+.panelLayer > .stageCol {
+  flex: 1;
+}
+.panelLayer .stageFoot {
+  margin-top: auto;
+}
+.demoMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--slate-3);
+}
+.liveDot {
+  position: relative;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--blue-bright);
+}
+.liveDot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--blue-bright);
+  animation: livePing 1.8s ease-out infinite;
+}
+@keyframes livePing {
+  from {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+  to {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+/* Placeholder for the dependency being read: a quiet shimmer, not a scanner. */
+.demoSkeleton {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.6);
+  box-shadow: inset 0 0 0 1px rgba(14, 27, 46, 0.06);
+  animation: rise 0.4s ease-out both;
+}
+.demoSkeleton > span:first-child {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+}
+.demoSkeleton > span:last-child {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.demoSkeleton > span:last-child > span {
+  height: 8px;
+  border-radius: 4px;
+}
+.demoSkeleton > span:last-child > span:first-child {
+  width: 38%;
+}
+.demoSkeleton > span:last-child > span:last-child {
+  width: 62%;
+}
+.demoSkeleton > span:first-child,
+.demoSkeleton > span:last-child > span {
+  background: linear-gradient(
+      90deg,
+      rgba(14, 27, 46, 0.06) 0%,
+      rgba(14, 27, 46, 0.12) 40%,
+      rgba(14, 27, 46, 0.06) 80%
+    )
+    0 0 / 300% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+@keyframes shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
 .panelGhost {
   visibility: hidden;
   pointer-events: none;
@@ -705,25 +790,6 @@
 .panelGhost * {
   animation: none !important;
   transition: none !important;
-}
-.sweep {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 22%;
-  pointer-events: none;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(79, 125, 243, 0.12),
-    rgba(79, 125, 243, 0.28) 92%,
-    transparent
-  );
-  border-right: 1px solid rgba(47, 91, 216, 0.5);
-  animation: sweep 2.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
-}
-.sweepFast {
-  animation-duration: 2s;
 }
 .stageCol {
   display: flex;

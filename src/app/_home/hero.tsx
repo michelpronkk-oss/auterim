@@ -361,11 +361,13 @@ export function HeroAnalyzer() {
             </div>
           ))}
           <div aria-live="polite" className={s.panelLayer}>
-            {stage === "idle" ? <IdleDemo dt={dt} dPhase={dPhase} /> : null}
+            {/* Keyed per loop so each pass starts fresh instead of collapsing the last one. */}
+            {stage === "idle" ? (
+              <IdleDemo key={Math.floor(tick / 16)} dt={dt} dPhase={dPhase} />
+            ) : null}
 
             {stage === "analyzing" ? (
               <>
-                <span aria-hidden="true" className={`${s.sweep} ${s.sweepFast}`} />
                 <div className={s.analyzing}>
                   <span className={s.stageTitleLg}>Analyzing {domain}…</span>
                   <div className={s.checkList}>
@@ -657,10 +659,12 @@ function IdleDemo({ dt, dPhase }: { dt: number; dPhase: number }) {
         : "Each dependency expands into the sources Auterim will watch.";
   return (
     <div className={s.stageCol}>
-      {dPhase === 0 ? <span aria-hidden="true" className={s.sweep} /> : null}
       <div className={s.demoHead}>
         <span className={s.demoTitle}>{title}</span>
-        <span className={s.monoXs}>{meta}</span>
+        <span className={s.demoMeta}>
+          {dPhase === 0 ? <span aria-hidden="true" className={s.liveDot} /> : null}
+          {meta}
+        </span>
       </div>
       <div className={s.demoRows}>
         {rows.map((r) => (
@@ -710,6 +714,15 @@ function IdleDemo({ dt, dPhase }: { dt: number; dPhase: number }) {
             </div>
           </div>
         ))}
+        {dPhase === 0 && shownN < rows.length ? (
+          <div key={shownN} aria-hidden="true" className={s.demoSkeleton}>
+            <span />
+            <span>
+              <span />
+              <span />
+            </span>
+          </div>
+        ) : null}
       </div>
       <div className={s.stageFoot}>
         <span className={s.footNote}>{foot}</span>
