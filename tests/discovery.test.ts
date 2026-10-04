@@ -162,6 +162,57 @@ describe("offline URL dependency evaluation", () => {
     expect(result.candidates).toEqual([]);
   });
 
+  it.each([
+    ["Next.js", '<script src="/_next/static/chunks/app-a1.js"></script>', "nextjs"],
+    [
+      "React CDN",
+      '<script src="https://unpkg.com/react@19.0.0/umd/react.production.min.js"></script>',
+      "react",
+    ],
+    ["Tailwind CDN", '<script src="https://cdn.tailwindcss.com"></script>', "tailwindcss"],
+    ["Vite client", '<script type="module" src="/@vite/client"></script>', "vite"],
+    [
+      "WordPress generator + platform asset",
+      '<meta name="generator" content="WordPress 6.8"><link rel="stylesheet" href="/wp-content/themes/example/style.css">',
+      "wordpress",
+    ],
+  ])(
+    "records %s as technology observation, not a dependency suggestion",
+    async (_name, html, slug) => {
+      const result = await discover(html);
+      expect(result.technologyObservations?.map(({ technologySlug }) => technologySlug)).toContain(
+        slug,
+      );
+      expect(result.candidates).toEqual([]);
+    },
+  );
+
+  it.each([
+    "<p>Built with Next.js, React and Tailwind CSS.</p>",
+    '<script src="/_next/image?url=%2Fhero.png"></script>',
+    '<script src="https://cdn.tailwindcss.com.attacker.example"></script>',
+    '<script src="/not-next/static/chunks/app.js"></script>',
+  ])("does not infer a strong framework/library fingerprint from a near miss: %s", async (html) => {
+    const result = await discover(html);
+    expect(result.technologyObservations ?? []).toEqual([]);
+    expect(result.candidates).toEqual([]);
+  });
+
+  it("keeps a named Bootstrap stylesheet as weak, suppressed evidence", async () => {
+    const result = await discover('<link rel="stylesheet" href="/assets/bootstrap.css">');
+    expect(result.technologyObservations).toMatchObject([
+      {
+        technologySlug: "bootstrap",
+        evidenceFamily: "stylesheet_asset",
+        strength: "weak",
+        protectability: "non_protectable",
+        disposition: "suppressed",
+        suppressionReason: "LIBRARY",
+      },
+    ]);
+    expect(result.candidates).toEqual([]);
+  });
+
   it("deduplicates repeated copies of a registered signature", async () => {
     const result = await discover(
       '<script src="https://js.stripe.com/v3/"></script><script src="https://js.stripe.com/v3/"></script>',

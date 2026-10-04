@@ -178,6 +178,24 @@ const companySurfaceFinalizeMigration = await readFile(
   ),
   "utf8",
 );
+const technologyObservationMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261015000000_technology_observation_registry.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
+const technologyObservationReasonCodesMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261016000000_technology_observation_reason_codes.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase(applyCompanySurfaceMigration = true) {
   const db = new PGlite();
@@ -213,7 +231,11 @@ async function makeDatabase(applyCompanySurfaceMigration = true) {
   await db.exec(discoveryOutcomeConsistencyMigration);
   await db.exec(runtimeDiscoveryMigration);
   await db.exec(onboardingWorkspaceIdempotencyMigration);
-  if (applyCompanySurfaceMigration) await db.exec(companySurfaceFinalizeMigration);
+  if (applyCompanySurfaceMigration) {
+    await db.exec(companySurfaceFinalizeMigration);
+    await db.exec(technologyObservationMigration);
+    await db.exec(technologyObservationReasonCodesMigration);
+  }
   return db;
 }
 
@@ -341,6 +363,8 @@ describe("Auterim migration and monitoring transaction", () => {
 
     await db.exec(companySurfaceMigration);
     await db.exec(companySurfaceFinalizeMigration);
+    await db.exec(technologyObservationMigration);
+    await db.exec(technologyObservationReasonCodesMigration);
     const backfilled = await db.query<{ surface_host: string; surface_type: string }>(
       "select surface_host,surface_type from public.dependency_discovery_evidence where run_id=$1 order by signature_key",
       [run.rows[0]!.id],
@@ -660,10 +684,19 @@ describe("Auterim migration and monitoring transaction", () => {
         $1,$2,$3,'completed',null,false,0,0,
         '[{"provider_slug":"stripe","signature_key":"stripe-js-v3","signal_type":"script_host","strength":"strong","source_origin":"https://discovery.example","surface_type":"ROOT_MARKETING","surface_host":"discovery.example"}]'::jsonb,
         '[{"provider_slug":"stripe","confidence":0.72,"confidence_label":"medium","evidence_summary":[{"signatureKey":"stripe-js-v3"}]}]'::jsonb,
-        '{"outcome":"complete"}'::jsonb
+        '{"outcome":"complete"}'::jsonb,
+        '[{"technology_slug":"stripe","technology_name":"Stripe","category":"payments","fingerprint_id":"provider-stripe-js-v3","registry_version":"2026-10-04.1","evidence_family":"script_asset","strength":"strong","relationship":"optional_integration","protectability":"protectable","status":"supported","disposition":"suggested","suppression_reason":null,"surface_type":"ROOT_MARKETING","surface_host":"discovery.example","source_host":"discovery.example"}]'::jsonb
       )`,
       [run.rows[0]!.id, workspaceId, companyId],
     );
+    expect(
+      (
+        await db.query<{ fingerprint_id: string; registry_version: string }>(
+          "select fingerprint_id,registry_version from public.technology_observations where run_id=$1",
+          [run.rows[0]!.id],
+        )
+      ).rows,
+    ).toEqual([{ fingerprint_id: "provider-stripe-js-v3", registry_version: "2026-10-04.1" }]);
     for (const [index, signalType] of [
       "resource_host",
       "csp_host",
@@ -834,6 +867,15 @@ describe("Auterim migration and monitoring transaction", () => {
         ])
       ).rows,
     ).toHaveLength(0);
+    await expect(
+      db.query("select * from public.technology_observations where workspace_id=$1", [workspaceId]),
+    ).rejects.toBeTruthy();
+    await expect(
+      db.query(
+        "insert into public.technology_observations(workspace_id,run_id,technology_slug,technology_name,category,fingerprint_id,registry_version,evidence_family,strength,relationship,protectability,status,disposition,surface_type,surface_host,source_host) values ($1,$2,'nextjs','Next.js','framework','nextjs-static-script','2026-10-04.1','script_asset','strong','framework_for','non_protectable','strong','suppressed','ROOT_MARKETING','discovery.example','discovery.example')",
+        [workspaceId, run.rows[0]!.id],
+      ),
+    ).rejects.toBeTruthy();
     expect(
       (
         await db.query("select * from public.dependency_discovery_evidence where workspace_id=$1", [

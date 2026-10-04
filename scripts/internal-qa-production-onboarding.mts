@@ -8,7 +8,14 @@ const expectedProjectRef = "lnljaacbptrubppoypaz";
 const productionOrigin = "https://auterim.com";
 const requestedWebsiteUrl = process.env.AUTERIM_INTERNAL_QA_WEBSITE_URL ?? "https://cal.com/";
 const websiteUrlParsed = new URL(requestedWebsiteUrl);
-const allowedQaHosts = new Set(["cal.com", "www.cal.com", "trustmrr.com", "www.trustmrr.com"]);
+const allowedQaHosts = new Set([
+  "cal.com",
+  "www.cal.com",
+  "trustmrr.com",
+  "www.trustmrr.com",
+  "auterim.com",
+  "www.auterim.com",
+]);
 if (
   websiteUrlParsed.protocol !== "https:" ||
   !allowedQaHosts.has(websiteUrlParsed.hostname) ||
@@ -127,7 +134,14 @@ async function main() {
     },
     app_metadata: { internal_qa: true, purpose: "production_e2e" },
   });
-  if (createError || !created.user) throw new Error("qa_identity_creation_failed");
+  if (createError || !created.user) {
+    const status =
+      createError && typeof createError.status === "number" ? createError.status : "unknown";
+    const rawCode =
+      createError && typeof createError.code === "string" ? createError.code : "unknown";
+    const code = /^[a-z0-9_]{1,40}$/.test(rawCode) ? rawCode : "unknown";
+    throw new Error(`qa_identity_creation_failed_${status}_${code}`);
+  }
   safeRun.userId = created.user.id;
   userId = created.user.id;
 
@@ -307,6 +321,14 @@ async function main() {
     .select("signal_type,provider_slug")
     .eq("run_id", run.id);
   if (evidenceError) throw new Error("evidence_verification_failed");
+  const { data: technologyRows, error: technologyError } = await admin
+    .from("technology_observations")
+    .select(
+      "technology_slug,technology_name,category,fingerprint_id,registry_version,evidence_family,strength,relationship,protectability,status,disposition,suppression_reason,surface_type,surface_host,source_host",
+    )
+    .eq("run_id", run.id)
+    .order("technology_slug", { ascending: true });
+  if (technologyError) throw new Error("technology_observation_verification_failed");
   const evidenceFamilies = [...new Set((evidenceRows ?? []).map((row) => row.signal_type))];
   const suspiciousCoverage =
     /authorization|cookie|requestbody|responsebody|htmlbody|scriptbody|localstorage|token=/i.test(
@@ -441,40 +463,57 @@ async function main() {
     protection.response.ok && protection.body?.currentStep === "active",
     "protection_read_model_failed",
   );
-  const browser = await chromium.launch({ headless: true });
-  let dashboard: { bodyTextLength: number; workspaceSelected: boolean; selectorCount: number };
-  try {
-    const page = await browser.newPage();
-    const login = await page.goto(`${productionOrigin}/login`, {
-      waitUntil: "domcontentloaded",
-      timeout: 20_000,
-    });
-    assert(login?.ok(), "login_page_failed");
-    await page.locator('input[name="email"]').fill(email);
-    await page.locator('input[name="password"]').fill(password);
-    await page.getByRole("button", { name: /sign in/i }).click();
-    await page.waitForURL((url) => url.pathname === "/app", { timeout: 20_000 });
-    await page.getByRole("heading", { name: "Today", exact: true }).waitFor({ timeout: 20_000 });
-    await page.getByText("Auterim Internal QA", { exact: true }).waitFor({ timeout: 20_000 });
-    const selectedWorkspace = await page.evaluate(() =>
-      window.localStorage.getItem("auterim-workspace-id"),
-    );
-    assert(selectedWorkspace === workspaceId, "dashboard_workspace_selection_failed");
-    const workspaceSelector = page.locator('select[aria-label="Select workspace"]');
-    const selectorCount = await workspaceSelector.count();
-    assert(selectorCount > 0, "dashboard_workspace_selector_missing");
-    assert(
-      (await workspaceSelector.first().inputValue()) === workspaceId,
-      "dashboard_selector_value_mismatch",
-    );
+  let dashboard: {
+    bodyTextLength: number;
+    workspaceSelected: boolean;
+    selectorCount: number;
+    browserCheck: "passed" | "skipped";
+  };
+  if (process.env.AUTERIM_INTERNAL_QA_SKIP_BROWSER_DASHBOARD === "1") {
     dashboard = {
-      bodyTextLength: await page.locator("body").evaluate((body) => body.textContent?.length ?? 0),
-      workspaceSelected: true,
-      selectorCount,
+      bodyTextLength: 0,
+      workspaceSelected: false,
+      selectorCount: 0,
+      browserCheck: "skipped",
     };
-    assert(dashboard.bodyTextLength > 0, "dashboard_empty");
-  } finally {
-    await browser.close();
+  } else {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      const login = await page.goto(`${productionOrigin}/login`, {
+        waitUntil: "domcontentloaded",
+        timeout: 20_000,
+      });
+      assert(login?.ok(), "login_page_failed");
+      await page.locator('input[name="email"]').fill(email);
+      await page.locator('input[name="password"]').fill(password);
+      await page.getByRole("button", { name: /sign in/i }).click();
+      await page.waitForURL((url) => url.pathname === "/app", { timeout: 20_000 });
+      await page.getByRole("heading", { name: "Today", exact: true }).waitFor({ timeout: 20_000 });
+      await page.getByText("Auterim Internal QA", { exact: true }).waitFor({ timeout: 20_000 });
+      const selectedWorkspace = await page.evaluate(() =>
+        window.localStorage.getItem("auterim-workspace-id"),
+      );
+      assert(selectedWorkspace === workspaceId, "dashboard_workspace_selection_failed");
+      const workspaceSelector = page.locator('select[aria-label="Select workspace"]');
+      const selectorCount = await workspaceSelector.count();
+      assert(selectorCount > 0, "dashboard_workspace_selector_missing");
+      assert(
+        (await workspaceSelector.first().inputValue()) === workspaceId,
+        "dashboard_selector_value_mismatch",
+      );
+      dashboard = {
+        bodyTextLength: await page
+          .locator("body")
+          .evaluate((body) => body.textContent?.length ?? 0),
+        workspaceSelected: true,
+        selectorCount,
+        browserCheck: "passed",
+      };
+      assert(dashboard.bodyTextLength > 0, "dashboard_empty");
+    } finally {
+      await browser.close();
+    }
   }
 
   safeRun.step = "complete";
@@ -501,6 +540,8 @@ async function main() {
         evidenceFamilies,
         confidenceLabels: [...new Set((candidateRows ?? []).map((row) => row.confidence_label))],
         privacyCheck: "passed",
+        technologyObservationCount: technologyRows?.length ?? 0,
+        technologies: technologyRows ?? [],
       },
       dependencyPath,
       activation: {

@@ -19,6 +19,7 @@ export type RawStreamingReferences = {
   formActions: string[];
   manifests: string[];
   inlineConfigUrls: string[];
+  markupMarkers: string[];
   nodesVisited: number;
   nodeLimitReached: boolean;
   referenceLimitReached: boolean;
@@ -48,6 +49,7 @@ export class StreamingHtmlReferenceExtractor {
   private readonly formActions = new Set<string>();
   private readonly manifests = new Set<string>();
   private readonly inlineConfigUrls = new Set<string>();
+  private readonly markupMarkers = new Set<string>();
   private readonly surfaceLinks = new Map<string, SurfaceLinkReference["labelKind"]>();
   private readonly parser: Parser;
   private inlineConfigScript = false;
@@ -118,6 +120,7 @@ export class StreamingHtmlReferenceExtractor {
       formActionUrls: normalize(this.formActions, this.limits.maxReferences),
       manifestUrls: normalize(this.manifests, 1),
       inlineConfigUrls: [...this.inlineConfigUrls].slice(0, this.limits.maxInlineConfigUrls),
+      markupMarkers: [...this.markupMarkers].slice(0, 16),
       surfaceLinks: [...this.surfaceLinks].map(([url, labelKind]) => ({ url, labelKind })),
       nodesVisited: this.nodesVisited,
       nodeLimitReached: this.nodeLimitReached,
@@ -168,6 +171,10 @@ export class StreamingHtmlReferenceExtractor {
     if (name === "script" || name === "style" || name === "noscript")
       this.insideIgnoredTextTag = true;
     if (name === "base" && this.baseHref === null && attrs.href) this.baseHref = attrs.href;
+    if (name === "div" && (attrs.id === "__next" || attrs.id === "__next-build-watcher"))
+      this.markupMarkers.add("next-root");
+    if (name === "script" && attrs.id === "__NEXT_DATA__")
+      this.markupMarkers.add("next-data-script");
     if (name === "a" && attrs.href && this.surfaceLinks.size < 64) {
       this.activeAnchorHref = attrs.href;
       this.activeAnchorText = "";
@@ -211,6 +218,12 @@ export class StreamingHtmlReferenceExtractor {
     else if (name === "source") this.addReference(this.resources, attrs.src);
     else if (name === "meta") {
       const key = attrs.name ?? attrs.property ?? "";
+      if (
+        key.toLowerCase() === "generator" &&
+        /^wordpress(?:\s|$)/i.test((attrs.content ?? "").trim())
+      ) {
+        this.markupMarkers.add("wordpress-generator");
+      }
       if (attrs.content && CONFIG_META_KEY.test(key.trim())) {
         this.addInlineUrls(attrs.content);
       }

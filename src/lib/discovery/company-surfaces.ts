@@ -12,6 +12,10 @@ import {
   type DiscoverySurfaceType,
   type UrlDiscoveryResult,
 } from "@/lib/discovery/discovery";
+import {
+  fuseTechnologyObservations,
+  type TechnologyObservation,
+} from "@/lib/discovery/technology-registry";
 
 export const companyDiscoveryLimits = {
   maxObservedSurfaceLinks: 64,
@@ -410,6 +414,17 @@ export async function discoverCompanySurfaceDependencies(
         providersObserved: 0,
         providersSuggested: 0,
         providersSuppressed: 0,
+        technologyObservations: [],
+        technologyObservationsTotal: 0,
+        technologiesObserved: 0,
+        technologiesRecognized: 0,
+        externalProvidersRecognized: 0,
+        technologiesStrong: 0,
+        technologiesMedium: 0,
+        technologiesWeak: 0,
+        protectableTechnologies: 0,
+        protectableTechnologiesSuggested: 0,
+        technologySuppressionReasonCounts: {},
         suppressionReasonCounts: {},
         suppressedObservations: [],
         totalDurationMs: Math.ceil(performance.now() - startedAt),
@@ -502,6 +517,24 @@ export async function discoverCompanySurfaceDependencies(
   ];
   const evidence = fuseEvidence(allEvidence);
   const fusedCandidates = makeCandidates(evidence);
+  const technologyObservations = fuseTechnologyObservations(
+    results.flatMap((item) => item.technologyObservations ?? []),
+    new Set(fusedCandidates.map(({ providerSlug }) => providerSlug)),
+  );
+  const uniqueTechnology = new Map<string, TechnologyObservation>();
+  for (const observation of technologyObservations) {
+    const prior = uniqueTechnology.get(observation.technologySlug);
+    if (!prior || (observation.strength === "strong" && prior.strength !== "strong"))
+      uniqueTechnology.set(observation.technologySlug, observation);
+  }
+  const technologySuppressionReasonCounts = technologyObservations.reduce<Record<string, number>>(
+    (counts, observation) => {
+      if (observation.suppressionReason)
+        counts[observation.suppressionReason] = (counts[observation.suppressionReason] ?? 0) + 1;
+      return counts;
+    },
+    {},
+  );
   const suppression = buildSuppression(
     allEvidence,
     new Set(fusedCandidates.map((item) => item.providerSlug)),
@@ -550,6 +583,40 @@ export async function discoverCompanySurfaceDependencies(
             (providerSlug) => !fusedCandidates.some((item) => item.providerSlug === providerSlug),
           ),
       ).size,
+      technologyObservations,
+      technologyObservationsTotal: technologyObservations.length,
+      technologiesObserved: uniqueTechnology.size,
+      technologiesRecognized: uniqueTechnology.size,
+      externalProvidersRecognized: new Set(
+        technologyObservations
+          .filter(
+            ({ category }) =>
+              category !== "framework" && category !== "library" && category !== "build_tool",
+          )
+          .map(({ technologySlug }) => technologySlug),
+      ).size,
+      technologiesStrong: [...uniqueTechnology.values()].filter(
+        ({ strength }) => strength === "strong",
+      ).length,
+      technologiesMedium: [...uniqueTechnology.values()].filter(
+        ({ strength }) => strength === "medium",
+      ).length,
+      technologiesWeak: [...uniqueTechnology.values()].filter(({ strength }) => strength === "weak")
+        .length,
+      protectableTechnologies: new Set(
+        technologyObservations
+          .filter(({ protectability }) => protectability === "protectable")
+          .map(({ technologySlug }) => technologySlug),
+      ).size,
+      protectableTechnologiesSuggested: new Set(
+        technologyObservations
+          .filter(
+            ({ protectability, disposition }) =>
+              protectability === "protectable" && disposition === "suggested",
+          )
+          .map(({ technologySlug }) => technologySlug),
+      ).size,
+      technologySuppressionReasonCounts,
       suppressionReasonCounts: suppression.suppressionReasonCounts,
       suppressedObservations: suppression.suppressed,
       totalDurationMs: durationMs,

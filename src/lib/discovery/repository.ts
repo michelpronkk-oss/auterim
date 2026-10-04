@@ -57,6 +57,16 @@ export class SupabaseUrlDiscoveryRepository {
     if (result.evidence.length > 500 || result.candidates.length > 100) {
       throw new Error("Discovery result exceeded its storage bounds.");
     }
+    const observations = result.companyCoverage?.technologyObservations ?? [];
+    if (observations.length > 250)
+      throw new Error("Technology observation storage limit exceeded.");
+    const companyCoverage = result.companyCoverage
+      ? Object.fromEntries(
+          Object.entries(result.companyCoverage).filter(
+            ([key]) => key !== "technologyObservations",
+          ),
+        )
+      : undefined;
     const { error } = await this.client.rpc("complete_url_dependency_discovery_run", {
       p_run_id: runId,
       p_workspace_id: workspaceId,
@@ -68,10 +78,27 @@ export class SupabaseUrlDiscoveryRepository {
       p_deep_bytes_fetched: result.deepPass.bytesFetched,
       p_coverage: {
         ...result.coverage,
-        ...(result.companyCoverage ? { company: result.companyCoverage } : {}),
+        ...(companyCoverage ? { company: companyCoverage } : {}),
       },
       p_evidence: result.evidence.map(evidenceRpcRow),
       p_candidates: result.candidates.map(candidateRpcRow),
+      p_technology_observations: observations.map((item) => ({
+        technology_slug: item.technologySlug,
+        technology_name: item.technologyName,
+        category: item.category,
+        fingerprint_id: item.fingerprintId,
+        registry_version: item.registryVersion,
+        evidence_family: item.evidenceFamily,
+        strength: item.strength,
+        relationship: item.relationship,
+        protectability: item.protectability,
+        status: item.status,
+        disposition: item.disposition,
+        suppression_reason: item.suppressionReason,
+        surface_type: item.surfaceType,
+        surface_host: item.surfaceHost,
+        source_host: item.sourceHost,
+      })),
     });
     throwOnError(error);
   }

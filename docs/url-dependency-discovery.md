@@ -2,6 +2,8 @@
 
 Auterim inspects public website technology signals to suggest dependencies for customer review. It does not establish that a provider is used in production, infer business criticality, or confirm a dependency. Every result remains a suggestion until a workspace member confirms it. Discovery is deterministic and uses registered signatures rather than an LLM.
 
+The versioned technology fingerprint inventory is stored separately from provider evidence and candidates. Framework, library, and build-tool observations do not create dependency suggestions. Fingerprint detail is service-only and does not appear in customer onboarding responses. See [technology observation](technology-observation.md) for the registry, taxonomy, evidence classifications, budgets, and RLS contract.
+
 ## Previous single-surface limitation
 
 Earlier versions scanned only the submitted website URL and bounded same-origin public resources, which could miss dependencies used only by an application shell. Company-surface discovery now considers explicit first-party links from the root page under the bounded rules below.
@@ -66,4 +68,4 @@ Earlier TrustMRR and Cal.com production scans used the pre-runtime extractor. Th
 
 ## Database change
 
-Migration `20261012000000_runtime_dependency_discovery.sql` extends the discovery evidence signal-type constraint for runtime observations. Migration `20261004144308_company_surface_discovery.sql` adds bounded surface provenance and evidence deduplication across surface identity. Migration `20261014000000_company_surface_discovery_finalize.sql` updates the coverage bound and completion/read RPCs after their migration prerequisites, while validating DNS names and bracketed IPv6 origins. These migrations add no tenant data table and do not alter candidate confirmation semantics or existing RLS ownership.
+Migration `20261012000000_runtime_dependency_discovery.sql` extends the discovery evidence signal-type constraint for runtime observations. Migration `20261004144308_company_surface_discovery.sql` adds bounded surface provenance and evidence deduplication across surface identity. Migration `20261014000000_company_surface_discovery_finalize.sql` updates the coverage bound and completion/read RPCs after their migration prerequisites, while validating DNS names and bracketed IPv6 origins. Migration `20261015000000_technology_observation_registry.sql` adds a separate service-only, bounded fingerprint observation store and atomically extends the discovery completion RPC; it does not alter candidate confirmation semantics or workspace evidence RLS.

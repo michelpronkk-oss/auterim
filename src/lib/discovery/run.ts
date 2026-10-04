@@ -59,7 +59,13 @@ export async function runWebsiteDependencyDiscovery(
     outcome: result.outcome,
     candidateCount: result.candidates.length,
     evidenceCount: result.evidence.length,
-    companyCoverage: result.companyCoverage ?? null,
+    companyCoverage: result.companyCoverage
+      ? Object.fromEntries(
+          Object.entries(result.companyCoverage).filter(
+            ([key]) => key !== "technologyObservations",
+          ),
+        )
+      : null,
     deepPass: result.deepPass,
     coverage: result.coverage,
     failureCategory: result.failureCategory ?? null,

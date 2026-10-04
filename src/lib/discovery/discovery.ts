@@ -11,6 +11,11 @@ import {
   type DiscoverySignalType,
   type SignatureInput,
 } from "@/lib/discovery/registry";
+import {
+  observeTechnologies,
+  type TechnologyObservation,
+  type TechnologySignatureInput,
+} from "@/lib/discovery/technology-registry";
 
 export const discoveryLimits = {
   maxHtmlBytes: 4 * 1024 * 1024,
@@ -99,6 +104,7 @@ export type UrlDiscoveryResult = {
   outcome: "complete" | "partial" | "empty" | "failed";
   candidates: DiscoveryCandidate[];
   evidence: DiscoveryEvidence[];
+  technologyObservations?: TechnologyObservation[];
   surfaceLinks?: Array<{ url: string; labelKind: "app_cta" | "auth_cta" | "other" }>;
   finalHost?: string;
   companyCoverage?: {
@@ -127,6 +133,17 @@ export type UrlDiscoveryResult = {
     providersObserved: number;
     providersSuggested: number;
     providersSuppressed: number;
+    technologyObservations?: TechnologyObservation[];
+    technologyObservationsTotal?: number;
+    technologiesObserved?: number;
+    technologiesRecognized?: number;
+    externalProvidersRecognized?: number;
+    technologiesStrong?: number;
+    technologiesMedium?: number;
+    technologiesWeak?: number;
+    protectableTechnologies?: number;
+    protectableTechnologiesSuggested?: number;
+    technologySuppressionReasonCounts?: Record<string, number>;
     suppressionReasonCounts: Record<string, number>;
     suppressedObservations: Array<{
       providerSlug: string;
@@ -889,6 +906,16 @@ export async function discoverWebsiteDependencies(
   const cspHosts = parseContentSecurityPolicy(page.safeHeaders);
   const redirectOrigins = page.redirectEvidence?.length ? [pageOrigin] : [];
   const evidence: DiscoveryEvidence[] = [];
+  const technologySignatureInput: TechnologySignatureInput = {
+    headers: page.safeHeaders,
+    scriptUrls: references.scriptUrls,
+    resourceUrls: references.resourceUrls,
+    stylesheetUrls: references.stylesheetUrls,
+    markupMarkers: references.markupMarkers,
+    cspHosts: parseContentSecurityPolicy(page.safeHeaders),
+    embeddedUrls: [],
+    siteOrigin: pageOrigin,
+  };
   const seen = new Set<string>();
   const scannedHost = new URL(normalizedUrl).hostname.toLowerCase();
   matchEvidence(
@@ -1209,6 +1236,13 @@ export async function discoverWebsiteDependencies(
   throwIfCancelled();
   const partial = incompleteReasons.length > 0;
   const candidates = makeCandidates(evidence);
+  const technologyObservations = observeTechnologies({
+    signatureInput: technologySignatureInput,
+    providerEvidence: evidence,
+    surfaceType,
+    surfaceHost: scannedHost,
+    candidates: new Set(candidates.map(({ providerSlug }) => providerSlug)),
+  });
   const outcome = partial ? "partial" : candidates.length === 0 ? "empty" : "complete";
   const durationMs = Math.ceil(performance.now() - startedAt);
   return {
@@ -1218,6 +1252,7 @@ export async function discoverWebsiteDependencies(
     outcome,
     candidates,
     evidence,
+    technologyObservations,
     surfaceLinks: references.surfaceLinks,
     deepPass: {
       requested: options.deep === true,
