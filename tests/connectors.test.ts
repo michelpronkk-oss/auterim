@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   classifyRuntimeContext,
   hasConnectorCapability,
@@ -6,6 +6,13 @@ import {
   safeConnectorResource,
 } from "@/lib/connectors/model";
 import { connectorStateHash, newOAuthSecrets } from "@/lib/connectors/service";
+import {
+  createLinearIssue,
+  normalizeSlackApiFailure,
+  readSentryRuntimeContext,
+  SENTRY_RUNTIME_RESPONSE_MAX_BYTES,
+  type ProviderCredentials,
+} from "@/lib/connectors/providers";
 
 describe("connector platform safety contracts", () => {
   it("creates high entropy independent OAuth state and browser binding", () => {
@@ -80,5 +87,94 @@ describe("connector platform safety contracts", () => {
     expect(error.retryAfterSeconds).toBe(3600);
     expect(normalizeProviderFailure("sentry", 503, null).category).toBe("PROVIDER_UNAVAILABLE");
     expect(normalizeProviderFailure("linear", 401, null).category).toBe("AUTH_REQUIRED");
+  });
+
+  it("keeps transient Slack discovery errors out of the permission-loss path", () => {
+    expect(normalizeSlackApiFailure("internal_error")).toMatchObject({
+      category: "PROVIDER_UNAVAILABLE",
+      retryable: true,
+    });
+    expect(normalizeSlackApiFailure("ratelimited", 7200)).toMatchObject({
+      category: "RATE_LIMITED",
+      retryable: true,
+      retryAfterSeconds: 3600,
+    });
+    expect(normalizeSlackApiFailure("missing_scope").category).toBe("PERMISSION_MISSING");
+  });
+
+  it("marks ambiguous Linear create responses retryable so callers reconcile before retrying", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({ errors: [{ message: "private provider details" }] }, { status: 200 }),
+      ),
+    );
+    try {
+      await expect(
+        createLinearIssue(
+          { accessToken: "fixture-token", refreshToken: null, expiresAt: null, scopes: [] },
+          { teamId: "team-1", title: "Verified risk", description: "Grounded finding" },
+        ),
+      ).rejects.toMatchObject({
+        category: "TRANSIENT",
+        retryable: true,
+        safeMessage: "Linear issue creation could not be confirmed; reconcile before retrying.",
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("bounds Sentry runtime response bytes and exposes only sanitized issue metadata", async () => {
+    const credentials: ProviderCredentials = {
+      accessToken: "fixture-token",
+      refreshToken: null,
+      expiresAt: null,
+      scopes: [],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("x".repeat(SENTRY_RUNTIME_RESPONSE_MAX_BYTES + 1))),
+    );
+    try {
+      await expect(
+        readSentryRuntimeContext(credentials, {
+          organizationSlug: "auterim",
+          projectSlugs: ["web"],
+          windowStart: "2026-10-01T00:00:00.000Z",
+          windowEnd: "2026-10-02T00:00:00.000Z",
+          providerIdentifiers: ["stripe"],
+        }),
+      ).rejects.toMatchObject({ category: "PROVIDER_UNAVAILABLE" });
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          Response.json([
+            {
+              id: "12345",
+              firstSeen: "2026-10-01T01:00:00.000Z",
+              lastSeen: "2026-10-01T02:00:00.000Z",
+              metadata: {
+                type: "StripeAuthenticationError",
+                value: "private-person@example.com SECRET_SENTINEL",
+              },
+            },
+          ]),
+        ),
+      );
+      const result = await readSentryRuntimeContext(credentials, {
+        organizationSlug: "auterim",
+        projectSlugs: ["web"],
+        windowStart: "2026-10-01T00:00:00.000Z",
+        windowEnd: "2026-10-02T00:00:00.000Z",
+        providerIdentifiers: ["stripe"],
+      });
+      expect(result.result).toBe("runtime_signal_found");
+      expect(JSON.stringify(result)).not.toContain("private-person@example.com");
+      expect(JSON.stringify(result)).not.toContain("SECRET_SENTINEL");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

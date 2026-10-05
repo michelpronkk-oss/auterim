@@ -94,7 +94,12 @@ function expiry(expiresIn: unknown) {
     : null;
 }
 
-async function providerFetch<T>(provider: Provider, url: string, init?: RequestInit): Promise<T> {
+async function providerFetch<T>(
+  provider: Provider,
+  url: string,
+  init?: RequestInit,
+  maxResponseBytes?: number,
+): Promise<T> {
   let response: Response;
   try {
     response = await fetch(url, {
@@ -138,8 +143,49 @@ async function providerFetch<T>(provider: Provider, url: string, init?: RequestI
     throw normalizeProviderFailure(provider, response.status, response.headers.get("retry-after"));
   }
   try {
-    return (await response.json()) as T;
-  } catch {
+    if (maxResponseBytes === undefined) return (await response.json()) as T;
+    const contentLength = response.headers.get("content-length");
+    if (contentLength && /^\d+$/.test(contentLength) && Number(contentLength) > maxResponseBytes) {
+      await response.body?.cancel();
+      throw new ConnectorError(
+        "PROVIDER_UNAVAILABLE",
+        true,
+        provider,
+        "The provider response exceeded its safety limit.",
+      );
+    }
+    if (!response.body) throw new Error("provider_response_body_missing");
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let bytesRead = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytesRead += value.byteLength;
+        if (bytesRead > maxResponseBytes) {
+          await reader.cancel();
+          throw new ConnectorError(
+            "PROVIDER_UNAVAILABLE",
+            true,
+            provider,
+            "The provider response exceeded its safety limit.",
+          );
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    const bytes = new Uint8Array(bytesRead);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as T;
+  } catch (error) {
+    if (error instanceof ConnectorError) throw error;
     throw new ConnectorError(
       "UNKNOWN_SAFE",
       false,
@@ -147,6 +193,56 @@ async function providerFetch<T>(provider: Provider, url: string, init?: RequestI
       "The provider returned an invalid response.",
     );
   }
+}
+
+export function normalizeSlackApiFailure(error: string, retryAfter?: number): ConnectorError {
+  const normalized = error.toLowerCase();
+  if (
+    ["invalid_auth", "token_revoked", "token_expired", "not_authed", "account_inactive"].includes(
+      normalized,
+    )
+  )
+    return new ConnectorError("AUTH_REQUIRED", false, "slack", "Reconnect this connector.");
+  if (["missing_scope", "not_allowed_token_type", "access_denied"].includes(normalized))
+    return new ConnectorError(
+      "PERMISSION_MISSING",
+      false,
+      "slack",
+      "This connector is missing a required permission.",
+    );
+  if (["channel_not_found", "not_in_channel"].includes(normalized))
+    return new ConnectorError(
+      "RESOURCE_NOT_FOUND",
+      false,
+      "slack",
+      "The selected Slack resource is unavailable.",
+    );
+  if (["ratelimited", "rate_limited"].includes(normalized))
+    return new ConnectorError(
+      "RATE_LIMITED",
+      true,
+      "slack",
+      "Slack is rate limiting requests.",
+      typeof retryAfter === "number" && Number.isFinite(retryAfter)
+        ? Math.min(Math.max(1, Math.floor(retryAfter)), 3600)
+        : 60,
+    );
+  if (
+    [
+      "internal_error",
+      "service_unavailable",
+      "temporarily_unavailable",
+      "request_timeout",
+      "fatal_error",
+    ].includes(normalized)
+  )
+    return new ConnectorError(
+      "PROVIDER_UNAVAILABLE",
+      true,
+      "slack",
+      "Slack is temporarily unavailable.",
+    );
+  return new ConnectorError("UNKNOWN_SAFE", false, "slack", "Slack rejected the request safely.");
 }
 
 function form(values: Record<string, string>) {
@@ -354,12 +450,7 @@ function baseAdapter(provider: Provider): ConnectorProviderAdapter {
             headers: { authorization: `Bearer ${credentials.accessToken}` },
           });
           if (!data.ok)
-            throw new ConnectorError(
-              "PERMISSION_MISSING",
-              false,
-              provider,
-              "Slack channel discovery is unavailable.",
-            );
+            throw normalizeSlackApiFailure((data as { error?: string }).error ?? "unknown_error");
           for (const channel of data.channels ?? []) {
             if (channel.is_member !== true) continue;
             resources.push(
@@ -547,25 +638,7 @@ export async function sendSlackNotification(
     }),
   });
   if (!result.ok) {
-    const category =
-      result.error === "invalid_auth" ||
-      result.error === "token_revoked" ||
-      result.error === "token_expired"
-        ? "AUTH_REQUIRED"
-        : result.error === "not_in_channel" || result.error === "channel_not_found"
-          ? "RESOURCE_NOT_FOUND"
-          : result.error === "ratelimited"
-            ? "RATE_LIMITED"
-            : result.error === "missing_scope"
-              ? "PERMISSION_MISSING"
-              : "UNKNOWN_SAFE";
-    throw new ConnectorError(
-      category,
-      category === "RATE_LIMITED",
-      "slack",
-      "Slack could not deliver this notification.",
-      typeof result.retry_after === "number" ? result.retry_after : undefined,
-    );
+    throw normalizeSlackApiFailure(result.error ?? "unknown_error", result.retry_after);
   }
   return { providerMessageId: result.ts ?? null };
 }
@@ -574,23 +647,49 @@ export async function createLinearIssue(
   credentials: ProviderCredentials,
   input: { teamId: string; title: string; description: string },
 ) {
-  const result = await linearGraphql<{
-    issueCreate: { success: boolean; issue?: { id: string; identifier: string; url: string } };
-  }>(
-    credentials.accessToken,
-    `mutation CreateIssue($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { id identifier url } } }`,
-    {
-      input: {
-        teamId: input.teamId,
-        title: input.title.slice(0, 200),
-        description: input.description.slice(0, 8000),
+  let result: {
+    issueCreate?: { success: boolean; issue?: { id: string; identifier: string; url: string } };
+  };
+  try {
+    result = await linearGraphql(
+      credentials.accessToken,
+      `mutation CreateIssue($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { id identifier url } } }`,
+      {
+        input: {
+          teamId: input.teamId,
+          title: input.title.slice(0, 200),
+          description: input.description.slice(0, 8000),
+        },
       },
-    },
-  );
-  if (!result.issueCreate.success || !result.issueCreate.issue)
+    );
+  } catch (error) {
+    // A mutation may have succeeded even when its response is incomplete or lost.
+    // The action route maps retryable errors to unknown_result and blocks blind retries.
+    if (
+      error instanceof ConnectorError &&
+      ["AUTH_REQUIRED", "PERMISSION_MISSING", "INVALID_REQUEST"].includes(error.category)
+    )
+      throw error;
+    throw new ConnectorError(
+      "TRANSIENT",
+      true,
+      "linear",
+      "Linear issue creation could not be confirmed; reconcile before retrying.",
+    );
+  }
+  if (result.issueCreate?.success === false)
     throw new ConnectorError("UNKNOWN_SAFE", false, "linear", "Linear did not create the issue.");
+  if (result.issueCreate?.success !== true || !result.issueCreate.issue)
+    throw new ConnectorError(
+      "TRANSIENT",
+      true,
+      "linear",
+      "Linear issue creation could not be confirmed; reconcile before retrying.",
+    );
   return result.issueCreate.issue;
 }
+
+export const SENTRY_RUNTIME_RESPONSE_MAX_BYTES = 256 * 1024;
 
 export async function readSentryRuntimeContext(
   credentials: ProviderCredentials,
@@ -619,7 +718,7 @@ export async function readSentryRuntimeContext(
         firstSeen?: string | null;
         lastSeen?: string | null;
         count?: string | number;
-        metadata?: { type?: string; value?: string };
+        metadata?: { type?: string };
       }[]
     >(
       "sentry",
@@ -627,17 +726,24 @@ export async function readSentryRuntimeContext(
       {
         headers: { authorization: `Bearer ${credentials.accessToken}` },
       },
+      SENTRY_RUNTIME_RESPONSE_MAX_BYTES,
     );
     if (issues.length >= 50) pageLimitReached = true;
     for (const issue of issues.slice(0, 50)) {
+      const issueId = String(issue.id);
+      if (!/^\d{1,30}$/.test(issueId)) continue;
+      const rawType = issue.metadata?.type;
       const errorType =
-        [issue.metadata?.type, issue.metadata?.value]
-          .filter((value): value is string => typeof value === "string")
-          .join(" ")
-          .slice(0, 600) || null;
+        typeof rawType === "string"
+          ? rawType
+              .replace(/[^a-zA-Z0-9_.$ -]/g, " ")
+              .replace(/\s+/g, " ")
+              .trim()
+              .slice(0, 120) || null
+          : null;
       if (!issue.firstSeen || !issue.lastSeen) continue;
       errors.push({
-        issueId: String(issue.id).slice(0, 100),
+        issueId,
         type: errorType,
         firstSeen: issue.firstSeen,
         lastSeen: issue.lastSeen,
