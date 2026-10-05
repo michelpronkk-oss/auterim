@@ -10,7 +10,6 @@ const legalNav: Array<[key: LegalKey, label: string, href: string]> = [
   ["terms", "Terms", "/terms"],
   ["cookies", "Cookies", "/cookies"],
   ["security", "Security", "/security"],
-  ["subprocessors", "Subprocessors", "/subprocessors"],
 ];
 
 export type LegalSection = { id: string; title: string; body: ReactNode };
