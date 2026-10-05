@@ -50,6 +50,14 @@
     0 0 0 1px rgba(14, 27, 46, 0.06),
     0 30px 60px -40px rgba(11, 22, 38, 0.35);
 }
+/* Let the browser's own bars (iOS Safari top and bottom) pick up the page colors. */
+:global(html):has(.page) {
+  background: #e4ebf9;
+}
+:global(body):has(.page) {
+  background: linear-gradient(180deg, #e4ebf9 0%, #faf7f0 100%);
+}
+
 /* Faint grid, the same texture as the homepage demo panel, fading out toward the edges. */
 .frame::before {
   content: "";
@@ -316,7 +324,16 @@
   color: var(--slate-4);
 }
 
+/* Phones: the page itself is the frame, edge to edge, so there is no box inside a box. */
 @media (max-width: 560px) {
+  .page {
+    padding: 0;
+    background: #faf7f0;
+  }
+  .frame {
+    border-radius: 0;
+    box-shadow: none;
+  }
   .top {
     padding: 12px 12px 0;
   }
