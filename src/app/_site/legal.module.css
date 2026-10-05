@@ -1,0 +1,496 @@
+/* Policy and trust pages. Tokens come from site.module.css (.page). */
+
+.hero {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: clamp(56px, 8vw, 104px) clamp(10px, 2.6vw, 30px) clamp(32px, 4vw, 44px);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 18px;
+}
+.eyebrow {
+  display: inline-flex;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 0 0 1px rgba(14, 27, 46, 0.08);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+}
+.title {
+  margin: 0;
+  max-width: 900px;
+  font-size: clamp(40px, 5.4vw, 68px);
+  font-weight: 500;
+  letter-spacing: -0.045em;
+  line-height: 1.02;
+  text-wrap: balance;
+}
+.title em {
+  font-style: normal;
+  color: var(--blue);
+}
+.summary {
+  max-width: 620px;
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.6;
+  color: var(--slate);
+  text-wrap: pretty;
+}
+.updated {
+  display: flex;
+  gap: 8px;
+  margin: 2px 0 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--slate-3);
+}
+.updated time {
+  color: var(--ink);
+}
+
+/* Policy switcher, the same segmented track as the homepage demo tabs. */
+.tabs {
+  display: flex;
+  gap: 2px;
+  max-width: 100%;
+  margin-top: 18px;
+  padding: 4px;
+  border-radius: 12px;
+  background: rgba(14, 27, 46, 0.05);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+.tab {
+  flex: none;
+  padding: 8px 14px;
+  border-radius: 9px;
+  color: var(--slate);
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  transition:
+    color 0.15s,
+    background 0.15s;
+}
+.tab:hover {
+  color: var(--ink);
+}
+.tab[aria-current="page"] {
+  background: #ffffff;
+  color: var(--ink);
+  box-shadow:
+    0 0 0 1px rgba(14, 27, 46, 0.06),
+    0 1px 2px rgba(14, 27, 46, 0.06);
+}
+
+.intro {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: clamp(32px, 4vw, 48px) clamp(20px, 4vw, 40px) 0;
+}
+
+/* Body: sticky index on the left, clauses on the right. */
+.body {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: clamp(40px, 5vw, 64px) clamp(20px, 4vw, 40px) clamp(72px, 9vw, 120px);
+  display: grid;
+  grid-template-columns: minmax(0, 260px) minmax(0, 720px);
+  justify-content: space-between;
+  gap: 64px;
+}
+.index {
+  position: sticky;
+  top: 96px;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.indexHead {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  color: var(--slate-4);
+}
+.index ol {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.index a {
+  display: flex;
+  gap: 12px;
+  padding: 6px 0;
+  color: var(--slate-2);
+  font-size: 13.5px;
+  line-height: 1.4;
+  text-decoration: none;
+  transition: color 0.15s;
+}
+.index a:hover {
+  color: var(--blue);
+}
+.indexNum {
+  flex: none;
+  width: 18px;
+  padding-top: 1px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--slate-4);
+}
+
+.content {
+  min-width: 0;
+}
+.clause {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 4px 0;
+  padding: 32px 0;
+  border-top: 1px solid var(--rule);
+  scroll-margin-top: 96px;
+}
+.clause:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+.clauseNum {
+  grid-row: 1;
+  padding-top: 7px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--blue);
+}
+.clauseTitle {
+  grid-column: 2;
+  margin: 0;
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+}
+.prose {
+  grid-column: 2;
+  margin-top: 10px;
+  font-size: 16.5px;
+  line-height: 1.7;
+  color: var(--slate);
+}
+.prose p {
+  margin: 0 0 14px;
+}
+.prose p:last-child,
+.prose ul:last-child {
+  margin-bottom: 0;
+}
+.prose ul {
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+}
+.prose li {
+  position: relative;
+  padding-left: 20px;
+  margin-bottom: 8px;
+}
+.prose li::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 0.78em;
+  width: 8px;
+  height: 1px;
+  background: var(--slate-4);
+}
+.prose strong {
+  font-weight: 500;
+  color: var(--ink);
+}
+.prose a,
+.closing a {
+  color: var(--blue);
+  text-decoration: underline;
+  text-decoration-color: rgba(47, 91, 216, 0.3);
+  text-underline-offset: 3px;
+}
+.prose a:hover,
+.closing a:hover {
+  text-decoration-color: currentColor;
+}
+.prose code {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: rgba(14, 27, 46, 0.05);
+  font-family: var(--mono);
+  font-size: 0.86em;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.closing {
+  margin: 0;
+  padding-top: 28px;
+  border-top: 1px solid var(--rule);
+  font-size: 15px;
+  color: var(--slate-3);
+}
+
+/* Small definition table used inside clauses (cookies, storage). */
+.table {
+  width: 100%;
+  margin: 6px 0 14px;
+  border-collapse: collapse;
+  font-size: 14.5px;
+  line-height: 1.5;
+}
+.table th {
+  padding: 0 12px 10px 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  color: var(--slate-4);
+  text-align: left;
+}
+.table td {
+  padding: 12px 12px 12px 0;
+  border-top: 1px solid var(--rule);
+  vertical-align: top;
+  color: var(--slate);
+}
+.table td:first-child {
+  color: var(--ink);
+  font-weight: 500;
+}
+.table code {
+  overflow-wrap: normal;
+}
+
+/* ---------- Trust layouts (security, subprocessors) ---------- */
+.principles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  border-radius: 18px;
+  background: var(--rule);
+  box-shadow: 0 0 0 1px var(--rule);
+  overflow: hidden;
+}
+.principle {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: clamp(22px, 2.6vw, 30px);
+  background: #ffffff;
+}
+.principleKey {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  color: var(--blue);
+}
+.principle h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: -0.015em;
+  line-height: 1.3;
+}
+.principle p {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--slate);
+}
+
+.vendors {
+  display: flex;
+  flex-direction: column;
+  border-radius: 18px;
+  background: #ffffff;
+  box-shadow: 0 0 0 1px var(--rule);
+  overflow: hidden;
+}
+.vendorHead,
+.vendor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) minmax(0, 1.6fr) auto;
+  gap: 24px;
+  align-items: start;
+  padding: 18px 24px;
+}
+.vendorHead {
+  padding-top: 14px;
+  padding-bottom: 14px;
+  background: rgba(14, 27, 46, 0.025);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  color: var(--slate-4);
+}
+.vendor {
+  border-top: 1px solid var(--rule);
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--slate);
+}
+.vendorName {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.vendorName strong {
+  font-size: 15.5px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.vendorName span {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--slate-4);
+}
+.vendorLink {
+  color: var(--blue);
+  font-size: 13.5px;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.vendorLink:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.cellLabel {
+  display: none;
+}
+
+@media (max-width: 999px) {
+  .body {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+  .index {
+    display: none;
+  }
+  .content {
+    max-width: 720px;
+  }
+  .principles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .vendorHead {
+    display: none;
+  }
+  .vendor {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    padding: 22px;
+  }
+  .vendor:first-of-type {
+    border-top: 0;
+  }
+  .cellLabel {
+    display: block;
+    margin-bottom: 2px;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    color: var(--slate-4);
+  }
+}
+@media (max-width: 560px) {
+  .hero {
+    padding: 44px 12px 24px;
+    gap: 16px;
+  }
+  .title {
+    font-size: clamp(36px, 10vw, 44px);
+  }
+  .summary {
+    font-size: 16.5px;
+  }
+  .tabs {
+    flex-wrap: wrap;
+    margin-top: 10px;
+  }
+  .body {
+    padding: 36px 22px 72px;
+  }
+  .intro {
+    padding: 28px 16px 0;
+  }
+  .clause {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 28px 0;
+  }
+  .clauseNum {
+    padding-top: 0;
+  }
+  .clauseTitle,
+  .prose {
+    grid-column: 1;
+  }
+  .clauseTitle {
+    font-size: 20px;
+  }
+  .prose {
+    font-size: 16px;
+  }
+  .principles {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .table,
+  .table tbody,
+  .table tr,
+  .table td {
+    display: block;
+  }
+  .table thead {
+    display: none;
+  }
+  .table tr {
+    padding: 12px 0;
+    border-top: 1px solid var(--rule);
+  }
+  .table td {
+    padding: 2px 0;
+    border-top: 0;
+  }
+}
+
+/* Column labels for stacked tables on phones. */
+.tLabel {
+  display: none;
+}
+@media (max-width: 560px) {
+  .tLabel {
+    display: block;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    color: var(--slate-4);
+  }
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
