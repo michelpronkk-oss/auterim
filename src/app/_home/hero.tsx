@@ -727,9 +727,36 @@ function IdleDemo({ dt, dPhase }: { dt: number; dPhase: number }) {
           </div>
         ) : null}
       </div>
+      {/* Fills the space the Watch step needs later: what the scan read, so the panel never looks empty. */}
+      <div aria-hidden="true" className={s.demoSignals} style={{ opacity: dPhase === 2 ? 0 : 1 }}>
+        <span className={s.demoSignalsLabel}>Signals read</span>
+        <div className={s.demoSignalsGrid}>
+          {demoSignals.map(([label, n]) => {
+            const p = dPhase === 0 ? Math.min(1, (dt + 1) / 6) : 1;
+            return (
+              <div key={label} className={s.demoSignal}>
+                <span className={s.demoSignalTop}>
+                  <span>{label}</span>
+                  <strong>{Math.round(n * p)}</strong>
+                </span>
+                <span className={s.demoSignalBar}>
+                  <span style={{ transform: `scaleX(${(n / 14) * p})` }} />
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
       <div className={s.stageFoot}>
         <span className={s.footNote}>{foot}</span>
       </div>
     </div>
   );
 }
+
+const demoSignals = [
+  ["Response headers", 14],
+  ["Script sources", 9],
+  ["Embedded URLs", 6],
+  ["Security policy", 3],
+] as const;
