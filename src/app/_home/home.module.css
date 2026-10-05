@@ -30,10 +30,11 @@
 .page *::after {
   box-sizing: border-box;
 }
-.page a {
+/* Zero-specificity defaults so component classes (shared header, footer) win without !important. */
+:where(.page) a {
   color: var(--blue);
 }
-.page a:hover {
+:where(.page) a:hover {
   color: var(--ink);
 }
 .page input::placeholder {
@@ -320,7 +321,6 @@
 }
 
 /* ---------- Buttons ---------- */
-.navCta,
 .btnInk,
 .btnInkSm {
   display: inline-flex;
@@ -334,11 +334,7 @@
   cursor: pointer;
   transition: background 0.15s;
 }
-.navCta {
-  min-height: 40px;
-  padding: 0 16px;
-  font-size: 14px;
-}
+
 .btnInk {
   flex: none;
   height: 46px;
@@ -350,7 +346,6 @@
   padding: 0 18px;
   font-size: 14.5px;
 }
-.navCta:hover,
 .btnInk:hover:not(:disabled),
 .btnInkSm:hover:not(:disabled) {
   background: var(--blue);
@@ -396,59 +391,6 @@
     radial-gradient(ellipse 55% 50% at 92% 12%, rgba(220, 229, 250, 0.7), transparent 70%),
     linear-gradient(180deg, #e7edf9 0%, #f2efe7 60%, var(--paper) 100%);
 }
-.header {
-  position: sticky;
-  top: 12px;
-  z-index: 20;
-  max-width: 1280px;
-  margin: 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 10px 10px 10px 18px;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.84);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow:
-    0 0 0 1px rgba(14, 27, 46, 0.07),
-    0 8px 24px -16px rgba(14, 27, 46, 0.2);
-}
-.logo {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  border-radius: 6px;
-  color: var(--ink) !important;
-  text-decoration: none;
-}
-.logo span {
-  font-size: 19px;
-  font-weight: 500;
-  letter-spacing: -0.03em;
-}
-.headerActions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.signIn {
-  padding: 8px 12px;
-  border-radius: 8px;
-  color: var(--slate) !important;
-  font-size: 14px;
-  font-weight: 500;
-  text-decoration: none;
-}
-.signIn:hover {
-  color: var(--blue) !important;
-}
-@media (max-width: 420px) {
-  .signIn {
-    display: none;
-  }
-}
 
 .clouds {
   position: absolute;
@@ -488,6 +430,7 @@
 }
 
 .hero {
+  scroll-margin-top: 200px;
   position: relative;
   z-index: 1;
   max-width: 1280px;
@@ -3279,48 +3222,6 @@
 }
 
 /* Footer */
-.footer {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 28px clamp(20px, 4vw, 40px) 32px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px 32px;
-}
-.footerBrand {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 24px;
-  font-size: 14px;
-  color: var(--slate-2);
-}
-.footerBrand .logo {
-  gap: 8px;
-}
-.footerBrand .logo span {
-  font-size: 17px;
-}
-.footerNav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 20px;
-  font-size: 13.5px;
-}
-.footerNav a {
-  color: var(--slate) !important;
-  text-decoration: none;
-}
-.footerNav a:hover {
-  color: var(--blue) !important;
-}
-.copyright {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--slate-3);
-}
 
 @media (prefers-reduced-motion: reduce) {
   .page *,
@@ -3358,31 +3259,8 @@
 }
 
 /* ---------- Phones: tighter type scale, calmer spacing and compact visuals ---------- */
-.navCtaShort {
-  display: none;
-}
-@media (max-width: 560px) {
-  .header {
-    top: 8px;
-    padding: 7px 7px 7px 14px;
-    border-radius: 14px;
-  }
-  .logo span {
-    font-size: 17px;
-  }
-  .navCta {
-    min-height: 36px;
-    padding: 0 14px;
-    border-radius: 9px;
-    font-size: 13.5px;
-  }
-  .navCtaLong {
-    display: none;
-  }
-  .navCtaShort {
-    display: inline;
-  }
 
+@media (max-width: 560px) {
   .hero {
     padding: 0 4px 56px;
   }
@@ -3770,9 +3648,6 @@
     font-size: clamp(34px, 9.6vw, 42px);
     letter-spacing: -0.035em;
     line-height: 1.03;
-  }
-  .footer {
-    padding: 28px 22px 30px;
   }
 }
 @media (max-width: 420px) {

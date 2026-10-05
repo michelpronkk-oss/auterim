@@ -86,13 +86,17 @@ export function focusHeroInput() {
   );
 }
 
-export function HeaderCta() {
-  return (
-    <button type="button" className={s.navCta} onClick={focusHeroInput}>
-      <span className={s.navCtaLong}>Analyze your company</span>
-      <span className={s.navCtaShort}>Analyze</span>
-    </button>
-  );
+/** Arriving at /#scan from another page puts the cursor straight in the scanner. */
+export function ScanHashFocus() {
+  useEffect(() => {
+    if (window.location.hash !== "#scan") return;
+    const t = window.setTimeout(
+      () => document.getElementById(HERO_INPUT_ID)?.focus({ preventScroll: true }),
+      300,
+    );
+    return () => window.clearTimeout(t);
+  }, []);
+  return null;
 }
 
 /** Soft cloud band behind the hero that fades and drifts as the page scrolls. */

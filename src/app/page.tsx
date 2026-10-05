@@ -1,6 +1,5 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import Link from "next/link";
 import { PublicPageView } from "@/app/public-page-view";
 import {
   catalog,
@@ -16,12 +15,14 @@ import {
   stream,
   surfaced,
 } from "@/app/_home/data";
-import { HeaderCta, HeroAnalyzer, HeroClouds } from "@/app/_home/hero";
+import { HeroAnalyzer, HeroClouds, ScanHashFocus } from "@/app/_home/hero";
 import { ChangeInbox, CoverageCatalog, DependencyMap, FinalCtaForm } from "@/app/_home/interactive";
 import { BrandMark, ProviderMark } from "@/app/_home/marks";
 import { PricingSection } from "@/app/_home/pricing";
 import { RevealOnScroll } from "@/app/_home/reveal";
 import s from "@/app/_home/home.module.css";
+import { SiteFooter } from "@/app/_site/site-footer";
+import { SiteHeader } from "@/app/_site/site-header";
 
 const geist = Geist({
   subsets: ["latin"],
@@ -51,22 +52,12 @@ export default function Home() {
     <div className={`${geist.variable} ${geistMono.variable} ${s.page}`}>
       <PublicPageView event="homepage_view" />
       <RevealOnScroll />
+      <ScanHashFocus />
       <main className={s.frame}>
         <div id="top" className={s.heroWrap}>
-          <header className={s.header}>
-            <Link href="/" aria-label="Auterim home" className={s.logo}>
-              <BrandMark size={26} />
-              <span>Auterim</span>
-            </Link>
-            <div className={s.headerActions}>
-              <Link href="/login" className={s.signIn}>
-                Sign in
-              </Link>
-              <HeaderCta />
-            </div>
-          </header>
+          <SiteHeader onHome />
           <HeroClouds />
-          <section className={s.hero} aria-labelledby="hero-title">
+          <section id="scan" className={s.hero} aria-labelledby="hero-title">
             <div className={s.heroCopy}>
               <span className={s.heroBadge}>
                 <span className={s.heroBadgeMark}>
@@ -484,22 +475,7 @@ export default function Home() {
           </div>
         </section>
 
-        <footer className={s.footer}>
-          <div className={s.footerBrand}>
-            <div className={s.logo}>
-              <BrandMark size={22} />
-              <span>Auterim</span>
-            </div>
-            <span>Quiet intelligence for the systems your business depends on.</span>
-          </div>
-          <nav aria-label="Footer navigation" className={s.footerNav}>
-            <Link href="/changes">Provider changes</Link>
-            <Link href="/tools">Free tools</Link>
-            <a href="#pricing">Pricing</a>
-            <Link href="/login">Sign in</Link>
-          </nav>
-          <span className={s.copyright}>© 2026 Auterim</span>
-        </footer>
+        <SiteFooter />
       </main>
     </div>
   );

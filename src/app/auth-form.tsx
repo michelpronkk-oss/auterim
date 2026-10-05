@@ -11,7 +11,7 @@ import {
 } from "@/lib/public/conversion";
 import { canonicalizePublicWebsiteUrl } from "@/lib/discovery/normalize-website-url";
 import s from "@/app/_auth/auth.module.css";
-import { geist, geistMono } from "@/app/_auth/fonts";
+import { geist, geistMono } from "@/app/_site/fonts";
 import { BrandMark } from "@/app/_home/marks";
 
 export type AuthMode = "signup" | "login" | "forgot" | "reset";
