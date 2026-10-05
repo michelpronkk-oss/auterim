@@ -65,7 +65,6 @@ export function ChangeInbox() {
       ...(assessing ? levels.assessing : levels.none),
     },
   ];
-  const detail = rows[selectedIndex];
   return (
     <div data-reveal className={s.inboxStage}>
       <SignalStrip />
@@ -85,76 +84,95 @@ export function ChangeInbox() {
             {rows.map((r, i) => {
               const hidden = i === 2 && collapsed;
               const on = selectedIndex === i;
-              return (
-                <div
-                  key={r.p}
-                  className={s.inboxCollapse}
-                  style={{ maxHeight: hidden ? 0 : 160, opacity: hidden ? 0 : i === 2 ? 0.75 : 1 }}
+              const row = (
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={on}
+                  tabIndex={hidden ? -1 : 0}
+                  className={on ? `${s.inboxRow} ${s.inboxRowOn}` : s.inboxRow}
+                  onClick={() => setSelectedIndex(i)}
                 >
-                  <button
-                    type="button"
-                    role="option"
-                    aria-selected={on}
-                    tabIndex={hidden ? -1 : 0}
-                    className={on ? `${s.inboxRow} ${s.inboxRowOn}` : s.inboxRow}
-                    onClick={() => setSelectedIndex(i)}
+                  <span className={s.inboxRowMark}>
+                    <ProviderMark provider={r.p} size={28} />
+                  </span>
+                  <span className={s.inboxRowTitle}>
+                    {r.p} · {r.t}
+                  </span>
+                  <span className={s.levelPill} style={{ color: r.color, background: r.bg }}>
+                    {r.glyph} {r.level}
+                  </span>
+                  <span className={s.inboxRowSub}>{r.sub}</span>
+                  <span className={s.inboxRowTime}>{r.time}</span>
+                </button>
+              );
+              if (i < 2) return <div key={r.p}>{row}</div>;
+              // The low-impact row and its filtered stub share one fixed slot, so the inbox never changes height.
+              return (
+                <div key={r.p} className={s.inboxSlot}>
+                  <div
+                    className={s.inboxFade}
+                    style={{
+                      opacity: hidden ? 0 : 0.75,
+                      visibility: hidden ? "hidden" : "visible",
+                    }}
                   >
-                    <span className={s.inboxRowMark}>
-                      <ProviderMark provider={r.p} size={28} />
-                    </span>
-                    <span className={s.inboxRowTitle}>
-                      {r.p} · {r.t}
-                    </span>
-                    <span className={s.levelPill} style={{ color: r.color, background: r.bg }}>
-                      {r.glyph} {r.level}
-                    </span>
-                    <span className={s.inboxRowSub}>{r.sub}</span>
-                    <span className={s.inboxRowTime}>{r.time}</span>
-                  </button>
+                    {row}
+                  </div>
+                  <div
+                    aria-hidden={!collapsed}
+                    className={s.inboxFade}
+                    style={{
+                      opacity: collapsed ? 1 : 0,
+                      transitionDelay: collapsed ? ".25s" : "0s",
+                    }}
+                  >
+                    <div className={s.filteredRow}>
+                      <ProviderMark provider="Supabase" size={18} />
+                      <span className={s.clip}>Supabase · Documentation updated</span>
+                      <span className={s.monoXs}>FILTERED · NO IMPACT</span>
+                    </div>
+                  </div>
                 </div>
               );
             })}
-            <div
-              className={s.inboxCollapse}
-              style={{
-                maxHeight: collapsed ? 60 : 0,
-                opacity: collapsed ? 1 : 0,
-                transitionDelay: "0s, .2s",
-              }}
-            >
-              <div className={s.filteredRow}>
-                <ProviderMark provider="Supabase" size={18} />
-                <span className={s.clip}>Supabase · Documentation updated</span>
-                <span className={s.monoXs}>FILTERED · NO IMPACT</span>
-              </div>
-            </div>
           </div>
         </div>
         <div className={s.inboxDetail}>
-          <div className={s.inboxDetailTop}>
-            <span className={s.levelPillLg} style={{ color: detail.color, background: detail.bg }}>
-              {detail.glyph} {detail.level}
-            </span>
-            <span className={s.monoSm}>{detail.time}</span>
-          </div>
-          <div className={s.inboxDetailHead}>
-            <ProviderMark provider={detail.p} size={44} />
-            <div className={s.rowText}>
-              <span className={s.detailProvider}>{detail.p}</span>
-              <span className={s.detailTitle}>{detail.t}</span>
-            </div>
-          </div>
-          <div className={s.kvCard}>
-            {detail.details.map((x) => (
-              <div key={x.k} className={s.kvRow}>
-                <span>{x.k}</span>
-                <strong>{x.v}</strong>
+          {/* Every detail is laid out in one stacked cell so switching never changes the pane height. */}
+          {rows.map((d, i) => (
+            <div
+              key={d.p}
+              aria-hidden={i !== selectedIndex}
+              className={s.inboxDetailBody}
+              style={{ visibility: i === selectedIndex ? "visible" : "hidden" }}
+            >
+              <div className={s.inboxDetailTop}>
+                <span className={s.levelPillLg} style={{ color: d.color, background: d.bg }}>
+                  {d.glyph} {d.level}
+                </span>
+                <span className={s.monoSm}>{d.time}</span>
               </div>
-            ))}
-          </div>
-          <div className={s.verified}>
-            <span>✓</span>Source verified · {detail.src}
-          </div>
+              <div className={s.inboxDetailHead}>
+                <ProviderMark provider={d.p} size={44} />
+                <div className={s.rowText}>
+                  <span className={s.detailProvider}>{d.p}</span>
+                  <span className={s.detailTitle}>{d.t}</span>
+                </div>
+              </div>
+              <div className={s.kvCard}>
+                {d.details.map((x) => (
+                  <div key={x.k} className={s.kvRow}>
+                    <span>{x.k}</span>
+                    <strong>{x.v}</strong>
+                  </div>
+                ))}
+              </div>
+              <div className={s.verified}>
+                <span>✓</span>Source verified · {d.src}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </div>
