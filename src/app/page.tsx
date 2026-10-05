@@ -454,10 +454,6 @@ export default function Home() {
             </h2>
           </div>
           <CoverageCatalog />
-          <p className={s.disclaimer}>
-            Exact sources are confirmed for each dependency during setup. Provider names and marks
-            identify providers only; Auterim is not affiliated with or endorsed by them.
-          </p>
         </section>
 
         {/* 10 Pricing */}

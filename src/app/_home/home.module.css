@@ -1912,6 +1912,123 @@
 }
 
 /* 05 Inbox */
+.inboxStage {
+  position: relative;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.inboxStage::before {
+  content: "";
+  position: absolute;
+  inset: 18% 8% -6%;
+  z-index: 0;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(79, 125, 243, 0.28), transparent);
+  filter: blur(40px);
+  pointer-events: none;
+}
+.inboxStage > * {
+  position: relative;
+  z-index: 1;
+}
+.signal {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  align-items: end;
+  gap: clamp(20px, 4vw, 56px);
+  padding: clamp(18px, 2.4vw, 26px) clamp(18px, 2.6vw, 28px);
+  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(143, 163, 194, 0.08), rgba(143, 163, 194, 0.03));
+  box-shadow:
+    inset 0 0 0 1px rgba(143, 163, 194, 0.16),
+    inset 0 1px 0 rgba(243, 238, 227, 0.06);
+}
+.signalStats {
+  display: flex;
+  gap: clamp(20px, 3vw, 40px);
+  margin: 0;
+}
+.signalStat,
+.signalStatStrong {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 6px;
+}
+.signalStat dt,
+.signalStatStrong dt {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--mist);
+  white-space: nowrap;
+}
+.signalStat dd,
+.signalStatStrong dd {
+  margin: 0;
+  font-size: clamp(32px, 3.6vw, 44px);
+  font-weight: 500;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: rgba(243, 238, 227, 0.55);
+}
+.signalStatStrong dd {
+  color: var(--cream);
+}
+.signalStatStrong dt {
+  color: var(--cream);
+}
+.signalDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #e0785f;
+  box-shadow: 0 0 0 3px rgba(224, 120, 95, 0.18);
+}
+.signalWave {
+  height: 64px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 3px;
+}
+.tick,
+.tickAction,
+.tickReview {
+  flex: 1 1 0;
+  max-width: 6px;
+  min-width: 2px;
+  border-radius: 2px;
+  background: rgba(143, 163, 194, 0.22);
+  transform: scaleY(0.04);
+  transform-origin: bottom;
+  transition: transform 0.7s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.tickAction {
+  background: linear-gradient(180deg, #f08a70, #a8402d);
+  box-shadow: 0 0 14px rgba(224, 120, 95, 0.55);
+}
+.tickReview {
+  background: linear-gradient(180deg, #8fb0ff, #2f5bd8);
+  box-shadow: 0 0 14px rgba(79, 125, 243, 0.55);
+}
+.signalOn .tick,
+.signalOn .tickAction,
+.signalOn .tickReview {
+  transform: scaleY(1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .tick,
+  .tickAction,
+  .tickReview {
+    transition: none;
+  }
+}
 .inbox {
   width: 100%;
   display: grid;
@@ -1995,10 +2112,21 @@
   outline-offset: -2px;
 }
 .inboxRowOn {
+  position: relative;
   background: #ffffff;
   box-shadow:
     0 0 0 1px rgba(14, 27, 46, 0.1),
     0 6px 16px -10px rgba(14, 27, 46, 0.3);
+}
+.inboxRowOn::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 14px;
+  bottom: 14px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--blue);
 }
 .inboxRowMark {
   grid-row: span 2;
@@ -2750,11 +2878,6 @@
   color: var(--blue);
   white-space: nowrap;
 }
-.disclaimer {
-  margin: 0;
-  font-size: 12.5px;
-  color: var(--slate-3);
-}
 
 /* 10 Pricing */
 .pricingSection {
@@ -3408,6 +3531,27 @@
     font-size: 13.5px;
   }
 
+  /* 05: stats above a full-width waveform */
+  .signal {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 18px;
+  }
+  .signalStats {
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .signalStat dt,
+  .signalStatStrong dt {
+    font-size: 10px;
+    white-space: normal;
+  }
+  .signalWave {
+    height: 52px;
+  }
+  .signalWave > :nth-child(n + 33) {
+    display: none;
+  }
+
   /* 05: full titles, level and time on their own line */
   .inbox {
     border-radius: 18px;
@@ -3514,10 +3658,6 @@
   .catalogHead,
   .catalogRow {
     padding: 10px 16px;
-  }
-  .disclaimer {
-    font-size: 12px;
-    line-height: 1.55;
   }
 
   /* 10 */
