@@ -14,7 +14,11 @@ Set `PUBLIC_RATE_LIMIT_HMAC_SECRET` to a dedicated random server-only value with
 
 ## Launch quotas
 
-Dependency capacities are 20/75/250 for Core/Pro/Business. Protected repositories are 0/5/25. The database repository-limit function and canonical plan catalog use the same values. A normalized service/product entity and its separate 1/3/10 entitlement are not yet represented in the database; see [service-scoped relevance](service-scoped-relevance.md) for the safe foundation and migration sequence.
+Dependency capacities are 20/75/250 for Core/Pro/Business. Protected repositories are 0/5/25. Protected product capacities are 1/3/10. Workspace dependencies are related to a protected product through `protected_product_id`; global provider intelligence remains shared. Product dependency operations take the product ID explicitly while the legacy onboarding operations continue to use the workspace default.
+
+Product creation requires an `Idempotency-Key` header (8–128 characters). The database stores the key, canonical request payload, and original response in a server-only schema within the same transaction as product creation. Identical retries replay the original response for 30 days; reusing a key with a different payload is rejected. Expired receipts are pruned in bounded batches during subsequent product creation. Product archive/create, Preflight claims, and Preflight result commits serialize on the workspace row so an archived product cannot accept new committed Preflight findings.
+
+See [service-scoped relevance](service-scoped-relevance.md) for product-specific dependency relevance and migration background.
 
 ## Provider error safety
 

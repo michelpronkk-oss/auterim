@@ -76,7 +76,11 @@ describe("products API", () => {
     const response = await POST(
       new Request("https://auterim.com/api/products", {
         method: "POST",
-        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        headers: {
+          authorization: "Bearer test-token",
+          "content-type": "application/json",
+          "idempotency-key": "create-console-001",
+        },
         body: JSON.stringify({
           workspaceId,
           name: "Console",
@@ -101,7 +105,11 @@ describe("products API", () => {
     const response = await POST(
       new Request("https://auterim.com/api/products", {
         method: "POST",
-        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        headers: {
+          authorization: "Bearer test-token",
+          "content-type": "application/json",
+          "idempotency-key": "create-console-001",
+        },
         body: JSON.stringify({
           workspaceId,
           name: "Console",
@@ -112,12 +120,26 @@ describe("products API", () => {
     );
 
     expect(response.status).toBe(201);
-    expect(mocks.rpc).toHaveBeenCalledWith("create_workspace_product", {
+    expect(mocks.rpc).toHaveBeenCalledWith("create_workspace_product_idempotent", {
       p_workspace_id: workspaceId,
       p_name: "Console",
       p_surfaces: surfaces,
       p_replace_product_id: productId,
+      p_idempotency_key: "create-console-001",
     });
+  });
+
+  it("requires an idempotency key before product creation", async () => {
+    const response = await POST(
+      new Request("https://auterim.com/api/products", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, name: "Console", surfaces: [] }),
+      }),
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "idempotency_key_required" });
+    expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
   it("maps last-default archive rejection to a conflict without deleting history", async () => {

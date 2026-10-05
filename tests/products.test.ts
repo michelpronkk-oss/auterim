@@ -35,6 +35,15 @@ const productMigration = await readFile(
   ),
   "utf8",
 );
+const m15FollowupMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261022000000_m15_product_scoped_dependencies_and_idempotency.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function database(includeProducts = true) {
   const db = new PGlite();
@@ -51,7 +60,10 @@ async function database(includeProducts = true) {
     grant execute on function auth.uid() to anon, authenticated;
   `);
   for (const migration of migrations) await db.exec(migration);
-  if (includeProducts) await db.exec(productMigration);
+  if (includeProducts) {
+    await db.exec(productMigration);
+    await db.exec(m15FollowupMigration);
+  }
   return db;
 }
 
@@ -212,6 +224,207 @@ describe("protected product entitlement foundation", () => {
     expect(surfaces.rows).toEqual([
       { surface_type: "website", url: "https://preactivation-surface.example/" },
     ]);
+  });
+
+  it("attaches dependencies to an explicitly selected product with same-product idempotency", async () => {
+    const db = await database();
+    dbs.push(db);
+    const { workspaceId } = await newWorkspace(db, "product-dependency-scope", "pro");
+    await db.query("select public.create_workspace_product($1,'Second Product','[]'::jsonb)", [
+      workspaceId,
+    ]);
+    const products = await db.query<{ id: string; is_default: boolean }>(
+      "select id,is_default from public.workspace_products where workspace_id=$1 order by is_default desc",
+      [workspaceId],
+    );
+    const first = await db.query<{ value: { workspaceDependencyId: string } }>(
+      "select public.add_product_dependency_manually($1,$2,'openai') as value",
+      [workspaceId, products.rows[0]!.id],
+    );
+    const sameProductRetry = await db.query<{ value: { workspaceDependencyId: string } }>(
+      "select public.add_product_dependency_manually($1,$2,'openai') as value",
+      [workspaceId, products.rows[0]!.id],
+    );
+    const secondProduct = await db.query<{ value: { workspaceDependencyId: string } }>(
+      "select public.add_product_dependency_manually($1,$2,'openai') as value",
+      [workspaceId, products.rows[1]!.id],
+    );
+    const rows = await db.query<{ protected_product_id: string; id: string }>(
+      "select protected_product_id,id from public.workspace_dependencies where workspace_id=$1 and dependency_id=(select id from public.dependency_catalog where slug='openai') order by protected_product_id",
+      [workspaceId],
+    );
+    expect(sameProductRetry.rows[0]!.value.workspaceDependencyId).toBe(
+      first.rows[0]!.value.workspaceDependencyId,
+    );
+    expect(secondProduct.rows[0]!.value.workspaceDependencyId).not.toBe(
+      first.rows[0]!.value.workspaceDependencyId,
+    );
+    expect(rows.rows).toHaveLength(2);
+    expect(new Set(rows.rows.map((row) => row.protected_product_id))).toEqual(
+      new Set(products.rows.map((product) => product.id)),
+    );
+  });
+
+  it("replays product creation by idempotency key and rejects changed payloads", async () => {
+    const db = await database();
+    dbs.push(db);
+    const { workspaceId } = await newWorkspace(db, "product-idempotency", "pro");
+    const args = [workspaceId, "Console", JSON.stringify([]), null, "create-console-001"];
+    const created = await db.query<{ value: { product: { id: string } } }>(
+      "select public.create_workspace_product_idempotent($1,$2,$3::jsonb,$4,$5) as value",
+      args,
+    );
+    const retry = await db.query<{ value: { product: { id: string } } }>(
+      "select public.create_workspace_product_idempotent($1,$2,$3::jsonb,$4,$5) as value",
+      args,
+    );
+    expect(retry.rows[0]!.value.product.id).toBe(created.rows[0]!.value.product.id);
+    await expect(
+      db.query("select public.create_workspace_product_idempotent($1,$2,$3::jsonb,$4,$5)", [
+        workspaceId,
+        "Different payload",
+        JSON.stringify([]),
+        null,
+        "create-console-001",
+      ]),
+    ).rejects.toThrow("product_idempotency_key_reused");
+    const count = await db.query<{ count: number }>(
+      "select count(*)::int as count from public.workspace_products where workspace_id=$1",
+      [workspaceId],
+    );
+    expect(count.rows[0]!.count).toBe(2);
+  });
+
+  it("confirms a discovery candidate for one product and retains its provenance", async () => {
+    const db = await database();
+    dbs.push(db);
+    const { workspaceId, companyId } = await newWorkspace(db, "product-candidate", "pro");
+    await db.query("select public.create_workspace_product($1,'Second Product','[]'::jsonb)", [
+      workspaceId,
+    ]);
+    const products = await db.query<{ id: string }>(
+      "select id from public.workspace_products where workspace_id=$1 order by is_default desc",
+      [workspaceId],
+    );
+    const candidate = await db.query<{ id: string }>(
+      `insert into public.discovered_dependencies
+        (workspace_id,company_id,dependency_id,confidence,confidence_label,evidence_summary)
+       select $1,$2,id,0.9,'high','[]'::jsonb from public.dependency_catalog where slug='vercel'
+       returning id`,
+      [workspaceId, companyId],
+    );
+    const confirmedFirst = await db.query<{
+      value: { workspaceDependencyId: string; productId: string; decision: string };
+    }>("select public.decide_product_dependency_candidate($1,$2,$3,'confirmed') as value", [
+      workspaceId,
+      products.rows[0]!.id,
+      candidate.rows[0]!.id,
+    ]);
+    const confirmed = await db.query<{
+      value: { workspaceDependencyId: string; productId: string; decision: string };
+    }>("select public.decide_product_dependency_candidate($1,$2,$3,'confirmed') as value", [
+      workspaceId,
+      products.rows[1]!.id,
+      candidate.rows[0]!.id,
+    ]);
+    const retry = await db.query<{
+      value: { workspaceDependencyId: string; productId: string; decision: string };
+    }>("select public.decide_product_dependency_candidate($1,$2,$3,'confirmed') as value", [
+      workspaceId,
+      products.rows[1]!.id,
+      candidate.rows[0]!.id,
+    ]);
+    const history = await db.query<{ status: string; links: number }>(
+      `select candidate.status,
+        (select count(*)::int from public.workspace_dependency_discovery_links link
+         where link.discovered_dependency_id=candidate.id) as links
+       from public.discovered_dependencies candidate where candidate.id=$1`,
+      [candidate.rows[0]!.id],
+    );
+    expect(confirmed.rows[0]!.value.productId).toBe(products.rows[1]!.id);
+    expect(retry.rows[0]!.value.workspaceDependencyId).toBe(
+      confirmed.rows[0]!.value.workspaceDependencyId,
+    );
+    expect(confirmedFirst.rows[0]!.value.workspaceDependencyId).not.toBe(
+      confirmed.rows[0]!.value.workspaceDependencyId,
+    );
+    expect(history.rows).toEqual([{ status: "confirmed", links: 2 }]);
+  });
+
+  it("denies cross-workspace product dependencies and nonmembers", async () => {
+    const db = await database();
+    dbs.push(db);
+    const first = await newWorkspace(db, "product-dependency-owner", "pro");
+    const second = await newWorkspace(db, "product-dependency-other", "pro");
+    const secondProduct = await db.query<{ id: string }>(
+      "select id from public.workspace_products where workspace_id=$1 limit 1",
+      [second.workspaceId],
+    );
+    const firstOwner = await db.query<{ user_id: string }>(
+      "select user_id from public.workspace_members where workspace_id=$1 and role='owner'",
+      [first.workspaceId],
+    );
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [
+      firstOwner.rows[0]!.user_id,
+    ]);
+    await expect(
+      db.query("select public.add_product_dependency_manually($1,$2,'openai')", [
+        first.workspaceId,
+        secondProduct.rows[0]!.id,
+      ]),
+    ).rejects.toThrow("product_not_found");
+    await db.query("insert into auth.users(id) values ($1)", [outsiderId]);
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [outsiderId]);
+    await expect(
+      db.query("select public.add_product_dependency_manually($1,$2,'openai')", [
+        first.workspaceId,
+        secondProduct.rows[0]!.id,
+      ]),
+    ).rejects.toThrow("Workspace is not available");
+  });
+
+  it("grants only authenticated execution of product operations and keeps idempotency rows private", async () => {
+    const db = await database();
+    dbs.push(db);
+    const privileges = await db.query<{
+      add_allowed: boolean;
+      read_allowed: boolean;
+      anon_add_allowed: boolean;
+      anon_table_read: boolean;
+      authenticated_table_read: boolean;
+    }>(`
+      select
+        has_function_privilege('authenticated','public.add_product_dependency_manually(uuid,uuid,text)','EXECUTE') as add_allowed,
+        has_function_privilege('authenticated','public.get_product_dependencies(uuid,uuid)','EXECUTE') as read_allowed,
+        has_function_privilege('anon','public.add_product_dependency_manually(uuid,uuid,text)','EXECUTE') as anon_add_allowed,
+        has_table_privilege('anon','private.workspace_product_requests','SELECT') as anon_table_read,
+        has_table_privilege('authenticated','private.workspace_product_requests','SELECT') as authenticated_table_read
+    `);
+    expect(privileges.rows[0]).toEqual({
+      add_allowed: true,
+      read_allowed: true,
+      anon_add_allowed: false,
+      anon_table_read: false,
+      authenticated_table_read: false,
+    });
+  });
+
+  it("serializes concurrent same-key product creation retries to one product", async () => {
+    const db = await database();
+    dbs.push(db);
+    const { workspaceId } = await newWorkspace(db, "product-idempotency-concurrent", "pro");
+    const query = () =>
+      db.query<{ value: { product: { id: string } } }>(
+        "select public.create_workspace_product_idempotent($1,$2,$3::jsonb,$4,$5) as value",
+        [workspaceId, "Concurrent Console", JSON.stringify([]), null, "concurrent-console-01"],
+      );
+    const [first, second] = await Promise.all([query(), query()]);
+    expect(first.rows[0]!.value.product.id).toBe(second.rows[0]!.value.product.id);
+    const count = await db.query<{ count: number }>(
+      "select count(*)::int as count from public.workspace_products where workspace_id=$1",
+      [workspaceId],
+    );
+    expect(count.rows[0]!.count).toBe(2);
   });
 
   it("preserves history on replace/archive and continues attaching legacy onboarding dependencies to the default", async () => {

@@ -88,12 +88,23 @@ export async function POST(request: Request) {
   if (role !== "owner" && role !== "admin")
     return Response.json({ error: "owner_or_admin_required" }, { status: 403 });
 
-  const { data, error } = await auth.client.rpc("create_workspace_product", {
+  const idempotencyKey = request.headers.get("idempotency-key")?.trim();
+  if (!idempotencyKey || idempotencyKey.length < 8 || idempotencyKey.length > 128)
+    return Response.json({ error: "idempotency_key_required" }, { status: 400 });
+
+  const { data, error } = await auth.client.rpc("create_workspace_product_idempotent", {
     p_workspace_id: input.workspaceId,
     p_name: input.name,
     p_surfaces: input.surfaces,
     p_replace_product_id: input.replaceProductId ?? null,
+    p_idempotency_key: idempotencyKey,
   });
-  if (error) return createError(error);
+  if (error) {
+    if (error.message?.includes("product_idempotency_key_reused"))
+      return Response.json({ error: "idempotency_key_reused" }, { status: 409 });
+    if (error.message?.includes("invalid_product_idempotency_key"))
+      return Response.json({ error: "idempotency_key_required" }, { status: 400 });
+    return createError(error);
+  }
   return Response.json(data, { status: 201 });
 }
