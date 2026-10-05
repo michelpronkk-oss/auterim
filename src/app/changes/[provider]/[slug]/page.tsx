@@ -74,7 +74,7 @@ export default async function PublicChangePage({
   return (
     <PublicShell current="changes">
       <article className="public-change-detail">
-        <p className="eyebrow">{data.provider.name} · APPROVED PUBLIC CHANGE</p>
+        <p className="eyebrow">{data.provider.name} · APPROVED CHANGE</p>
         <h1>{data.headline}</h1>
         <p className="public-lead">{data.whatChanged}</p>
         {data.generalImpact && (
@@ -85,7 +85,7 @@ export default async function PublicChangePage({
         )}
         {data.affectedPublicEntities.length > 0 && (
           <section>
-            <h2>Public entities mentioned in the evidence</h2>
+            <h2>Entities mentioned in the evidence</h2>
             <ul>
               {data.affectedPublicEntities.map((entity) => (
                 <li key={entity}>{entity}</li>

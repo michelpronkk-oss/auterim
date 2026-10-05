@@ -49,8 +49,8 @@ export default async function ProviderHubPage({
         <p className="eyebrow">PROVIDER HUB · {provider.category.toUpperCase()}</p>
         <h1>{provider.name} changes and updates</h1>
         <p>
-          Evidence-backed public changes approved by Auterim’s policy. A provider mention or date
-          alone is not a claim about your own systems.
+          Evidence-backed changes approved by Auterim’s policy. A provider mention or date alone is
+          not a claim about your own systems.
         </p>
         <div className="public-card-meta">
           <span>
@@ -112,7 +112,7 @@ export default async function ProviderHubPage({
                     className="public-text-link"
                     href={`/changes/${provider.slug}/${update.canonicalSlug}`}
                   >
-                    Open the public change page →
+                    Open the change page →
                   </Link>
                 )}
               </article>
@@ -120,13 +120,13 @@ export default async function ProviderHubPage({
           </div>
         ) : (
           <p className="public-empty">
-            This provider does not have enough current approved material for a public hub.
+            This provider does not have enough current approved material for a provider hub.
           </p>
         )}
       </section>
       <p className="public-source-note">
-        <Link href="/tools/stack-scanner">Scan your public stack</Link> to see likely dependencies,
-        then confirm them in your workspace before Auterim protects them.
+        <Link href="/tools/stack-scanner">Scan your stack</Link> to see likely dependencies, then
+        confirm them in your workspace before Auterim protects them.
       </p>
     </PublicShell>
   );

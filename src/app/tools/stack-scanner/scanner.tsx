@@ -103,12 +103,12 @@ export function StackScanner() {
             maxLength={2048}
           />
           <button className="primary-link scanner-submit" disabled={busy}>
-            {busy ? "Checking…" : "Scan public signals"} <span aria-hidden="true">→</span>
+            {busy ? "Checking…" : "Scan website signals"} <span aria-hidden="true">→</span>
           </button>
         </div>
         <p className="scanner-note">
-          Fast pass only. We check public page metadata and linked resources; we do not sign in,
-          crawl private pages, or claim a complete stack.
+          Fast pass only. We check page metadata and linked resources; we do not sign in, crawl
+          private pages, or claim a complete stack.
         </p>
       </form>
       {message && (
@@ -120,7 +120,7 @@ export function StackScanner() {
         <section className="scan-results" aria-live="polite" aria-labelledby="scan-results-title">
           <div className="public-section-heading">
             <div>
-              <p className="eyebrow">PUBLIC SIGNALS FOUND</p>
+              <p className="eyebrow">SIGNALS FOUND</p>
               <h2 id="scan-results-title">{scan.candidateCount} likely dependencies</h2>
               <p>
                 Signals are suggestions based on visible technical markers, not confirmation that
@@ -130,8 +130,8 @@ export function StackScanner() {
           </div>
           {scan.status === "partial" && (
             <p className="public-alert" role="status">
-              This scan reached an inspection limit. It kept the public signals it could verify;
-              results may be incomplete.
+              This scan reached an inspection limit. It kept the signals it could verify; results
+              may be incomplete.
             </p>
           )}
           {scan.status === "failed" && (
@@ -147,7 +147,7 @@ export function StackScanner() {
                   <span>
                     <strong>{candidate.provider}</strong>
                     <small>
-                      {candidate.evidenceCount} public signal
+                      {candidate.evidenceCount} website signal
                       {candidate.evidenceCount === 1 ? "" : "s"} ·{" "}
                       {candidate.signalTypes.join(", ")}
                     </small>
@@ -160,8 +160,8 @@ export function StackScanner() {
             </ul>
           ) : (
             <p className="public-empty">
-              No registered provider markers were found on this public page. That does not mean the
-              company has no dependencies.
+              No registered provider markers were found on this page. That does not mean the company
+              has no dependencies.
             </p>
           )}
           <Link

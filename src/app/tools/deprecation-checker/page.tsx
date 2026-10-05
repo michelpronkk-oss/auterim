@@ -6,7 +6,7 @@ export const revalidate = 300;
 export const metadata: Metadata = {
   title: "Deprecation and deadline checker",
   description:
-    "Review current approved software deprecation and retirement changes from authoritative public sources.",
+    "Review current approved software deprecation and retirement changes from authoritative provider sources.",
   alternates: { canonical: "/tools/deprecation-checker" },
 };
 
