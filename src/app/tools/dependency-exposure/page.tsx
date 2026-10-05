@@ -17,7 +17,7 @@ export default async function DependencyExposurePage({
 }) {
   const { provider } = await searchParams;
   return (
-    <PublicShell>
+    <PublicShell current="tools">
       <section className="public-page-intro">
         <p className="eyebrow">DEPENDENCY EXPOSURE</p>
         <h1>Check monitoring coverage for a dependency.</h1>

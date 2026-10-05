@@ -6,18 +6,77 @@ import { focusHeroInput } from "@/app/_home/hero";
 import { BrandMark } from "@/app/_home/marks";
 import s from "./site.module.css";
 
-export type SiteSection = "product" | "pricing" | "changes" | "tools" | "legal";
+export type SiteSection = "product" | "how" | "pricing" | "changes" | "tools" | "legal";
 
-const primary: Array<{ href: string; label: string; key?: SiteSection }> = [
-  { href: "/product", label: "Product", key: "product" },
-  { href: "/product#how-it-works", label: "How it works" },
-  { href: "/#pricing", label: "Pricing", key: "pricing" },
-  { href: "/changes", label: "Changes", key: "changes" },
+type NavItem = { href: string; label: string; key?: SiteSection; hint: string; icon: IconName };
+
+const primary: NavItem[] = [
+  {
+    href: "/product",
+    label: "Product",
+    key: "product",
+    hint: "What Auterim does, part by part",
+    icon: "layers",
+  },
+  {
+    href: "/how-it-works",
+    label: "How it works",
+    key: "how",
+    hint: "One change, followed start to finish",
+    icon: "route",
+  },
+  {
+    href: "/#pricing",
+    label: "Pricing",
+    key: "pricing",
+    hint: "Core, Pro and Business",
+    icon: "tag",
+  },
+  {
+    href: "/changes",
+    label: "Changes",
+    key: "changes",
+    hint: "What providers changed recently",
+    icon: "pulse",
+  },
 ];
 
-const mobileOnly: Array<{ href: string; label: string; key?: SiteSection }> = [
-  { href: "/tools", label: "Tools", key: "tools" },
+const mobileOnly: NavItem[] = [
+  {
+    href: "/tools",
+    label: "Tools",
+    key: "tools",
+    hint: "Free scanners and checkers",
+    icon: "tool",
+  },
 ];
+
+type IconName = "layers" | "route" | "tag" | "pulse" | "tool";
+
+/** Small line icons for the mobile menu, drawn on a 20px grid. */
+const iconPaths: Record<IconName, string> = {
+  layers: "M10 3 3 6.5 10 10l7-3.5L10 3ZM3 10l7 3.5 7-3.5M3 13.5 10 17l7-3.5",
+  route:
+    "M5 4.5a1.5 1.5 0 1 0 0 .01M15 15.5a1.5 1.5 0 1 0 0 .01M6.5 4.5h6a2.5 2.5 0 0 1 0 5h-5a2.5 2.5 0 0 0 0 5h6",
+  tag: "M3.5 3.5h6l7 7-6 6-7-7v-6ZM7 7h.01",
+  pulse: "M2.5 10h3l2-5 4 10 2-5h4",
+  tool: "M12.5 3.5a4 4 0 0 0-3.9 5L3.5 13.6a1.4 1.4 0 0 0 2 2l5.1-5.1a4 4 0 0 0 5-3.9l-2.4 2.4-2.1-.6-.6-2.1 2.4-2.4Z",
+};
+
+function MenuIcon({ name }: { name: IconName }) {
+  return (
+    <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true">
+      <path
+        d={iconPaths[name]}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
 
 const MOBILE_QUERY = "(max-width: 879px)";
 
@@ -47,7 +106,8 @@ export function SiteHeader({
     const root = document.documentElement;
     const previous = root.style.overflow;
     root.style.overflow = "hidden";
-    wrapRef.current?.querySelector<HTMLAnchorElement>("[data-menu-link]")?.focus();
+    // Focus the panel itself, so a tap does not draw a focus ring on the first item.
+    wrapRef.current?.querySelector<HTMLElement>("[data-menu-panel]")?.focus();
 
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") close(true);
@@ -123,27 +183,37 @@ export function SiteHeader({
         </header>
         <div id={panelId} className={s.menu} hidden={!open}>
           {open ? (
-            <nav aria-label="Mobile navigation" className={s.menuInner}>
+            <nav
+              aria-label="Mobile navigation"
+              className={s.menuInner}
+              data-menu-panel
+              tabIndex={-1}
+            >
               <ul className={s.menuList}>
-                {[...primary, ...mobileOnly].map((item) => (
-                  <li key={item.href}>
+                {[...primary, ...mobileOnly].map((item, i) => (
+                  <li key={item.href} style={{ ["--i" as string]: i }}>
                     <Link
-                      data-menu-link
                       href={item.href}
                       className={s.menuLink}
                       aria-current={isActive(item.key)}
                       onClick={() => close()}
                     >
-                      {item.label}
-                      <span aria-hidden="true" className={s.menuArrow}>
-                        →
+                      <span className={s.menuIcon}>
+                        <MenuIcon name={item.icon} />
                       </span>
+                      <span className={s.menuText}>
+                        <span className={s.menuLabel}>{item.label}</span>
+                        <span className={s.menuHint}>{item.hint}</span>
+                      </span>
+                      {isActive(item.key) ? (
+                        <span className={s.menuHere} aria-hidden="true" />
+                      ) : null}
                     </Link>
                   </li>
                 ))}
               </ul>
               <div className={s.menuRule} />
-              <Link href="/login" className={s.menuLink} onClick={() => close()}>
+              <Link href="/login" className={s.menuSignIn} onClick={() => close()}>
                 Sign in
               </Link>
               <Link href="/#scan" className={s.menuCta} onClick={onScan}>

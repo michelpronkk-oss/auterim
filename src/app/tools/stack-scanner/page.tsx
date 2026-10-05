@@ -3,20 +3,20 @@ import { PublicShell } from "@/app/public-surfaces";
 import { StackScanner } from "./scanner";
 
 export const metadata: Metadata = {
-  title: "Public stack scanner",
-  description: "Scan a public company homepage for deterministic technology dependency signals.",
+  title: "Stack scanner",
+  description: "Scan a company homepage for deterministic technology dependency signals.",
   alternates: { canonical: "/tools/stack-scanner" },
   robots: { index: false, follow: false },
 };
 
 export default function StackScannerPage() {
   return (
-    <PublicShell>
+    <PublicShell current="tools">
       <section className="public-page-intro scanner-intro">
-        <p className="eyebrow">PUBLIC STACK SCANNER</p>
-        <h1>Find likely dependencies from public signals.</h1>
+        <p className="eyebrow">STACK SCANNER</p>
+        <h1>Find likely dependencies from website signals.</h1>
         <p>
-          Enter a company homepage. Auterim checks the public response and linked resources for
+          Enter a company homepage. Auterim checks the homepage response and linked resources for
           deterministic provider markers using its existing safe-fetch controls.
         </p>
       </section>

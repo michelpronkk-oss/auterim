@@ -9,7 +9,7 @@ export const revalidate = 300;
 export const metadata: Metadata = {
   title: "Verified software changes",
   description:
-    "Browse current and upcoming software changes approved from authoritative public sources.",
+    "Browse current and upcoming software changes approved from authoritative provider sources.",
   alternates: { canonical: "/changes" },
 };
 
@@ -19,13 +19,13 @@ export default async function ChangesPage() {
     getApprovedPublicProviders(),
   ]);
   return (
-    <PublicShell>
+    <PublicShell current="changes">
       <section className="public-page-intro">
-        <p className="eyebrow">PUBLIC SOFTWARE INTELLIGENCE</p>
+        <p className="eyebrow">SOFTWARE CHANGE INTELLIGENCE</p>
         <h1>Changes worth a closer look.</h1>
         <p>
           These pages show globally relevant changes Auterim’s evidence policy has approved for
-          public use. They do not represent customer-specific impact.
+          sharing. They do not represent customer-specific impact.
         </p>
       </section>
       <section className="public-section">
@@ -110,13 +110,13 @@ export default async function ChangesPage() {
           </div>
         ) : (
           <p className="public-empty">
-            There are no public change pages that currently meet Auterim’s evidence and freshness
+            There are no change pages that currently meet Auterim’s evidence and freshness
             requirements.
           </p>
         )}
       </section>
       <p className="public-source-note">
-        Each public page links to the original source. Last refreshed from approved evidence; see{" "}
+        Each page links to the original source. Last refreshed from approved evidence; see{" "}
         <a href={`${getPublicSiteOrigin()}/tools`}>free tools</a> for a company-specific starting
         point.
       </p>

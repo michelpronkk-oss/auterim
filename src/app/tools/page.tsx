@@ -5,16 +5,16 @@ import { PublicShell } from "@/app/public-surfaces";
 export const metadata: Metadata = {
   title: "Free dependency tools",
   description:
-    "Scan public technology signals and explore current authoritative dependency coverage.",
+    "Scan website technology signals and explore current authoritative dependency coverage.",
   alternates: { canonical: "/tools" },
 };
 
 const tools = [
   {
     href: "/tools/stack-scanner",
-    title: "Public stack scanner",
+    title: "Stack scanner",
     description:
-      "Check a company homepage for known public technology markers. Results are suggestions, not confirmed dependencies.",
+      "Check a company homepage for known technology markers. Results are suggestions, not confirmed dependencies.",
     tag: "Fast pass · no account",
   },
   {
@@ -29,18 +29,18 @@ const tools = [
     title: "Deprecation and deadline checker",
     description:
       "Review current approved provider changes with an effective date or deprecation-related topic.",
-    tag: "Approved public intelligence",
+    tag: "Approved intelligence",
   },
 ];
 
 export default function ToolsPage() {
   return (
-    <PublicShell>
+    <PublicShell current="tools">
       <section className="public-page-intro">
         <p className="eyebrow">FREE TOOLS</p>
         <h1>Start with a useful signal.</h1>
         <p>
-          Small tools built from public evidence and the real Auterim source catalog. They do not
+          Small tools built from open evidence and the real Auterim source catalog. They do not
           replace a confirmed dependency inventory or customer-specific impact assessment.
         </p>
       </section>

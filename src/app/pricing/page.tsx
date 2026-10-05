@@ -12,7 +12,7 @@ export const metadata: Metadata = {
 
 export default function PricingPage() {
   return (
-    <PublicShell>
+    <PublicShell current="pricing">
       <section className="public-page-intro">
         <p className="eyebrow">PRICING</p>
         <h1>Protection that grows with your team.</h1>

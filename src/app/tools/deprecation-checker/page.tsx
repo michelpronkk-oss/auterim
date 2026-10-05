@@ -6,7 +6,7 @@ export const revalidate = 300;
 export const metadata: Metadata = {
   title: "Deprecation and deadline checker",
   description:
-    "Review current approved software deprecation and retirement changes from authoritative public sources.",
+    "Review current approved software deprecation and retirement changes from authoritative provider sources.",
   alternates: { canonical: "/tools/deprecation-checker" },
 };
 
@@ -17,7 +17,7 @@ export default async function DeprecationCheckerPage({
 }) {
   const { provider } = await searchParams;
   return (
-    <PublicShell>
+    <PublicShell current="tools">
       <section className="public-page-intro">
         <p className="eyebrow">DEPRECATION CHECKER</p>
         <h1>Look for an approved deadline signal.</h1>

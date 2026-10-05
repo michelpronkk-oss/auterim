@@ -61,6 +61,7 @@ export function BrandMark({
 /** Lettered fallback tints for providers without an openly licensed glyph. */
 const providerTint: Record<string, string> = {
   Postmark: "#F5C300",
+  Slack: "#4A154B",
 };
 
 function monogram(name: string) {

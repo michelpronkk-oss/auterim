@@ -82,14 +82,14 @@ export async function ToolResults({ kind, provider }: Props) {
             </ul>
           ) : (
             <p className="public-empty">
-              No currently approved public change page is available for this dependency.
+              No currently approved change page is available for this dependency.
             </p>
           )}
         </article>
       )}
       {kind === "deprecation" && selected && (
         <article className="public-tool-result-card">
-          <p className="eyebrow">APPROVED PUBLIC EVIDENCE</p>
+          <p className="eyebrow">APPROVED EVIDENCE</p>
           <h2>{selected.name}</h2>
           {eligible[0]?.approvedChanges.length ? (
             <ul className="tool-change-results">
