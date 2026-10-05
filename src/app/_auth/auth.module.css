@@ -341,3 +341,23 @@
     font-size: 10.5px;
   }
 }
+
+/* Scale up on large screens, in step with the homepage frame. */
+@media (min-width: 1680px) {
+  .top,
+  .main {
+    zoom: 1.1;
+  }
+}
+@media (min-width: 1920px) {
+  .top,
+  .main {
+    zoom: 1.2;
+  }
+}
+@media (min-width: 2300px) {
+  .top,
+  .main {
+    zoom: 1.32;
+  }
+}
