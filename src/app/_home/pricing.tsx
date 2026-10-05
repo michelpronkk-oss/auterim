@@ -15,7 +15,7 @@ const plans: Plan[] = [
   {
     name: "Core",
     price: 29,
-    line: "Tell me what matters.",
+    line: "Know what matters.",
     features: [
       "External dependency monitoring",
       "Material-change filtering",
@@ -28,13 +28,14 @@ const plans: Plan[] = [
   {
     name: "Pro",
     price: 79,
-    line: "Prove what will break.",
+    line: "Verify it. Fix it.",
     features: [
       "Everything in Core",
       "GitHub connection",
       "Automatic Preflight",
       "Verified code & config impact",
-      "Manual Generate Fix",
+      "Automatic fix preparation",
+      "Grounded remediation guidance",
       "Higher protection limits",
     ],
     cta: "Start 5-day Pro trial",
@@ -44,13 +45,15 @@ const plans: Plan[] = [
   {
     name: "Business",
     price: 199,
-    line: "Prepare prevention automatically.",
+    line: "Automate protection at scale.",
     features: [
       "Everything in Pro",
-      "Automatic remediation preparation",
       "Policy-driven Draft PR preparation",
-      "Larger limits",
-      "Stronger controls",
+      "Automatic workflow handoffs",
+      "Multi-repository protection",
+      "Larger protection limits",
+      "Approval & policy controls",
+      "Stronger operational controls",
     ],
     cta: "Start Business protection",
   },
