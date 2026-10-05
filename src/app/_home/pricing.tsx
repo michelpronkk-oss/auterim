@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { PLAN_CATALOG } from "@/lib/billing/plan-catalog";
 import s from "./home.module.css";
 
 type Plan = {
@@ -7,57 +8,24 @@ type Plan = {
   line: string;
   features: string[];
   cta: string;
+  ctaHref: "/signup";
   note?: string;
   featured?: boolean;
 };
 
-const plans: Plan[] = [
-  {
-    name: "Core",
-    price: 29,
-    line: "Know what matters.",
-    features: [
-      "External dependency monitoring",
-      "Material-change filtering",
-      "Customer-specific impact",
-      "Deadlines & guidance",
-      "Protection reporting",
-    ],
-    cta: "Start protecting",
-  },
-  {
-    name: "Pro",
-    price: 79,
-    line: "Verify it. Fix it.",
-    features: [
-      "Everything in Core",
-      "GitHub connection",
-      "Automatic Preflight",
-      "Verified code & config impact",
-      "Automatic fix preparation",
-      "Grounded remediation guidance",
-      "Higher protection limits",
-    ],
-    cta: "Start 5-day Pro trial",
-    note: "Your 5-day Pro trial starts when protection goes live.",
-    featured: true,
-  },
-  {
-    name: "Business",
-    price: 199,
-    line: "Automate protection at scale.",
-    features: [
-      "Everything in Pro",
-      "Policy-driven Draft PR preparation",
-      "Automatic workflow handoffs",
-      "Multi-repository protection",
-      "Larger protection limits",
-      "Approval & policy controls",
-      "Stronger operational controls",
-    ],
-    cta: "Start Business protection",
-  },
-];
+const plans: Plan[] = (["core", "pro", "business"] as const).map((slug) => {
+  const plan = PLAN_CATALOG[slug];
+  return {
+    name: plan.name,
+    price: plan.priceUsdMonthly,
+    line: plan.tagline,
+    features: plan.highlights,
+    cta: plan.ctaLabel,
+    ctaHref: plan.ctaHref,
+    note: plan.trialNote,
+    featured: slug === "pro",
+  };
+});
 
 function Check() {
   return (
@@ -115,7 +83,7 @@ export function PricingSection() {
                 </li>
               ))}
             </ul>
-            <Link href="/signup" className={plan.featured ? s.planCtaPro : s.planCta}>
+            <Link href={plan.ctaHref} className={plan.featured ? s.planCtaPro : s.planCta}>
               {plan.cta}
             </Link>
             <p className={s.planNote} aria-hidden={plan.note ? undefined : true}>
@@ -125,7 +93,8 @@ export function PricingSection() {
         ))}
       </div>
       <p data-reveal className={s.pricingFoot}>
-        All plans start with dependency discovery.
+        All plans start with dependency discovery. A protected product can include its website, app,
+        docs, API and associated first-party surfaces.
       </p>
     </section>
   );

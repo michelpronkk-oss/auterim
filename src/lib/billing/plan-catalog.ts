@@ -20,6 +20,9 @@ export const PLAN_CATALOG: Record<
     priceUsdMonthly: number;
     tagline: string;
     highlights: string[];
+    ctaLabel: string;
+    ctaHref: "/signup";
+    trialNote?: string;
     limits: {
       protectedDependencies: number;
       repositories: number;
@@ -34,12 +37,17 @@ export const PLAN_CATALOG: Record<
     slug: "core",
     name: "Core",
     priceUsdMonthly: 29,
-    tagline: "Tell me what matters.",
+    tagline: "Know what matters.",
     highlights: [
-      "Dependency monitoring",
+      "1 protected product",
+      "External dependency monitoring",
+      "Material-change filtering",
       "Customer-specific impact",
-      "Change history and protection reports",
+      "Deadlines & guidance",
+      "Protection reporting",
     ],
+    ctaLabel: "Start protecting",
+    ctaHref: "/signup",
     limits: {
       protectedDependencies: 20,
       repositories: 0,
@@ -65,12 +73,20 @@ export const PLAN_CATALOG: Record<
     slug: "pro",
     name: "Pro",
     priceUsdMonthly: 79,
-    tagline: "Prove what will break.",
+    tagline: "Verify it. Fix it.",
     highlights: [
       "Everything in Core",
-      "GitHub connections and automatic Preflight",
-      "Grounded Generate Fix and Draft PR preparation",
+      "Up to 3 protected products",
+      "Up to 5 GitHub repositories",
+      "GitHub connection",
+      "Automatic Preflight",
+      "Verified code & config impact",
+      "Automatic fix preparation for your review",
+      "Grounded remediation guidance",
     ],
+    ctaLabel: "Start 5-day Pro trial",
+    ctaHref: "/signup",
+    trialNote: "Your 5-day Pro trial starts when protection goes live.",
     limits: {
       protectedDependencies: 75,
       repositories: 25,
@@ -96,12 +112,18 @@ export const PLAN_CATALOG: Record<
     slug: "business",
     name: "Business",
     priceUsdMonthly: 199,
-    tagline: "Prepare prevention automatically.",
+    tagline: "Automate protection at scale.",
     highlights: [
       "Everything in Pro",
-      "Policy-driven remediation preparation",
-      "Larger team and usage limits",
+      "Up to 10 protected products",
+      "Up to 25 GitHub repositories",
+      "Policy-driven Draft PR preparation",
+      "Automatic workflow handoffs",
+      "Approval & policy controls",
+      "Multi-repository protection orchestration",
     ],
+    ctaLabel: "Start Business protection",
+    ctaHref: "/signup",
     limits: {
       protectedDependencies: 250,
       repositories: 100,

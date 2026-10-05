@@ -8,6 +8,47 @@ import {
 const workspaceId = "00000000-0000-4000-8000-000000000011";
 
 describe("billing plans and workspace entitlements", () => {
+  it("keeps launch packaging, capacities, trial copy, and signup actions aligned", () => {
+    expect(PLAN_CATALOG.core).toMatchObject({
+      priceUsdMonthly: 29,
+      tagline: "Know what matters.",
+      ctaLabel: "Start protecting",
+      ctaHref: "/signup",
+    });
+    expect(PLAN_CATALOG.core.highlights).toContain("1 protected product");
+    expect(PLAN_CATALOG.core.highlights).not.toContain("GitHub connection");
+
+    expect(PLAN_CATALOG.pro).toMatchObject({
+      priceUsdMonthly: 79,
+      tagline: "Verify it. Fix it.",
+      ctaLabel: "Start 5-day Pro trial",
+      ctaHref: "/signup",
+      trialNote: "Your 5-day Pro trial starts when protection goes live.",
+    });
+    expect(PLAN_CATALOG.pro.highlights).toContain("Up to 3 protected products");
+    expect(PLAN_CATALOG.pro.highlights).toContain("Up to 5 GitHub repositories");
+    expect(PLAN_CATALOG.pro.highlights).toContain("Automatic fix preparation for your review");
+    expect(PLAN_CATALOG.pro.highlights).not.toContain("Higher protection limits");
+
+    expect(PLAN_CATALOG.business).toMatchObject({
+      priceUsdMonthly: 199,
+      tagline: "Automate protection at scale.",
+      ctaLabel: "Start Business protection",
+      ctaHref: "/signup",
+    });
+    expect(PLAN_CATALOG.business.highlights).toEqual(
+      expect.arrayContaining([
+        "Up to 10 protected products",
+        "Up to 25 GitHub repositories",
+        "Policy-driven Draft PR preparation",
+        "Automatic workflow handoffs",
+        "Approval & policy controls",
+        "Multi-repository protection orchestration",
+      ]),
+    );
+    expect(PLAN_CATALOG.business.highlights).not.toContain("Stronger operational controls");
+  });
+
   it("grants the full Pro tier only during the activation-started five-day trial", () => {
     const resolved = resolveWorkspaceEntitlements({
       snapshot: {

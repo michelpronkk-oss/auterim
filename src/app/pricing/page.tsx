@@ -21,8 +21,8 @@ export default function PricingPage() {
           deeper action workflows.
         </p>
         <p className="public-microcopy">
-          The five-day Pro trial begins after protection activation. No trial starts from a
-          pricing-page visit.
+          Your 5-day Pro trial starts when protection goes live. Signing up or visiting this page
+          does not start the trial.
         </p>
       </section>
       <section className="public-pricing-grid" aria-label="Auterim plans">
@@ -45,16 +45,17 @@ export default function PricingPage() {
             </ul>
             <Link
               className={plan.slug === "pro" ? "primary-link" : "button-secondary"}
-              href="/signup"
+              href={plan.ctaHref}
             >
-              Set up your workspace
+              {plan.ctaLabel}
             </Link>
           </article>
         ))}
       </section>
       <p className="pricing-footnote">
-        Plan prices and capability descriptions come from Auterim’s canonical plan catalog.
-        Availability and quotas are checked by the product when you set up a workspace.
+        A protected product can include its website, app, docs, API and associated first-party
+        surfaces. Plan prices and included product and repository allowances come from Auterim’s
+        plan catalog.
       </p>
     </PublicShell>
   );
