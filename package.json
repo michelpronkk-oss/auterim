@@ -27,7 +27,8 @@
     "eval:growth-v2": "vitest run tests/growth-v2.test.ts tests/database.test.ts",
     "eval:connectors": "vitest run tests/connectors.test.ts tests/database.test.ts",
     "eval:dashboard": "vitest run tests/dashboard.test.ts",
-    "eval:public": "vitest run tests/public-growth.test.ts",
+    "eval:public": "vitest run tests/public-growth.test.ts tests/public-discovery.test.ts",
+    "eval:public:live": "vitest run --config vitest.public-live.config.mts",
     "env:check": "node --experimental-strip-types scripts/env-check.mts",
     "project:check": "node --experimental-strip-types scripts/project-check.mts"
   },

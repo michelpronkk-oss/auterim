@@ -1,9 +1,21 @@
-import type { UrlDiscoveryResult } from "@/lib/discovery/discovery";
+import "server-only";
+import { discoverCompanySurfaceDependencies } from "@/lib/discovery/company-surfaces";
+import { evidenceFamily, type UrlDiscoveryResult } from "@/lib/discovery/discovery";
+
+export async function discoverPublicStackScan(websiteUrl: string) {
+  const result = await discoverCompanySurfaceDependencies(websiteUrl, {
+    deep: true,
+    runtimeEnabled: process.env.AUTERIM_DISCOVERY_RUNTIME_ENABLED === "1",
+  });
+  return publicStackScanResult(result);
+}
 
 export function publicStackScanResult(result: UrlDiscoveryResult) {
+  const companyCoverage = result.companyCoverage;
   return {
     status: result.status,
     outcome: result.outcome,
+    partial: result.status === "partial" || result.outcome === "partial",
     candidateCount: result.candidates.length,
     coverage: {
       durationMs: result.coverage.durationMs,
@@ -15,12 +27,27 @@ export function publicStackScanResult(result: UrlDiscoveryResult) {
       scriptsFetched: result.coverage.javascript.scriptsFetched,
       deepBytesFetched: result.coverage.javascript.bytesFetched,
     },
+    companyCoverage: companyCoverage
+      ? {
+          surfacesObserved: companyCoverage.surfacesObserved,
+          surfacesSelected: companyCoverage.surfacesSelected,
+          surfacesScanned: companyCoverage.surfacesScanned,
+          providersSuggested: companyCoverage.providersSuggested,
+          totalDurationMs: companyCoverage.totalDurationMs,
+          totalStaticBytes: companyCoverage.totalStaticBytes,
+          totalRuntimeDurationMs: companyCoverage.totalRuntimeDurationMs,
+          totalRuntimeRequests: companyCoverage.totalRuntimeRequests,
+        }
+      : null,
     candidates: result.candidates.slice(0, 25).map((candidate) => ({
+      providerId: candidate.providerSlug,
       provider: candidate.providerName,
       confidence: candidate.confidence,
       confidenceLabel: candidate.confidenceLabel,
       evidenceCount: candidate.evidence.length,
-      signalTypes: [...new Set(candidate.evidence.map((item) => item.signalType))],
+      evidenceFamilies: [
+        ...new Set(candidate.evidence.map((item) => evidenceFamily(item.signalType))),
+      ],
     })),
   };
 }

@@ -168,11 +168,12 @@ describe("public acquisition surfaces", () => {
     expect(JSON.stringify(result)).not.toContain("customer.example");
     expect(JSON.stringify(result)).not.toContain("x-vercel-id");
     expect(result.candidates[0]).toEqual({
+      providerId: "vercel",
       provider: "Vercel",
       confidence: 0.72,
       confidenceLabel: "medium",
       evidenceCount: 1,
-      signalTypes: ["response_header"],
+      evidenceFamilies: ["hosting_infrastructure"],
     });
   });
 
