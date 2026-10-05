@@ -37,7 +37,8 @@ export default async function DependencyCoveragePage({
   }));
   const quick = [...directory]
     .sort((a, b) => b.authoritativeSources - a.authoritativeSources)
-    .slice(0, 4);
+    .filter((item) => item.authoritativeSources > 0)
+    .slice(0, 6);
   const types = selected ? coverageTypes(selected.sourcesByType) : [];
   const total = selected?.authoritativeSources ?? 0;
 
@@ -61,30 +62,50 @@ export default async function DependencyCoveragePage({
       }
     >
       <section aria-live="polite" className={s.body}>
-        {!selected ? (
+        {!selected && quick.length ? (
+          <>
+            {provider ? (
+              <p role="status" className={s.notice}>
+                That service isn&apos;t in the catalog yet. Try one of these.
+              </p>
+            ) : null}
+            <span className={s.label}>MOST WATCHED</span>
+            <ul className={s.tiles}>
+              {quick.map((item) => (
+                <li key={item.slug}>
+                  <Link
+                    href={`/tools/dependency-exposure?provider=${item.slug}`}
+                    scroll={false}
+                    className={s.tile}
+                  >
+                    <span className={s.tileTop}>
+                      <ProviderMark provider={item.name} size={32} />
+                      <span className={s.tileName}>{item.name}</span>
+                      <span aria-hidden="true" className={s.tileArrow}>
+                        →
+                      </span>
+                    </span>
+                    <span className={s.tileCount}>
+                      <b>{item.authoritativeSources}</b> official sources
+                    </span>
+                    <span aria-hidden="true" className={s.pvStack}>
+                      {coverageTypes(item.sourcesByType).map((type) => (
+                        <i key={type.key} style={{ flex: type.count, background: type.color }} />
+                      ))}
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : !selected ? (
           <EmptyState
             title={
               provider
                 ? "That service isn't in the catalog yet."
-                : "Pick a service to see its coverage."
+                : "The catalog is updating. Check back shortly."
             }
-          >
-            {quick.length ? (
-              <div className={s.quick}>
-                {quick.map((item) => (
-                  <Link
-                    key={item.slug}
-                    href={`/tools/dependency-exposure?provider=${item.slug}`}
-                    scroll={false}
-                    className={s.quickBtn}
-                  >
-                    <ProviderMark provider={item.name} size={26} />
-                    {item.name}
-                  </Link>
-                ))}
-              </div>
-            ) : null}
-          </EmptyState>
+          />
         ) : (
           <article aria-labelledby="coverage-name" className={s.card}>
             <div className={s.covTop}>
