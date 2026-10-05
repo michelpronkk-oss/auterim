@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest",
     "test:run": "vitest run",
+    "acceptance:m15": "node --experimental-strip-types scripts/acceptance-m15.mts",
     "eval:semantic": "vitest run tests/classification.test.ts",
     "eval:semantic:live": "vitest run --config vitest.live.config.mts",
     "eval:discovery": "vitest run tests/discovery.test.ts tests/company-surfaces.test.ts tests/streaming-html.test.ts tests/runtime-browser.test.ts tests/runtime-browser-egress.test.ts tests/monitoring.test.ts",

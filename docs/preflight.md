@@ -49,3 +49,11 @@ The database records deduplicated `automatic_preflight_started` when a worker cl
 ## Plan boundary
 
 Milestone 8 gates repository connection, repository protection, automatic Preflight, and safe Generate Fix proposal creation through the centralized workspace entitlement service. Database enqueue, dispatch, claim, and result persistence checks prevent stale queued work from bypassing expired or downgraded access. Business can request automated remediation and Draft PR preparation, but this milestone does not implement those execution paths. No autonomous patching, CI execution, auto-merge, or production deployment is enabled.
+
+## M15 Phase 4 implementation status
+
+The shared remediation library now contains a deterministic patch builder. It emits a patch only for completed, verified Preflight findings when a trusted server caller supplies an exact replacement pair and the pinned file contains that exact expression once. The builder runs the existing patch safety validator and otherwise returns `NO_SAFE_PATCH`, `INSUFFICIENT_EVIDENCE`, or `NEEDS_HUMAN_REVIEW`; it does not call a model or infer replacements from classifier prose. The helper is not yet wired to authoritative source migration records or automatic proposal persistence, so it is not a customer-facing automatic-fix workflow.
+
+A disposable fixture validator image is pinned to Node 24.8.0 Alpine and runs the internal fixture tests and TypeScript check with no network, no inherited secrets, a read-only root filesystem, and bounded CPU, memory, process count, and temporary storage. The Business policy evaluator requires current canonical Business capabilities, an enabled versioned policy, an allowed repository, a protected product, and successful validation. Policy persistence and Trigger handoff are not yet connected.
+
+`npm run acceptance:m15` provisions an isolated local Supabase project with separate ports and checks the fixture patch in the bounded validator. It reports a non-zero result until real local RLS/product/queue execution, Trigger.dev dispatch and retries, automatic proposal persistence, and lifecycle/idempotency checks are connected. Passing unit or fixture checks alone does not mean the M15 money path is proven.
