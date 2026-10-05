@@ -204,8 +204,7 @@ const sections: LegalSection[] = [
       <p>
         We use a small number of providers to host and run Auterim, such as infrastructure,
         database, background processing, language model analysis, email and payments. They process
-        information only to provide their service to us. The current list is on the{" "}
-        <Link href="/subprocessors">Subprocessors</Link> page. We do not sell personal information.
+        information only to provide their service to us. We do not sell personal information.
       </p>
     ),
   },

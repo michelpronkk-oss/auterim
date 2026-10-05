@@ -3,14 +3,39 @@ import type { ReactNode } from "react";
 import { SiteShell } from "./site-shell";
 import s from "./legal.module.css";
 
-export type LegalKey = "privacy" | "terms" | "cookies" | "security" | "subprocessors";
+export type LegalKey = "privacy" | "terms" | "cookies" | "security";
 
-const legalNav: Array<[key: LegalKey, label: string, href: string]> = [
-  ["privacy", "Privacy", "/privacy"],
-  ["terms", "Terms", "/terms"],
-  ["cookies", "Cookies", "/cookies"],
-  ["security", "Security", "/security"],
-];
+const legalNav: Array<{ key: LegalKey; label: string; href: string; hint: string; icon: string }> =
+  [
+    {
+      key: "privacy",
+      label: "Privacy Policy",
+      href: "/privacy",
+      hint: "What personal data is collected, and why.",
+      icon: "M10 2.5 3.5 5v4.6c0 4 2.8 6.9 6.5 7.9 3.7-1 6.5-3.9 6.5-7.9V5L10 2.5Z",
+    },
+    {
+      key: "terms",
+      label: "Terms of Service",
+      href: "/terms",
+      hint: "The agreement for using Auterim.",
+      icon: "M5.5 2.5h6l3 3v12h-9v-15ZM11.5 2.5v3h3M8 9.5h4.5M8 12.5h4.5",
+    },
+    {
+      key: "cookies",
+      label: "Cookie Policy",
+      href: "/cookies",
+      hint: "Every browser storage entry, explained.",
+      icon: "M17 10.5A7 7 0 1 1 9.5 3a3 3 0 0 0 3.5 3.5 3 3 0 0 0 4 4ZM7.5 9.5h.01M11 13h.01M7.5 14h.01",
+    },
+    {
+      key: "security",
+      label: "Security",
+      href: "/security",
+      hint: "How your data and code are protected.",
+      icon: "M5.5 9V6.5a4.5 4.5 0 0 1 9 0V9M4.5 9h11v8.5h-11V9ZM10 12.5v2",
+    },
+  ];
 
 export type LegalSection = { id: string; title: string; body: ReactNode };
 
@@ -50,18 +75,6 @@ export function LegalPage({
             <span aria-hidden="true">·</span>
             <time dateTime="2026-10">{LAST_UPDATED}</time>
           </p>
-          <nav aria-label="Policies" className={s.tabs}>
-            {legalNav.map(([key, label, href]) => (
-              <Link
-                key={key}
-                href={href}
-                className={s.tab}
-                aria-current={key === active ? "page" : undefined}
-              >
-                {label}
-              </Link>
-            ))}
-          </nav>
         </div>
       }
     >
@@ -95,6 +108,45 @@ export function LegalPage({
           )}
         </div>
       </div>
+      <MorePolicies active={active} />
     </SiteShell>
+  );
+}
+
+/** Closes every policy page with the other policies, so moving between them never needs a tab bar. */
+function MorePolicies({ active }: { active: LegalKey }) {
+  return (
+    <nav aria-label="More policies" className={s.more}>
+      <span className={s.moreHead}>MORE POLICIES</span>
+      <ul className={s.moreList}>
+        {legalNav
+          .filter((item) => item.key !== active)
+          .map((item) => (
+            <li key={item.key}>
+              <Link href={item.href} className={s.moreCard}>
+                <span className={s.moreIcon} aria-hidden="true">
+                  <svg width="18" height="18" viewBox="0 0 20 20">
+                    <path
+                      d={item.icon}
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </span>
+                <span className={s.moreText}>
+                  <span className={s.moreTitle}>{item.label}</span>
+                  <span className={s.moreHint}>{item.hint}</span>
+                </span>
+                <span className={s.moreArrow} aria-hidden="true">
+                  →
+                </span>
+              </Link>
+            </li>
+          ))}
+      </ul>
+    </nav>
   );
 }
