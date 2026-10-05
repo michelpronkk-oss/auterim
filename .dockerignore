@@ -1,0 +1,8 @@
+**
+!scripts/
+!scripts/m15-validation/
+!scripts/m15-validation/Dockerfile
+!tests/
+!tests/fixtures/
+!tests/fixtures/m15-money-path/
+!tests/fixtures/m15-money-path/**
