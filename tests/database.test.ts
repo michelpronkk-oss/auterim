@@ -772,6 +772,45 @@ describe("Auterim migration and monitoring transaction", () => {
     await rateDb.close();
   });
 
+  it("saturates concurrently scheduled rate-limit and scan-slot claims", async () => {
+    const concurrentDb = await makeDatabase();
+    await concurrentDb.exec("set role service_role");
+    const fingerprint = "b".repeat(64);
+    const rateClaims = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        concurrentDb.query<{ allowed: boolean }>(
+          "select allowed from public.claim_public_rate_limit('public_stack_scan',$1,4,1800,'2026-10-05T12:00:00Z'::timestamptz)",
+          [fingerprint],
+        ),
+      ),
+    );
+    expect(rateClaims.filter((claim) => claim.rows[0]!.allowed)).toHaveLength(4);
+    const rateBucket = await concurrentDb.query<{ request_count: number }>(
+      "select request_count from public.public_rate_limit_buckets where client_fingerprint=$1",
+      [fingerprint],
+    );
+    expect(rateBucket.rows[0]!.request_count).toBe(5);
+
+    const leaseIds = Array.from(
+      { length: 20 },
+      (_, index) => `55555555-5555-4555-8555-${index.toString().padStart(12, "0")}`,
+    );
+    const leaseClaims = await Promise.all(
+      leaseIds.map((leaseId) =>
+        concurrentDb.query<{ acquired: boolean }>(
+          "select acquired from public.claim_public_scan_slot($1,2,30)",
+          [leaseId],
+        ),
+      ),
+    );
+    expect(leaseClaims.filter((claim) => claim.rows[0]!.acquired)).toHaveLength(2);
+    const leaseCount = await concurrentDb.query<{ count: number }>(
+      "select count(*)::integer as count from public.public_scan_leases",
+    );
+    expect(leaseCount.rows[0]!.count).toBe(2);
+    await concurrentDb.close();
+  });
+
   it("bounds global public scan concurrency with expiring service-only leases", async () => {
     const leaseDb = await makeDatabase();
     await leaseDb.exec("set role service_role");
@@ -800,6 +839,33 @@ describe("Auterim migration and monitoring transaction", () => {
     await leaseDb.exec("reset role; set role authenticated");
     await expect(leaseDb.query("select * from public.public_scan_leases")).rejects.toThrow();
     await leaseDb.close();
+  });
+
+  it("recovers global scan capacity from an expired lease", async () => {
+    const expiryDb = await makeDatabase();
+    await expiryDb.exec("set role service_role");
+    const abandonedLease = "33333333-3333-4333-8333-333333333333";
+    const replacementLease = "44444444-4444-4444-8444-444444444444";
+    const abandoned = await expiryDb.query<{ acquired: boolean; lease_id: string | null }>(
+      "select * from public.claim_public_scan_slot($1,1,15)",
+      [abandonedLease],
+    );
+    expect(abandoned.rows[0]).toEqual({ acquired: true, lease_id: abandonedLease });
+    await expiryDb.query(
+      "update public.public_scan_leases set expires_at=now()-interval '1 second' where lease_id=$1",
+      [abandonedLease],
+    );
+    const replacement = await expiryDb.query<{ acquired: boolean; lease_id: string | null }>(
+      "select * from public.claim_public_scan_slot($1,1,15)",
+      [replacementLease],
+    );
+    expect(replacement.rows[0]).toEqual({ acquired: true, lease_id: replacementLease });
+    const expired = await expiryDb.query(
+      "select lease_id from public.public_scan_leases where lease_id=$1",
+      [abandonedLease],
+    );
+    expect(expired.rows).toEqual([]);
+    await expiryDb.close();
   });
 
   it("isolates discovery evidence by workspace and preserves confirmed dependency decisions", async () => {

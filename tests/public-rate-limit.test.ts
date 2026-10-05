@@ -3,11 +3,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   rpc: vi.fn(),
   getEnvironment: vi.fn(),
+  discoverPublicStackScan: vi.fn(),
 }));
 
 vi.mock("@/lib/env/schema", () => ({ getEnvironment: mocks.getEnvironment }));
 vi.mock("@/lib/supabase/server", () => ({
   createSupabaseServerClient: () => ({ rpc: mocks.rpc }),
+}));
+vi.mock("@/lib/public/stack-scan", () => ({
+  discoverPublicStackScan: mocks.discoverPublicStackScan,
 }));
 
 import {
@@ -35,10 +39,15 @@ describe("distributed public rate limiting", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getEnvironment.mockReturnValue({ PUBLIC_RATE_LIMIT_HMAC_SECRET: key });
-    mocks.rpc.mockResolvedValue({
-      data: [{ allowed: true, remaining: 3, retry_after_seconds: 0 }],
-      error: null,
+    mocks.rpc.mockImplementation(async (name: string, args: Record<string, string>) => {
+      if (name === "claim_public_rate_limit")
+        return { data: [{ allowed: true, remaining: 3, retry_after_seconds: 0 }], error: null };
+      if (name === "claim_public_scan_slot")
+        return { data: [{ acquired: true, lease_id: args.p_lease_id }], error: null };
+      if (name === "release_public_scan_slot") return { data: true, error: null };
+      return { data: null, error: { message: "unexpected_rpc" } };
     });
+    mocks.discoverPublicStackScan.mockResolvedValue({ status: "completed" });
   });
 
   it("creates a stable keyed fingerprint without retaining the client address", () => {
@@ -172,5 +181,56 @@ describe("distributed public rate limiting", () => {
       error: "rate_limiter_unavailable",
       message: "Please retry shortly.",
     });
+  });
+
+  it("releases scan leases after success and failure, and reuses process capacity", async () => {
+    const resolvers: Array<(result: { status: string }) => void> = [];
+    mocks.discoverPublicStackScan.mockImplementation(
+      () => new Promise((resolve) => resolvers.push(resolve)),
+    );
+    const first = stackScan(request("198.51.100.31"));
+    const second = stackScan(request("198.51.100.32"));
+    await vi.waitFor(() => expect(mocks.discoverPublicStackScan).toHaveBeenCalledTimes(2));
+
+    const third = await stackScan(request("198.51.100.33"));
+    expect(third.status).toBe(429);
+    expect(mocks.rpc.mock.calls.filter(([name]) => name === "claim_public_scan_slot")).toHaveLength(
+      2,
+    );
+
+    resolvers[0]!({ status: "completed" });
+    resolvers[1]!({ status: "completed" });
+    expect((await first).status).toBe(200);
+    expect((await second).status).toBe(200);
+    expect(
+      mocks.rpc.mock.calls.filter(([name]) => name === "release_public_scan_slot"),
+    ).toHaveLength(2);
+
+    mocks.discoverPublicStackScan.mockRejectedValueOnce(new Error("fixture_failure"));
+    const failed = await stackScan(request("198.51.100.34"));
+    expect(failed.status).toBe(422);
+    expect(
+      mocks.rpc.mock.calls.filter(([name]) => name === "release_public_scan_slot"),
+    ).toHaveLength(3);
+
+    mocks.discoverPublicStackScan.mockResolvedValueOnce({ status: "completed" });
+    const recovered = await stackScan(request("198.51.100.35"));
+    expect(recovered.status).toBe(200);
+    expect(
+      mocks.rpc.mock.calls.filter(([name]) => name === "release_public_scan_slot"),
+    ).toHaveLength(4);
+  });
+
+  it("does not attempt lease release when validation fails before slot acquisition", async () => {
+    const invalid = new Request("https://auterim.com/api/public/stack-scan", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-real-ip": "198.51.100.41" },
+      body: "{",
+    });
+    const response = await stackScan(invalid);
+    expect(response.status).toBe(400);
+    expect(
+      mocks.rpc.mock.calls.filter(([name]) => name === "release_public_scan_slot"),
+    ).toHaveLength(0);
   });
 });
