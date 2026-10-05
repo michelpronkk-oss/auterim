@@ -1,32 +1,175 @@
-import type { Metadata } from "next";
-import { PublicShell } from "@/app/public-surfaces";
-import { ToolResults } from "@/app/tools/tool-results";
+import type { Metadata, Viewport } from "next";
+import Link from "next/link";
+import { ProviderMark } from "@/app/_home/marks";
+import { SiteShell } from "@/app/_site/site-shell";
+import { getPublicToolDirectory } from "@/lib/public/intelligence";
+import { coverageTypes } from "../tool-data";
+import {
+  DateChip,
+  EmptyState,
+  MoreTools,
+  ToolHero,
+  tools as s,
+  verifiedLabel,
+} from "../tool-parts";
+import { ServicePicker } from "./service-picker";
 
 export const revalidate = 300;
 export const metadata: Metadata = {
-  title: "Dependency source coverage",
-  description:
-    "Check real enabled authoritative source coverage for dependencies in Auterim’s catalog.",
+  title: "Dependency coverage",
+  description: "See how many official sources Auterim monitors for a service, by type.",
   alternates: { canonical: "/tools/dependency-exposure" },
 };
+export const viewport: Viewport = { themeColor: "#e4ebf9" };
 
-export default async function DependencyExposurePage({
+export default async function DependencyCoveragePage({
   searchParams,
 }: {
   searchParams: Promise<{ provider?: string }>;
 }) {
   const { provider } = await searchParams;
+  const directory = await getPublicToolDirectory();
+  const selected = provider ? directory.find((item) => item.slug === provider) : undefined;
+  const services = directory.map((item) => ({
+    slug: item.slug,
+    name: item.name,
+    total: item.authoritativeSources,
+  }));
+  const quick = [...directory]
+    .sort((a, b) => b.authoritativeSources - a.authoritativeSources)
+    .slice(0, 4);
+  const types = selected ? coverageTypes(selected.sourcesByType) : [];
+  const total = selected?.authoritativeSources ?? 0;
+
   return (
-    <PublicShell current="tools">
-      <section className="public-page-intro">
-        <p className="eyebrow">DEPENDENCY EXPOSURE</p>
-        <h1>Check monitoring coverage for a dependency.</h1>
-        <p>
-          Coverage counts come from enabled rows in Auterim’s actual global source catalog. They
-          describe available sources, not whether a specific company uses the dependency.
-        </p>
+    <SiteShell
+      current="tools"
+      hero={
+        <ToolHero
+          tool="coverage"
+          eyebrow="DEPENDENCY COVERAGE"
+          dot
+          title="How closely is it watched?"
+          lede="Pick a service. See every official source Auterim monitors for it."
+        >
+          <ServicePicker
+            key={selected?.slug ?? "none"}
+            services={services}
+            selected={selected?.slug}
+          />
+        </ToolHero>
+      }
+    >
+      <section aria-live="polite" className={s.body}>
+        {!selected ? (
+          <EmptyState
+            title={
+              provider
+                ? "That service isn't in the catalog yet."
+                : "Pick a service to see its coverage."
+            }
+          >
+            {quick.length ? (
+              <div className={s.quick}>
+                {quick.map((item) => (
+                  <Link
+                    key={item.slug}
+                    href={`/tools/dependency-exposure?provider=${item.slug}`}
+                    scroll={false}
+                    className={s.quickBtn}
+                  >
+                    <ProviderMark provider={item.name} size={26} />
+                    {item.name}
+                  </Link>
+                ))}
+              </div>
+            ) : null}
+          </EmptyState>
+        ) : (
+          <article aria-labelledby="coverage-name" className={s.card}>
+            <div className={s.covTop}>
+              <div className={s.covLeft}>
+                <div className={s.covName}>
+                  <ProviderMark provider={selected.name} size={44} />
+                  <h2 id="coverage-name">{selected.name}</h2>
+                </div>
+                <div className={s.covTotal}>
+                  {selected.sourceCoveragePartial ? (
+                    <span className={s.atLeast}>AT LEAST</span>
+                  ) : null}
+                  <b>{total}</b>
+                  official source{total === 1 ? "" : "s"} monitored
+                </div>
+              </div>
+              {types.length ? (
+                <div className={s.covRight}>
+                  <span className={s.label}>BY SOURCE TYPE</span>
+                  <div aria-hidden="true" className={s.stack}>
+                    {types.map((type) => (
+                      <i key={type.key} style={{ flex: type.count, background: type.color }} />
+                    ))}
+                  </div>
+                  <dl className={s.types}>
+                    {types.map((type) => (
+                      <div key={type.key}>
+                        <i
+                          aria-hidden="true"
+                          className={s.swatch}
+                          style={{ background: type.color }}
+                        />
+                        <dt>{type.label}</dt>
+                        <dd>
+                          {selected.sourceCoveragePartial ? "≥ " : ""}
+                          {type.count}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+              ) : null}
+            </div>
+
+            <div className={s.covChanges}>
+              <h3 className={`${s.label} ${s.covChangesHead}`}>
+                CURRENT APPROVED CHANGES · {selected.approvedChanges.length}
+              </h3>
+              {selected.approvedChanges.length ? (
+                <ul className={s.changeLinks}>
+                  {selected.approvedChanges.map((change) => (
+                    <li key={change.id}>
+                      <Link
+                        href={`/changes/${selected.slug}/${change.canonicalSlug}`}
+                        className={s.changeLink}
+                      >
+                        <span className={s.changeLinkText}>
+                          <span className={s.changeLinkTitle}>{change.headline}</span>
+                          <span className={s.changeLinkMeta}>
+                            {change.label} · Verified {verifiedLabel(change.lastVerifiedAt)}
+                          </span>
+                        </span>
+                        <span className={s.changeLinkEnd}>
+                          {change.effectiveAt ? <DateChip iso={change.effectiveAt} /> : null}
+                          <span className={s.link}>
+                            View change <span aria-hidden="true">→</span>
+                          </span>
+                        </span>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className={s.covNone}>
+                  <b>No approved changes for {selected.name} right now.</b>
+                  {total > 0
+                    ? `Auterim is watching ${total === 1 ? "its source" : `all ${total} sources`}. Anything it verifies lands here.`
+                    : "Anything Auterim verifies for it lands here."}
+                </div>
+              )}
+            </div>
+          </article>
+        )}
       </section>
-      <ToolResults kind="exposure" provider={provider} />
-    </PublicShell>
+      <MoreTools current="coverage" />
+    </SiteShell>
   );
 }

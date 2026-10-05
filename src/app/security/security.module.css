@@ -145,7 +145,7 @@
 .ledger ul,
 .principles,
 .handoff,
-.index ol {
+.indexList {
   margin: 0;
   padding: 0;
   list-style: none;
@@ -510,11 +510,14 @@
   position: sticky;
   top: 40px;
 }
-.index ol {
+.indexList {
   display: flex;
   flex-direction: column;
   gap: 2px;
   margin-top: 8px;
+}
+.jump {
+  display: none;
 }
 .indexLink {
   display: flex;
@@ -728,52 +731,125 @@
   .article:first-child {
     padding-top: 12px;
   }
-  /* Phones and tablets: the index becomes a scrolling chip row. */
-  /* The chip row pins to the top while reading and follows the active section. */
+  /* Phones and tablets: a pinned bar names the section being read and opens the full list. */
   .index {
     position: sticky;
     top: 0;
     z-index: 5;
     margin: 0 calc(clamp(16px, 3vw, 40px) * -1);
-    padding: 12px 0;
+    padding: 10px clamp(16px, 3vw, 40px);
     background: var(--paper);
     box-shadow: 0 1px 0 var(--rule);
-  }
-  .index ol {
-    margin-top: 0;
   }
   .indexHead {
     display: none;
   }
-  .indexLink[aria-current] {
-    background: var(--ink);
-    color: var(--cream);
-    box-shadow: none;
+  .jump {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 50px;
+    padding: 0 16px;
+    border: 0;
+    border-radius: 12px;
+    background: #ffffff;
+    box-shadow:
+      0 0 0 1px rgba(14, 27, 46, 0.08),
+      0 8px 20px -14px rgba(14, 27, 46, 0.3);
+    color: var(--ink);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    overflow: hidden;
   }
-  .indexLink[aria-current] .indexNum {
-    color: var(--blue-bright);
+  .jumpCount {
+    flex: none;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: var(--slate-4);
   }
-  .index ol {
-    flex-direction: row;
-    gap: 6px;
-    padding: 2px clamp(16px, 3vw, 40px);
-    overflow-x: auto;
-    scrollbar-width: none;
-    scroll-snap-type: x proximity;
-    scroll-padding-inline: clamp(16px, 3vw, 40px);
+  .jumpCount b {
+    font-weight: 500;
+    color: var(--blue);
   }
-  .index ol::-webkit-scrollbar {
+  .jumpTitle {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+  }
+  .jumpLabel {
+    flex: none;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--slate-4);
+  }
+  .jumpChevron {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    margin: -3px 2px 0 -4px;
+    border-right: 1.5px solid var(--slate-3);
+    border-bottom: 1.5px solid var(--slate-3);
+    transform: rotate(45deg);
+    transition: transform 0.2s;
+  }
+  .index[data-open] .jumpChevron {
+    margin-top: 3px;
+    transform: rotate(-135deg);
+  }
+  .jumpProgress {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    height: 2px;
+    width: 100%;
+    background: var(--blue);
+    transform: scaleX(var(--read, 0));
+    transform-origin: left;
+    transition: transform 0.35s cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+  .indexList {
     display: none;
   }
-
-  .index li {
-    flex: none;
-    scroll-snap-align: start;
+  .index[data-open] .indexList {
+    position: absolute;
+    top: calc(100% - 2px);
+    left: clamp(16px, 3vw, 40px);
+    right: clamp(16px, 3vw, 40px);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: min(60vh, 480px);
+    margin: 0;
+    padding: 6px;
+    overflow-y: auto;
+    border-radius: 14px;
+    background: #ffffff;
+    box-shadow:
+      0 0 0 1px rgba(14, 27, 46, 0.08),
+      0 24px 48px -20px rgba(14, 27, 46, 0.35);
+    animation: panelIn 0.18s ease both;
   }
   .indexLink {
-    background: #ffffff;
-    box-shadow: 0 0 0 1px rgba(14, 27, 46, 0.08);
-    white-space: nowrap;
+    padding: 11px 12px;
+    border-radius: 9px;
+    font-size: 15px;
+  }
+}
+@keyframes panelIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
   }
 }
 @keyframes driftDown {
@@ -807,10 +883,13 @@
   .index {
     margin: 0 -22px;
   }
-  .index ol {
+  .index {
     padding-left: 22px;
     padding-right: 22px;
-    scroll-padding-inline: 22px;
+  }
+  .index[data-open] .indexList {
+    left: 22px;
+    right: 22px;
   }
   .board {
     margin: 0 -8px;
@@ -836,5 +915,11 @@
   }
   .pulse {
     display: none;
+  }
+  .jumpProgress {
+    transition: none;
+  }
+  .index[data-open] .indexList {
+    animation: none;
   }
 }

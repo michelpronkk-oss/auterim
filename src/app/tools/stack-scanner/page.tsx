@@ -1,32 +1,23 @@
-import type { Metadata } from "next";
-import { PublicShell } from "@/app/public-surfaces";
-import { StackScanner } from "./scanner";
+import type { Metadata, Viewport } from "next";
+import { SiteShell } from "@/app/_site/site-shell";
+import { MoreTools } from "../tool-parts";
+import { ScanHero, ScanProvider, ScanResults } from "./scanner";
 
 export const metadata: Metadata = {
   title: "Stack scanner",
-  description: "Scan a company homepage for deterministic technology dependency signals.",
+  description: "Scan a company homepage for signals of the services it likely runs on.",
   alternates: { canonical: "/tools/stack-scanner" },
   robots: { index: false, follow: false },
 };
+export const viewport: Viewport = { themeColor: "#e4ebf9" };
 
 export default function StackScannerPage() {
   return (
-    <PublicShell current="tools">
-      <section className="public-page-intro scanner-intro">
-        <p className="eyebrow">STACK SCANNER</p>
-        <h1>Find likely dependencies from website signals.</h1>
-        <p>
-          Enter a company homepage. Auterim checks the homepage response and linked resources for
-          deterministic provider markers using its existing safe-fetch controls.
-        </p>
-      </section>
-      <section className="public-section">
-        <StackScanner />
-      </section>
-      <p className="public-source-note">
-        A detected marker is not user confirmation. Results are not saved as a company or workspace
-        until you choose to continue and finish setup.
-      </p>
-    </PublicShell>
+    <ScanProvider>
+      <SiteShell current="tools" hero={<ScanHero />}>
+        <ScanResults />
+        <MoreTools current="scanner" />
+      </SiteShell>
+    </ScanProvider>
   );
 }
