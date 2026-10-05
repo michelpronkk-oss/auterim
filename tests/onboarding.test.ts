@@ -17,6 +17,7 @@ const migrationPaths = [
   "20261007000000_protection_value_notifications.sql",
   "20261012000000_runtime_dependency_discovery.sql",
   "20261013000000_prevent_implicit_multiple_onboarding_workspaces.sql",
+  "20261018000000_launch_provider_catalog_breadth.sql",
 ];
 const migrations = await Promise.all(
   migrationPaths.map((name) =>
@@ -107,6 +108,240 @@ async function addClassifiedChange(
 }
 
 describe("onboarding activation backend", () => {
+  it("searches the full canonical catalog by exact, partial, case-insensitive, and alias matches with truthful coverage", async () => {
+    const db = await database();
+    await db.query("insert into auth.users(id) values ($1)", [ownerId]);
+    await asUser(db, ownerId);
+    const started = await start(db, "onboarding-provider-search-01");
+    const workspaceId = String(started.workspaceId);
+
+    const total = await db.query<{ count: number }>(
+      "select jsonb_array_length(public.search_onboarding_dependency_catalog($1,''))::int as count",
+      [workspaceId],
+    );
+    expect(total.rows[0]!.count).toBeGreaterThanOrEqual(100);
+    expect(total.rows[0]!.count).toBeLessThanOrEqual(120);
+    const identities = await db.query<{ count: number; distinct_count: number }>(
+      "select count(*)::int as count,count(distinct slug)::int as distinct_count from public.dependency_catalog where enabled",
+    );
+    expect(identities.rows[0]).toEqual({ count: 115, distinct_count: 115 });
+    const categoryRows = await db.query<{ category: string; count: number }>(
+      "select category,count(*)::int as count from public.dependency_catalog where enabled group by category order by category",
+    );
+    expect(
+      Object.fromEntries(categoryRows.rows.map(({ category, count }) => [category, count])),
+    ).toEqual({
+      ai: 10,
+      analytics: 8,
+      commerce: 3,
+      communications: 6,
+      crm: 4,
+      databases: 14,
+      "developer-tools": 8,
+      email: 7,
+      "feature-flags": 3,
+      identity: 6,
+      infrastructure: 10,
+      observability: 7,
+      payments: 8,
+      search: 4,
+      security: 3,
+      storage: 5,
+      support: 4,
+      workflow: 5,
+    });
+
+    const alias = await db.query<{ result: Array<Record<string, unknown>> }>(
+      "select public.search_onboarding_dependency_catalog($1,'Gemini') as result",
+      [workspaceId],
+    );
+    expect(alias.rows[0]!.result.map((item) => item.slug)).toContain("gemini-api");
+    expect(alias.rows[0]!.result[0]).toMatchObject({
+      slug: "gemini-api",
+      coverageStatus: "partial_coverage",
+      authoritativeSourceCount: 1,
+    });
+    const pending = await db.query<{ result: Array<Record<string, unknown>> }>(
+      "select public.search_onboarding_dependency_catalog($1,'deepgram') as result",
+      [workspaceId],
+    );
+    expect(pending.rows[0]!.result[0]).toMatchObject({
+      slug: "deepgram",
+      coverageStatus: "coverage_pending",
+      authoritativeSourceCount: 0,
+    });
+
+    const partial = await db.query<{ result: Array<Record<string, unknown>> }>(
+      "select public.search_onboarding_dependency_catalog($1,'MICROSOFT') as result",
+      [workspaceId],
+    );
+    expect(partial.rows[0]!.result.map((item) => item.slug)).toContain("microsoft-azure");
+    expect(partial.rows[0]!.result.map((item) => item.slug)).toContain("microsoft-teams");
+
+    const strong = await db.query<{ result: Array<Record<string, unknown>> }>(
+      "select public.search_onboarding_dependency_catalog($1,'stripe') as result",
+      [workspaceId],
+    );
+    expect(strong.rows[0]!.result[0]).toMatchObject({
+      slug: "stripe",
+      coverageStatus: "partial_coverage",
+      authoritativeSourceCount: 2,
+    });
+    const broadCoverage = await db.query<{ result: Array<Record<string, unknown>> }>(
+      "select public.search_onboarding_dependency_catalog($1,'openai') as result",
+      [workspaceId],
+    );
+    expect(broadCoverage.rows[0]!.result[0]).toMatchObject({
+      slug: "openai",
+      coverageStatus: "strong_coverage",
+      authoritativeSourceCount: 3,
+    });
+    const partialCoverage = await db.query<{ result: Array<Record<string, unknown>> }>(
+      "select public.search_onboarding_dependency_catalog($1,'sentry') as result",
+      [workspaceId],
+    );
+    expect(partialCoverage.rows[0]!.result[0]).toMatchObject({
+      slug: "sentry",
+      coverageStatus: "partial_coverage",
+      authoritativeSourceCount: 1,
+    });
+    const productAlias = await db.query<{ result: Array<Record<string, unknown>> }>(
+      "select public.search_onboarding_dependency_catalog($1,'Supabase Auth') as result",
+      [workspaceId],
+    );
+    expect(productAlias.rows[0]!.result.map((item) => item.slug)).toEqual(["supabase"]);
+    expect(
+      (
+        await db.query<{ count: number }>(
+          "select count(*)::int as count from public.dependency_catalog where slug in ('supabase-auth','firebase-auth','github-actions')",
+        )
+      ).rows[0]!.count,
+    ).toBe(0);
+    const unknown = await db.query<{ result: Array<Record<string, unknown>> }>(
+      "select public.search_onboarding_dependency_catalog($1,'no-such-service-xyz') as result",
+      [workspaceId],
+    );
+    expect(unknown.rows[0]!.result).toEqual([]);
+    for (const query of ["%", "_", "\\", "%_\\"]) {
+      const wildcard = await db.query<{ result: Array<Record<string, unknown>> }>(
+        "select public.search_onboarding_dependency_catalog($1,$2) as result",
+        [workspaceId, query],
+      );
+      expect(wildcard.rows[0]!.result).toEqual([]);
+    }
+
+    await db.query("insert into auth.users(id) values ($1)", [otherId]);
+    await asUser(db, otherId);
+    await expect(
+      db.query("select public.search_onboarding_dependency_catalog($1,'stripe')", [workspaceId]),
+    ).rejects.toThrow("Workspace is not available");
+    await db.query("select set_config('request.jwt.claim.sub','',false)");
+    await expect(
+      db.query("select public.search_onboarding_dependency_catalog($1,'stripe')", [workspaceId]),
+    ).rejects.toThrow("Workspace is not available");
+    await asUser(db, ownerId);
+
+    const startedAt = performance.now();
+    const fullSearch = await db.query<{ result: Array<Record<string, unknown>> }>(
+      "select public.search_onboarding_dependency_catalog($1,'') as result",
+      [workspaceId],
+    );
+    expect(performance.now() - startedAt).toBeLessThan(2000);
+    expect(JSON.stringify(fullSearch.rows[0]!.result).length).toBeLessThan(100_000);
+    await db.close();
+  });
+
+  it("persists 20 Core, 50 Pro, and 100 Business dependencies within the existing quotas", async () => {
+    for (const [plan, amount] of [
+      ["core", 20],
+      ["pro", 50],
+      ["business", 100],
+    ] as const) {
+      const db = await database();
+      await db.query("insert into auth.users(id) values ($1)", [ownerId]);
+      await asUser(db, ownerId);
+      const started = await start(db, `onboarding-scale-${plan}-0001`);
+      const workspaceId = String(started.workspaceId);
+      await db.query(
+        `insert into public.workspace_subscriptions
+          (workspace_id,plan,status,current_period_start,current_period_end)
+          values ($1,$2,'active',now(),now()+interval '30 days')
+          on conflict (workspace_id) do update set plan=excluded.plan,status='active',
+            current_period_start=excluded.current_period_start,current_period_end=excluded.current_period_end`,
+        [workspaceId, plan],
+      );
+      const quota = await db.query<{ limit: number }>(
+        "select private.workspace_dependency_limit($1)::int as limit",
+        [workspaceId],
+      );
+      expect(quota.rows[0]!.limit).toBe(plan === "core" ? 20 : plan === "pro" ? 75 : 250);
+
+      await db.query(
+        `select public.add_onboarding_dependency_manually($1, provider.slug)
+         from (select slug from public.dependency_catalog where enabled order by slug limit $2) provider`,
+        [workspaceId, amount],
+      );
+      await db.query(
+        `select public.add_onboarding_dependency_manually($1, provider.slug)
+         from (select slug from public.dependency_catalog where enabled order by slug limit $2) provider`,
+        [workspaceId, amount],
+      );
+      const status = await db.query<{ value: Record<string, unknown> }>(
+        "select public.get_onboarding_status($1) as value",
+        [workspaceId],
+      );
+      const persisted = await db.query<{ count: number }>(
+        "select count(*)::int as count from public.workspace_dependencies where workspace_id=$1",
+        [workspaceId],
+      );
+      expect(persisted.rows[0]!.count).toBe(amount);
+      expect(status.rows[0]!.value.confirmedDependencies as unknown[]).toHaveLength(amount);
+
+      if (plan === "core") {
+        await expect(
+          db.query(
+            `select public.add_onboarding_dependency_manually($1, provider.slug)
+             from (select slug from public.dependency_catalog where enabled
+               and slug not in (select dependency.slug from public.workspace_dependencies wd
+                 join public.dependency_catalog dependency on dependency.id=wd.dependency_id
+                 where wd.workspace_id=$1) order by slug limit 1) provider`,
+            [workspaceId],
+          ),
+        ).rejects.toThrow("dependency_quota_exceeded");
+      }
+
+      await db.query("select public.complete_onboarding_step($1,'dependencies_review')", [
+        workspaceId,
+      ]);
+      await db.query("select public.complete_onboarding_step($1,'context_setup')", [workspaceId]);
+      await db.query("select public.complete_onboarding_step($1,'notifications_setup')", [
+        workspaceId,
+      ]);
+      const activated = await db.query<{ value: ActivationResult }>(
+        "select public.activate_workspace_protection($1) as value",
+        [workspaceId],
+      );
+      expect(activated.rows[0]!.value.protection.dependencies).toBe(amount);
+      expect(["in_progress", "partial"]).toContain(
+        activated.rows[0]!.value.protection.baselineStatus,
+      );
+      const resumed = await db.query<{ value: Record<string, unknown> }>(
+        "select public.get_onboarding_status($1) as value",
+        [workspaceId],
+      );
+      expect(resumed.rows[0]!.value.currentStep).toBe("active");
+      expect(resumed.rows[0]!.value.activation).toMatchObject({
+        activatedAt: activated.rows[0]!.value.activatedAt,
+      });
+
+      if (plan === "business") {
+        const responseBytes = Buffer.byteLength(JSON.stringify(status.rows[0]!.value));
+        expect(responseBytes).toBeLessThan(250_000);
+      }
+      await db.close();
+    }
+  });
+
   it("keeps first-time onboarding to one workspace and one canonical company", async () => {
     const db = await database();
     await db.query("insert into auth.users(id) values ($1)", [ownerId]);

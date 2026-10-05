@@ -19,6 +19,9 @@ describe("dashboard dependency health language", () => {
     expect(getDashboardHealthPresentation("incomplete_coverage").explanation).toMatch(
       /incomplete/i,
     );
+    expect(getDashboardHealthPresentation("coverage_pending")).toMatchObject({
+      label: "Coverage pending",
+    });
   });
 });
 

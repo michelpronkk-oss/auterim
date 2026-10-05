@@ -148,8 +148,17 @@ function FirstWorkspaceOnboarding({
   const [operationError, setOperationError] = useState("");
   const [websiteError, setWebsiteError] = useState("");
   const [catalogQuery, setCatalogQuery] = useState("");
+  const [catalogSearchCompletedQuery, setCatalogSearchCompletedQuery] = useState("");
   const [catalog, setCatalog] = useState<
-    Array<{ id: string; slug: string; name: string; category: string }>
+    Array<{
+      id: string;
+      slug: string;
+      name: string;
+      category: string;
+      categoryLabel: string;
+      authoritativeSourceCount: number;
+      coverageStatus: "strong_coverage" | "partial_coverage" | "coverage_pending";
+    }>
   >([]);
   const [preferences, setPreferences] = useState<{
     importantChanges: "daily_digest" | "instant" | "off";
@@ -175,11 +184,12 @@ function FirstWorkspaceOnboarding({
   >({});
 
   useEffect(() => {
-    if (!onboarding || !workspaceId || !catalogQuery.trim()) return;
+    const query = catalogQuery.trim();
+    if (!onboarding || !workspaceId || !query) return;
     let cancelled = false;
     const timer = window.setTimeout(() => {
       void api(
-        `/api/onboarding/dependencies?workspaceId=${encodeURIComponent(workspaceId)}&q=${encodeURIComponent(catalogQuery.trim())}`,
+        `/api/onboarding/dependencies?workspaceId=${encodeURIComponent(workspaceId)}&q=${encodeURIComponent(query)}`,
       )
         .then((value) => {
           const parsed = z
@@ -190,11 +200,21 @@ function FirstWorkspaceOnboarding({
                   slug: z.string(),
                   name: z.string(),
                   category: z.string(),
+                  categoryLabel: z.string(),
+                  authoritativeSourceCount: z.number().int().nonnegative(),
+                  coverageStatus: z.enum([
+                    "strong_coverage",
+                    "partial_coverage",
+                    "coverage_pending",
+                  ]),
                 }),
               ),
             })
             .parse(value);
-          if (!cancelled) setCatalog(parsed.dependencies);
+          if (!cancelled) {
+            setCatalog(parsed.dependencies);
+            setCatalogSearchCompletedQuery(query);
+          }
         })
         .catch(() => {
           if (!cancelled) setOperationError("Could not search the dependency catalog. Try again.");
@@ -713,8 +733,8 @@ function FirstWorkspaceOnboarding({
               autoComplete="off"
             />
             <p className="summary-note">
-              Only catalog services can be monitored in this setup. Unknown services are not
-              silently added.
+              Catalog entries can be added even when monitoring coverage is pending. Unknown
+              services are not silently added.
             </p>
             <div className="onboarding-candidates">
               {catalogQuery.trim() &&
@@ -722,7 +742,14 @@ function FirstWorkspaceOnboarding({
                   <article className="onboarding-candidate" key={item.id}>
                     <div>
                       <h4>{item.name}</h4>
-                      <p>{item.category}</p>
+                      <p>
+                        {item.categoryLabel} ·{" "}
+                        {item.coverageStatus === "strong_coverage"
+                          ? "strong source coverage"
+                          : item.coverageStatus === "partial_coverage"
+                            ? "partial source coverage"
+                            : "coverage pending"}
+                      </p>
                     </div>
                     <button
                       type="button"
@@ -745,6 +772,13 @@ function FirstWorkspaceOnboarding({
                     </button>
                   </article>
                 ))}
+              {catalogQuery.trim() &&
+                catalogSearchCompletedQuery === catalogQuery.trim() &&
+                catalog.length === 0 && (
+                  <p className="summary-note" role="status">
+                    No catalog match. Custom dependencies cannot be added yet.
+                  </p>
+                )}
             </div>
           </div>
           <div className="onboarding-review-summary">

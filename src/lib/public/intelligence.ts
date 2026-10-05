@@ -2,7 +2,7 @@ import "server-only";
 import { unstable_cache } from "next/cache";
 import { validatePublishableFields } from "@/lib/growth/contract";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { summarizeEnabledSources } from "@/lib/public/coverage";
+import { catalogCoverageStatus, summarizeEnabledSources } from "@/lib/public/coverage";
 import { isPublicEvidenceFresh } from "@/lib/public/freshness";
 
 const PAGE_SELECT =
@@ -205,10 +205,10 @@ async function queryPublicToolDirectory() {
   const [dependencies, sources] = await Promise.all([
     client
       .from("dependency_catalog")
-      .select("id,slug,name,category")
+      .select("id,slug,name,category,metadata")
       .eq("enabled", true)
       .order("name", { ascending: true })
-      .limit(100),
+      .limit(200),
     client
       .from("source_catalog")
       .select("dependency_id,source_type", { count: "exact" })
@@ -225,8 +225,18 @@ async function queryPublicToolDirectory() {
       slug: dependency.slug,
       name: dependency.name,
       category: dependency.category,
+      aliases: Array.isArray((dependency.metadata as { aliases?: unknown } | null)?.aliases)
+        ? ((dependency.metadata as { aliases: unknown[] }).aliases.filter(
+            (alias): alias is string => typeof alias === "string" && alias.length <= 120,
+          ) as string[])
+        : [],
       authoritativeSources: coverage.total,
       sourceCoveragePartial: sourceCoverage.partial,
+      coverageStatus: catalogCoverageStatus(
+        coverage.total,
+        Object.keys(coverage.byType).length,
+        sourceCoverage.partial,
+      ),
       sourcesByType: coverage.byType,
       approvedChanges: changes
         .filter((change) => change.provider.slug === dependency.slug)

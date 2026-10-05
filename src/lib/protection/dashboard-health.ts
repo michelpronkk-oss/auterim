@@ -2,6 +2,7 @@ export type DashboardHealthState =
   | "attention_required"
   | "access_problem"
   | "incomplete_coverage"
+  | "coverage_pending"
   | "baseline_pending"
   | "protected_and_quiet"
   | "monitoring_evidence_available"
@@ -21,6 +22,10 @@ export function getDashboardHealthPresentation(state?: string | null) {
     incomplete_coverage: {
       label: "Limited coverage",
       explanation: "Coverage or baseline evidence is incomplete.",
+    },
+    coverage_pending: {
+      label: "Coverage pending",
+      explanation: "No authoritative provider source is currently cataloged for this dependency.",
     },
     baseline_pending: {
       label: "Baseline pending",

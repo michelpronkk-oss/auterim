@@ -85,7 +85,9 @@ export async function GET(request: Request, routeContext: { params: Promise<{ id
           ? "monitoring_evidence_available"
           : coveredSources.length
             ? "baseline_pending"
-            : "incomplete_coverage",
+            : dependency.monitoring_enabled
+              ? "coverage_pending"
+              : "unsupported",
       latestImpact,
       sources: coveredSources.map((source) => ({
         ...source,

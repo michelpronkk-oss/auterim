@@ -33,7 +33,10 @@ export default async function DependencyCoveragePage({
   const services = directory.map((item) => ({
     slug: item.slug,
     name: item.name,
+    category: item.category,
     total: item.authoritativeSources,
+    aliases: item.aliases,
+    coverageStatus: item.coverageStatus,
   }));
   const quick = [...directory]
     .sort((a, b) => b.authoritativeSources - a.authoritativeSources)
@@ -183,7 +186,9 @@ export default async function DependencyCoveragePage({
                   <b>No approved changes for {selected.name} right now.</b>
                   {total > 0
                     ? `Auterim is watching ${total === 1 ? "its source" : `all ${total} sources`}. Anything it verifies lands here.`
-                    : "Anything Auterim verifies for it lands here."}
+                    : selected.coverageStatus === "coverage_unknown"
+                      ? "Coverage status is unknown because the public source list is incomplete."
+                      : "Coverage pending: no authoritative provider sources are cataloged for this service yet."}
                 </div>
               )}
             </div>

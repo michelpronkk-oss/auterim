@@ -3,9 +3,17 @@
 import { useRouter } from "next/navigation";
 import { useId, useRef, useState } from "react";
 import { ProviderMark } from "@/app/_home/marks";
+import { catalogCoverageLabel, type CatalogCoverageStatus } from "@/lib/public/coverage";
 import { Chevron, tools as s } from "../tool-parts";
 
-type Service = { slug: string; name: string; total: number };
+type Service = {
+  slug: string;
+  name: string;
+  category: string;
+  total: number;
+  aliases: string[];
+  coverageStatus: CatalogCoverageStatus;
+};
 
 /** Searchable service picker. Picking a service loads its coverage via ?provider=. */
 export function ServicePicker({ services, selected }: { services: Service[]; selected?: string }) {
@@ -22,7 +30,13 @@ export function ServicePicker({ services, selected }: { services: Service[]; sel
   const q = query.trim().toLowerCase();
   const list =
     q && q !== current?.name.toLowerCase()
-      ? services.filter((service) => service.name.toLowerCase().includes(q))
+      ? services.filter(
+          (service) =>
+            service.name.toLowerCase().includes(q) ||
+            service.slug.toLowerCase().includes(q) ||
+            service.category.toLowerCase().includes(q) ||
+            service.aliases.some((alias) => alias.toLowerCase().includes(q)),
+        )
       : services;
   const showMark = Boolean(current) && query === current?.name;
 
@@ -141,7 +155,8 @@ export function ServicePicker({ services, selected }: { services: Service[]; sel
               <ProviderMark provider={service.name} size={28} />
               <span>{service.name}</span>
               <span className={s.optionCount}>
-                {service.total} source{service.total === 1 ? "" : "s"}
+                {service.total} source{service.total === 1 ? "" : "s"} ·{" "}
+                {catalogCoverageLabel(service.coverageStatus)}
               </span>
             </li>
           ))}

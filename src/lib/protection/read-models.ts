@@ -154,7 +154,7 @@ export async function getDependenciesOverview(
       : brokenRepoAccess || failedScan
         ? "access_problem"
         : !covered.length
-          ? "incomplete_coverage"
+          ? "coverage_pending"
           : !hasBaseline && hasPending
             ? "baseline_pending"
             : latestImpact?.relevant

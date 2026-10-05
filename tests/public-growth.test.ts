@@ -3,7 +3,11 @@ import { readPublicAttribution, publicConversionEvents } from "@/lib/public/conv
 import { publicStackScanResult } from "@/lib/public/stack-scan";
 import { consumePublicRateLimit, resetPublicRateLimitsForTests } from "@/lib/public/rate-limit";
 import { validatePublishableFields } from "@/lib/growth/contract";
-import { summarizeEnabledSources } from "@/lib/public/coverage";
+import {
+  catalogCoverageLabel,
+  catalogCoverageStatus,
+  summarizeEnabledSources,
+} from "@/lib/public/coverage";
 import { POST as publicStackScan } from "@/app/api/public/stack-scan/route";
 import { isPublicEvidenceFresh, MAX_PUBLIC_EVIDENCE_AGE_DAYS } from "@/lib/public/freshness";
 import { scopePublicToolItems, scopePublicToolProviders } from "@/lib/public/tool-filter";
@@ -202,6 +206,27 @@ describe("public acquisition surfaces", () => {
     expect(
       summarizeEnabledSources([{ dependency_id: "stripe", source_type: "changelog" }], 501).partial,
     ).toBe(true);
+    expect(catalogCoverageStatus(0, 0)).toBe("coverage_pending");
+    expect(catalogCoverageStatus(1, 1)).toBe("partial_coverage");
+    expect(catalogCoverageStatus(3, 2)).toBe("partial_coverage");
+    expect(catalogCoverageStatus(3, 3)).toBe("strong_coverage");
+    expect(catalogCoverageStatus(0, 0, true)).toBe("coverage_unknown");
+    expect(catalogCoverageLabel("coverage_unknown")).toBe("coverage unknown");
+    const boundedSourceRows = Array.from({ length: 500 }, () => ({
+      dependency_id: "source-visible-on-this-page",
+      source_type: "changelog",
+    }));
+    const partialDirectory = summarizeEnabledSources(boundedSourceRows, 501);
+    const omittedProviderCoverage = partialDirectory.byDependency.get(
+      "provider-omitted-from-page",
+    ) ?? { total: 0, byType: {} };
+    const omittedProviderStatus = catalogCoverageStatus(
+      omittedProviderCoverage.total,
+      Object.keys(omittedProviderCoverage.byType).length,
+      partialDirectory.partial,
+    );
+    expect(omittedProviderStatus).toBe("coverage_unknown");
+    expect(catalogCoverageLabel(omittedProviderStatus)).not.toBe("coverage pending");
   });
 
   it("keeps an unknown provider filter from falling back to all public providers", () => {
