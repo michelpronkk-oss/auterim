@@ -6,11 +6,11 @@ import { focusHeroInput } from "@/app/_home/hero";
 import { BrandMark } from "@/app/_home/marks";
 import s from "./site.module.css";
 
-export type SiteSection = "product" | "pricing" | "changes" | "tools" | "legal";
+export type SiteSection = "product" | "how" | "pricing" | "changes" | "tools" | "legal";
 
 const primary: Array<{ href: string; label: string; key?: SiteSection }> = [
   { href: "/product", label: "Product", key: "product" },
-  { href: "/product#how-it-works", label: "How it works" },
+  { href: "/how-it-works", label: "How it works", key: "how" },
   { href: "/#pricing", label: "Pricing", key: "pricing" },
   { href: "/changes", label: "Changes", key: "changes" },
 ];

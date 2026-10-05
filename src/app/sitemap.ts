@@ -21,6 +21,7 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     { url: `${origin}/tools/deprecation-checker`, changeFrequency: "weekly", priority: 0.6 },
     { url: `${origin}/pricing`, changeFrequency: "monthly", priority: 0.6 },
     { url: `${origin}/product`, changeFrequency: "monthly", priority: 0.8 },
+    { url: `${origin}/how-it-works`, changeFrequency: "monthly", priority: 0.8 },
     { url: `${origin}/security`, changeFrequency: "monthly", priority: 0.5 },
     { url: `${origin}/privacy`, changeFrequency: "yearly", priority: 0.3 },
     { url: `${origin}/terms`, changeFrequency: "yearly", priority: 0.3 },

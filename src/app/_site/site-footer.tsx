@@ -15,7 +15,7 @@ const columns: Array<{ title: string; links: Array<[label: string, href: string]
   {
     title: "RESOURCES",
     links: [
-      ["How it works", "/product#how-it-works"],
+      ["How it works", "/how-it-works"],
       ["Tools", "/tools"],
       ["Security", "/security"],
     ],
