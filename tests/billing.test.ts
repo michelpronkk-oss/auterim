@@ -4,6 +4,7 @@ import {
   planForDodoProduct,
   resolveWorkspaceEntitlements,
 } from "@/lib/billing/plan-catalog";
+import { evaluateBusinessHandoff } from "@/lib/preflight/business-policy";
 
 const workspaceId = "00000000-0000-4000-8000-000000000011";
 
@@ -154,6 +155,65 @@ describe("billing plans and workspace entitlements", () => {
     expect(active("business").capabilities.automaticRemediation).toBe(true);
     expect(PLAN_CATALOG.business.limits.protectedDependencies).toBeGreaterThan(
       PLAN_CATALOG.pro.limits.protectedDependencies,
+    );
+  });
+
+  it("requires explicit Business policy, repository scope, and successful validation for handoff", () => {
+    const entitlements = resolveWorkspaceEntitlements({
+      snapshot: {
+        workspaceId,
+        activatedAt: "2026-10-01T12:00:00.000Z",
+        serverNow: "2026-10-03T12:00:00.000Z",
+        subscription: {
+          plan: "business",
+          status: "active",
+          trialStartedAt: null,
+          trialEndsAt: null,
+          currentPeriodStart: "2026-10-01T12:00:00.000Z",
+          currentPeriodEnd: "2026-11-01T12:00:00.000Z",
+          cancelAtPeriodEnd: false,
+          hasDodoCustomer: true,
+          updatedAt: "2026-10-02T12:00:00.000Z",
+        },
+      },
+    });
+    const input = {
+      entitlements,
+      requestedPolicyVersion: 2,
+      repositoryId: "repo-a",
+      productStatus: "protected" as const,
+      validationState: "validated" as const,
+    };
+    expect(evaluateBusinessHandoff({ ...input, policy: null })).toMatchObject({
+      allowed: false,
+      reason: "policy_disabled",
+    });
+    const policy = {
+      version: 2,
+      enabled: true,
+      draftPullRequestPreparationAllowed: true,
+      automaticWorkflowHandoffAllowed: true,
+      approvalRequired: true,
+      allowedRepositoryIds: ["repo-a"],
+    };
+    expect(evaluateBusinessHandoff({ ...input, policy })).toMatchObject({
+      allowed: true,
+      approvalRequired: true,
+      policyVersion: 2,
+    });
+    expect(evaluateBusinessHandoff({ ...input, policy, requestedPolicyVersion: 1 })).toMatchObject({
+      allowed: false,
+      reason: "stale_policy",
+    });
+    expect(evaluateBusinessHandoff({ ...input, policy, repositoryId: "repo-b" })).toMatchObject({
+      allowed: false,
+      reason: "repository_not_allowed",
+    });
+    expect(evaluateBusinessHandoff({ ...input, policy, validationState: "pending" })).toMatchObject(
+      {
+        allowed: false,
+        reason: "validation_required",
+      },
     );
   });
 
