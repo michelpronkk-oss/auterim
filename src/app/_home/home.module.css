@@ -2756,7 +2756,224 @@
   color: var(--slate-3);
 }
 
-/* 10 Final CTA */
+/* 10 Pricing */
+.pricingSection {
+  scroll-margin-top: 24px;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 clamp(16px, 3vw, 40px) clamp(72px, 9vw, 128px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: clamp(36px, 4.5vw, 56px);
+}
+.pricingHead {
+  max-width: 640px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  text-align: center;
+}
+.pricingHead .lede {
+  max-width: 460px;
+}
+.planGrid {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: repeat(6, auto);
+  gap: 0 clamp(14px, 1.6vw, 20px);
+  align-items: stretch;
+}
+.planCard,
+.planCardPro {
+  position: relative;
+  grid-row: span 6;
+  display: grid;
+  grid-template-rows: subgrid;
+  padding: 28px 28px 22px;
+  border-radius: 20px;
+  background: #ffffff;
+  box-shadow:
+    0 0 0 1px rgba(14, 27, 46, 0.08),
+    0 1px 2px rgba(14, 27, 46, 0.04);
+}
+.planCardPro {
+  background:
+    linear-gradient(180deg, rgba(79, 125, 243, 0.07), rgba(79, 125, 243, 0) 140px), #ffffff;
+  box-shadow:
+    0 0 0 1.5px rgba(47, 91, 216, 0.55),
+    0 18px 40px -18px rgba(14, 27, 46, 0.28),
+    0 2px 6px rgba(14, 27, 46, 0.05);
+}
+.planTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 24px;
+}
+.planName {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+}
+.planBadge {
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(47, 91, 216, 0.08);
+  color: var(--blue);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+}
+.planPrice {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 22px 0 0;
+}
+.planAmount {
+  font-size: clamp(44px, 4.2vw, 54px);
+  font-weight: 500;
+  letter-spacing: -0.045em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.planPer {
+  font-size: 14px;
+  color: var(--slate-3);
+}
+.planLine {
+  margin: 12px 0 0;
+  font-size: 15.5px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+.planFeatures {
+  margin: 22px 0 0;
+  padding: 20px 0 0;
+  border-top: 1px solid rgba(14, 27, 46, 0.08);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+.planFeatures li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 14.5px;
+  line-height: 1.4;
+  color: var(--slate);
+}
+.planCheck {
+  flex: none;
+  margin-top: 2px;
+  color: var(--blue);
+}
+.planFeatures .planInherit {
+  color: var(--ink);
+  font-weight: 500;
+}
+.planCta,
+.planCtaPro {
+  align-self: end;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 46px;
+  margin-top: 28px;
+  padding: 0 18px;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 500;
+  text-decoration: none;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+.page a.planCta {
+  background: #ffffff;
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px rgba(14, 27, 46, 0.18);
+}
+.page a.planCta:hover {
+  color: var(--ink);
+  background: var(--paper);
+  box-shadow: inset 0 0 0 1px rgba(14, 27, 46, 0.4);
+}
+.page a.planCtaPro {
+  background: var(--ink);
+  color: var(--cream);
+}
+.page a.planCtaPro:hover {
+  background: var(--blue);
+  color: #ffffff;
+}
+.planNote {
+  margin: 12px 0 0;
+  min-height: 1lh;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--slate-3);
+  text-align: center;
+  text-wrap: balance;
+}
+.pricingFoot {
+  margin: 0;
+  max-width: 560px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--slate-3);
+  text-align: center;
+  text-wrap: balance;
+}
+@media (max-width: 959px) {
+  .planGrid {
+    max-width: 560px;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    gap: 16px;
+  }
+  .planCard,
+  .planCardPro {
+    grid-row: auto;
+    grid-template-rows: none;
+    display: flex;
+    flex-direction: column;
+  }
+  .planCta,
+  .planCtaPro {
+    align-self: stretch;
+  }
+  .planCard .planNote {
+    display: none;
+  }
+}
+@media (max-width: 560px) {
+  .planCard,
+  .planCardPro {
+    padding: 24px 20px 20px;
+    border-radius: 18px;
+  }
+  .planAmount {
+    font-size: 46px;
+  }
+  .planFeatures li {
+    font-size: 14.5px;
+  }
+  .pricingFoot {
+    font-size: 13px;
+  }
+}
+
+/* 11 Final CTA */
 .finalCta {
   margin: 0 clamp(10px, 1.4vw, 18px) clamp(10px, 1.4vw, 18px);
   overflow: hidden;
