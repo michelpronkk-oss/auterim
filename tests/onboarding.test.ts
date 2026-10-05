@@ -18,6 +18,7 @@ const migrationPaths = [
   "20261012000000_runtime_dependency_discovery.sql",
   "20261013000000_prevent_implicit_multiple_onboarding_workspaces.sql",
   "20261018000000_launch_provider_catalog_breadth.sql",
+  "20261019000000_provider_monitoring_coverage_wave.sql",
 ];
 const migrations = await Promise.all(
   migrationPaths.map((name) =>
@@ -132,15 +133,42 @@ describe("onboarding activation backend", () => {
        from (select dependency_id,count(distinct source_type)::int as source_types
          from public.source_catalog where enabled group by dependency_id) coverage`,
     );
-    expect(sourceCoverage.rows[0]).toEqual({ providers: 29, strong: 1, partial: 28 });
+    expect(sourceCoverage.rows[0]).toEqual({ providers: 56, strong: 1, partial: 55 });
     const sourceRowsBeforeRetry = await db.query<{ count: number }>(
       "select count(*)::int as count from public.source_catalog where enabled",
     );
+    expect(sourceRowsBeforeRetry.rows[0]!.count).toBe(63);
     await db.exec(migrations[migrations.length - 1]!);
     const sourceRowsAfterRetry = await db.query<{ count: number }>(
       "select count(*)::int as count from public.source_catalog where enabled",
     );
     expect(sourceRowsAfterRetry.rows[0]!.count).toBe(sourceRowsBeforeRetry.rows[0]!.count);
+    for (const [query, expected] of [
+      [
+        "cohere",
+        { slug: "cohere", coverageStatus: "partial_coverage", authoritativeSourceCount: 1 },
+      ],
+      ["groq", { slug: "groq", coverageStatus: "partial_coverage", authoritativeSourceCount: 2 }],
+      [
+        "docker hub",
+        { slug: "docker-hub", coverageStatus: "partial_coverage", authoritativeSourceCount: 2 },
+      ],
+    ] as const) {
+      const result = await db.query<{ result: Array<Record<string, unknown>> }>(
+        "select public.search_onboarding_dependency_catalog($1,$2) as result",
+        [workspaceId, query],
+      );
+      expect(result.rows[0]!.result[0]).toMatchObject(expected);
+    }
+    const hyperscalerPending = await db.query<{ result: Array<Record<string, unknown>> }>(
+      "select public.search_onboarding_dependency_catalog($1,'Amazon Web Services') as result",
+      [workspaceId],
+    );
+    expect(hyperscalerPending.rows[0]!.result[0]).toMatchObject({
+      slug: "aws",
+      coverageStatus: "coverage_pending",
+      authoritativeSourceCount: 0,
+    });
     const targeted = await db.query<{ result: Array<Record<string, unknown>> }>(
       "select public.search_onboarding_dependency_catalog($1,'Cloudflare') as result",
       [workspaceId],
@@ -365,7 +393,7 @@ describe("onboarding activation backend", () => {
       }
       await db.close();
     }
-  });
+  }, 15_000);
 
   it("keeps first-time onboarding to one workspace and one canonical company", async () => {
     const db = await database();
