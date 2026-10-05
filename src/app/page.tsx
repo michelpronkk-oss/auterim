@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import Link from "next/link";
 import { PublicPageView } from "@/app/public-page-view";
@@ -33,6 +33,9 @@ const geistMono = Geist_Mono({
   weight: ["400", "500"],
   variable: "--font-geist-mono",
 });
+
+// Tints the mobile browser bars to the top of the hero.
+export const viewport: Viewport = { themeColor: "#e4ebf9" };
 
 export const metadata: Metadata = {
   title: "Auterim — Know when what your business depends on changes",
