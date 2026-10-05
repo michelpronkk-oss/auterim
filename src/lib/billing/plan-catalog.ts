@@ -24,6 +24,7 @@ export const PLAN_CATALOG: Record<
     ctaHref: "/signup";
     trialNote?: string;
     limits: {
+      protectedProducts: number;
       protectedDependencies: number;
       repositories: number;
       members: number;
@@ -49,6 +50,7 @@ export const PLAN_CATALOG: Record<
     ctaLabel: "Start protecting",
     ctaHref: "/signup",
     limits: {
+      protectedProducts: 1,
       protectedDependencies: 20,
       repositories: 0,
       members: 3,
@@ -88,6 +90,7 @@ export const PLAN_CATALOG: Record<
     ctaHref: "/signup",
     trialNote: "Your 5-day Pro trial starts when protection goes live.",
     limits: {
+      protectedProducts: 3,
       protectedDependencies: 75,
       repositories: 5,
       members: 10,
@@ -125,6 +128,7 @@ export const PLAN_CATALOG: Record<
     ctaLabel: "Start Business protection",
     ctaHref: "/signup",
     limits: {
+      protectedProducts: 10,
       protectedDependencies: 250,
       repositories: 25,
       members: 50,
@@ -182,12 +186,13 @@ export type WorkspaceEntitlements = {
   capabilities: Record<CapabilityName, boolean>;
   limits: typeof PLAN_CATALOG.core.limits;
   usage: {
+    protectedProducts: number;
     protectedDependencies: number;
     repositories: number;
     preflightRuns: number;
     remediationRuns: number;
   };
-  overLimit: { protectedDependencies: boolean; repositories: boolean };
+  overLimit: { protectedProducts: boolean; protectedDependencies: boolean; repositories: boolean };
   billing: { cancelAtPeriodEnd: boolean; currentPeriodEnd: string | null; gracePeriod: boolean };
 };
 
@@ -241,12 +246,14 @@ export function resolveWorkspaceEntitlements(input: {
     capabilities.automaticDraftPr = false;
   }
   const usage = {
+    protectedProducts: Math.max(0, input.usage?.protectedProducts ?? 0),
     protectedDependencies: Math.max(0, input.usage?.protectedDependencies ?? 0),
     repositories: Math.max(0, input.usage?.repositories ?? 0),
     preflightRuns: Math.max(0, input.usage?.preflightRuns ?? 0),
     remediationRuns: Math.max(0, input.usage?.remediationRuns ?? 0),
   };
   const limits = base?.limits ?? {
+    protectedProducts: 0,
     protectedDependencies: 0,
     repositories: 0,
     members: 0,
@@ -279,6 +286,7 @@ export function resolveWorkspaceEntitlements(input: {
     limits,
     usage,
     overLimit: {
+      protectedProducts: usage.protectedProducts > limits.protectedProducts,
       protectedDependencies: usage.protectedDependencies > limits.protectedDependencies,
       repositories: usage.repositories > limits.repositories,
     },

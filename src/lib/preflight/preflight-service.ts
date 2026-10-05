@@ -62,6 +62,23 @@ export class SupabasePreflightRepository implements PreflightRepository {
     throwSupabaseError(assessmentError);
     if (!assessment) return null;
 
+    const { data: dependencyState, error: dependencyStateError } = await this.client
+      .from("workspace_dependencies")
+      .select("protected_product_id,monitoring_enabled")
+      .eq("id", assessment.workspace_dependency_id)
+      .eq("workspace_id", assessment.workspace_id)
+      .maybeSingle();
+    throwSupabaseError(dependencyStateError);
+    if (!dependencyState?.monitoring_enabled || !dependencyState.protected_product_id) return null;
+    const { data: productState, error: productError } = await this.client
+      .from("workspace_products")
+      .select("status")
+      .eq("id", dependencyState.protected_product_id)
+      .eq("workspace_id", assessment.workspace_id)
+      .maybeSingle();
+    throwSupabaseError(productError);
+    if (productState?.status !== "protected") return null;
+
     const [
       { data: classification, error: classificationError },
       { data: context, error: contextError },

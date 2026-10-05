@@ -36,7 +36,12 @@ export async function getWorkspaceRole(
 }
 
 async function usageSnapshot(client: SupabaseClient, workspaceId: string, periodStart: string) {
-  const [dependencies, repositories, preflightRuns, remediationRuns] = await Promise.all([
+  const [products, dependencies, repositories, preflightRuns, remediationRuns] = await Promise.all([
+    client
+      .from("workspace_products")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .neq("status", "archived"),
     client
       .from("workspace_dependencies")
       .select("id", { count: "exact", head: true })
@@ -58,13 +63,18 @@ async function usageSnapshot(client: SupabaseClient, workspaceId: string, period
       .gte("created_at", periodStart),
   ]);
   if (
-    [dependencies.error, repositories.error, preflightRuns.error, remediationRuns.error].some(
-      Boolean,
-    )
+    [
+      products.error,
+      dependencies.error,
+      repositories.error,
+      preflightRuns.error,
+      remediationRuns.error,
+    ].some(Boolean)
   ) {
     throw new Error("billing_usage_unavailable");
   }
   return {
+    protectedProducts: products.count ?? 0,
     protectedDependencies: dependencies.count ?? 0,
     repositories: repositories.count ?? 0,
     preflightRuns: preflightRuns.count ?? 0,

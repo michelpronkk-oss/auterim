@@ -10,14 +10,17 @@ const workspaceId = "00000000-0000-4000-8000-000000000011";
 describe("billing plans and workspace entitlements", () => {
   it("keeps launch packaging, capacities, trial copy, and signup actions aligned", () => {
     expect(PLAN_CATALOG.core.limits).toMatchObject({
+      protectedProducts: 1,
       protectedDependencies: 20,
       repositories: 0,
     });
     expect(PLAN_CATALOG.pro.limits).toMatchObject({
+      protectedProducts: 3,
       protectedDependencies: 75,
       repositories: 5,
     });
     expect(PLAN_CATALOG.business.limits).toMatchObject({
+      protectedProducts: 10,
       protectedDependencies: 250,
       repositories: 25,
     });
@@ -152,6 +155,32 @@ describe("billing plans and workspace entitlements", () => {
     expect(PLAN_CATALOG.business.limits.protectedDependencies).toBeGreaterThan(
       PLAN_CATALOG.pro.limits.protectedDependencies,
     );
+  });
+
+  it("uses product portfolio counts for limits and downgrade over-limit reporting", () => {
+    const resolved = resolveWorkspaceEntitlements({
+      snapshot: {
+        workspaceId,
+        activatedAt: "2026-10-01T12:00:00.000Z",
+        serverNow: "2026-10-07T12:00:00.000Z",
+        subscription: {
+          plan: "core",
+          status: "active",
+          trialStartedAt: null,
+          trialEndsAt: null,
+          currentPeriodStart: "2026-10-01T00:00:00.000Z",
+          currentPeriodEnd: "2026-11-01T00:00:00.000Z",
+          cancelAtPeriodEnd: false,
+          hasDodoCustomer: true,
+          updatedAt: "2026-10-01T12:00:00.000Z",
+        },
+      },
+      usage: { protectedProducts: 2 },
+    });
+
+    expect(resolved.limits.protectedProducts).toBe(1);
+    expect(resolved.usage.protectedProducts).toBe(2);
+    expect(resolved.overLimit.protectedProducts).toBe(true);
   });
 
   it("keeps read access in a bounded past-due grace period but pauses execution", () => {

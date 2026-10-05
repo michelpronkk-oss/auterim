@@ -24,7 +24,7 @@ export const runPreflightTask = schemaTask({
     try {
       const { data: queue, error: queueError } = await client
         .from("preflight_dispatch_queue")
-        .select("workspace_id,impact_assessment_id")
+        .select("workspace_id,impact_assessment_id,status")
         .eq("id", queueId)
         .maybeSingle();
       if (queueError) throw new Error("preflight_queue_read_failed");
@@ -35,6 +35,9 @@ export const runPreflightTask = schemaTask({
       ) {
         throw new AbortTaskRunError("Preflight queue identity is invalid.");
       }
+      if (queue.status === "superseded") return { status: "superseded" as const };
+      if (queue.status === "complete") return { status: "complete" as const };
+      if (queue.status !== "dispatched") return { status: "not_current" as const };
       const entitlements = await resolveWorkspaceEntitlementsForService(workspaceId);
       if (
         !entitlements.capabilities.automaticPreflight ||
@@ -55,6 +58,12 @@ export const runPreflightTask = schemaTask({
       if (error) throw new Error("preflight_queue_update_failed");
       return result;
     } catch (error) {
+      const { data: latestQueue } = await client
+        .from("preflight_dispatch_queue")
+        .select("status")
+        .eq("id", queueId)
+        .maybeSingle();
+      if (latestQueue?.status === "superseded") return { status: "superseded" as const };
       await client.rpc("mark_preflight_dispatch", {
         p_queue_id: queueId,
         p_status: "failed",
