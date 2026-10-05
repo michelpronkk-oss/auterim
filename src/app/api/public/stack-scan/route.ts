@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { discoverWebsiteDependencies, normalizePublicWebsiteUrl } from "@/lib/discovery/discovery";
+import { normalizePublicWebsiteUrl } from "@/lib/discovery/discovery";
 import { consumePublicRateLimit, publicClientKey } from "@/lib/public/rate-limit";
-import { publicStackScanResult } from "@/lib/public/stack-scan";
+import { discoverPublicStackScan } from "@/lib/public/stack-scan";
 import { SafeFetchError } from "@/lib/monitoring/fetcher";
 
 const inputSchema = z.object({ websiteUrl: z.string().trim().min(1).max(2048) }).strict();
@@ -37,6 +37,7 @@ async function readRequestBodyBounded(request: Request) {
 }
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 20;
 
 export async function POST(request: Request) {
   const rate = consumePublicRateLimit(publicClientKey(request));
@@ -68,8 +69,8 @@ export async function POST(request: Request) {
     }
     activeScans += 1;
     acquiredScanSlot = true;
-    const result = await discoverWebsiteDependencies(normalizedUrl, { deep: false });
-    return Response.json(publicStackScanResult(result), {
+    const result = await discoverPublicStackScan(normalizedUrl);
+    return Response.json(result, {
       headers: { "Cache-Control": "no-store" },
     });
   } catch (error) {

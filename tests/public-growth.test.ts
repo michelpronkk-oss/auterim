@@ -6,6 +6,7 @@ import { validatePublishableFields } from "@/lib/growth/contract";
 import { summarizeEnabledSources } from "@/lib/public/coverage";
 import { POST as publicStackScan } from "@/app/api/public/stack-scan/route";
 import { isPublicEvidenceFresh, MAX_PUBLIC_EVIDENCE_AGE_DAYS } from "@/lib/public/freshness";
+import { scopePublicToolItems, scopePublicToolProviders } from "@/lib/public/tool-filter";
 
 describe("public acquisition surfaces", () => {
   beforeEach(() => resetPublicRateLimitsForTests());
@@ -167,11 +168,12 @@ describe("public acquisition surfaces", () => {
     expect(JSON.stringify(result)).not.toContain("customer.example");
     expect(JSON.stringify(result)).not.toContain("x-vercel-id");
     expect(result.candidates[0]).toEqual({
+      providerId: "vercel",
       provider: "Vercel",
       confidence: 0.72,
       confidenceLabel: "medium",
       evidenceCount: 1,
-      signalTypes: ["response_header"],
+      evidenceFamilies: ["hosting_infrastructure"],
     });
   });
 
@@ -200,6 +202,35 @@ describe("public acquisition surfaces", () => {
     expect(
       summarizeEnabledSources([{ dependency_id: "stripe", source_type: "changelog" }], 501).partial,
     ).toBe(true);
+  });
+
+  it("keeps an unknown provider filter from falling back to all public providers", () => {
+    const directory = [{ slug: "openai" }, { slug: "stripe" }];
+    expect(scopePublicToolProviders(directory)).toEqual({
+      selected: null,
+      providers: directory,
+    });
+    expect(scopePublicToolProviders(directory, "stripe")).toEqual({
+      selected: directory[1],
+      providers: [directory[1]],
+    });
+    expect(scopePublicToolProviders(directory, "unknown-provider")).toEqual({
+      selected: null,
+      providers: [],
+    });
+
+    const changes = [
+      { provider: { slug: "openai" }, id: "openai-change" },
+      { provider: { slug: "stripe" }, id: "stripe-change" },
+    ];
+    expect(scopePublicToolItems(changes, directory).map(({ id }) => id)).toEqual([
+      "openai-change",
+      "stripe-change",
+    ]);
+    expect(scopePublicToolItems(changes, directory, "stripe").map(({ id }) => id)).toEqual([
+      "stripe-change",
+    ]);
+    expect(scopePublicToolItems(changes, directory, "unknown-provider")).toEqual([]);
   });
 
   it("rejects malformed public scan requests without echoing submitted data", async () => {

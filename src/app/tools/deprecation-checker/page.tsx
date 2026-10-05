@@ -3,6 +3,7 @@ import Link from "next/link";
 import { ProviderMark } from "@/app/_home/marks";
 import { SiteShell } from "@/app/_site/site-shell";
 import { getPublicToolDirectory } from "@/lib/public/intelligence";
+import { scopePublicToolItems, scopePublicToolProviders } from "@/lib/public/tool-filter";
 import { isDeprecationChange } from "../tool-data";
 import {
   DateChip,
@@ -52,11 +53,8 @@ export default async function DeprecationCheckerPage({
       days: change.effectiveAt ? daysUntil(change.effectiveAt) : null,
     })),
   );
-  const selected = provider ? directory.find((item) => item.slug === provider) : undefined;
-  const changes = (selected ? all.filter((c) => c.provider.slug === selected.slug) : all).slice(
-    0,
-    30,
-  );
+  const { selected } = scopePublicToolProviders(directory, provider);
+  const changes = scopePublicToolItems(all, directory, provider).slice(0, 30);
 
   const groups = [
     {
@@ -94,9 +92,15 @@ export default async function DeprecationCheckerPage({
             title={
               selected
                 ? `No approved deprecation changes for ${selected.name} right now.`
-                : "No approved deprecation changes right now."
+                : provider
+                  ? "No public provider matches this filter."
+                  : "No approved deprecation changes right now."
             }
-            text="We won't fill the gap with guesses."
+            text={
+              provider && !selected
+                ? "Choose a provider from the list to see its approved changes."
+                : "We won't fill the gap with guesses."
+            }
           />
         ) : selected ? (
           <article aria-labelledby="provider-name" className={`${s.card} ${s.provider}`}>
