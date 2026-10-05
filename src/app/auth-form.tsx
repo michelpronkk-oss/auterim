@@ -10,6 +10,9 @@ import {
   readPublicAttribution,
 } from "@/lib/public/conversion";
 import { canonicalizePublicWebsiteUrl } from "@/lib/discovery/normalize-website-url";
+import s from "@/app/_auth/auth.module.css";
+import { geist, geistMono } from "@/app/_auth/fonts";
+import { BrandMark } from "@/app/_home/marks";
 
 export type AuthMode = "signup" | "login" | "forgot" | "reset";
 
@@ -108,69 +111,114 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
 
   const labels = copy[mode];
   return (
-    <main className="auth-shell">
-      <header className="auth-topbar">
-        <Link className="wordmark" href="/">
-          <span className="brand-mark" aria-hidden="true">
-            A
-          </span>
-          auterim
-        </Link>
-        <Link className="nav-link" href="/">
-          Back to Auterim
-        </Link>
-      </header>
-      <section className="auth-card" aria-labelledby="auth-title">
-        <p className="eyebrow">
-          <span className="status-dot" /> Workspace protection
-        </p>
-        <h1 id="auth-title">{labels.title}</h1>
-        <p className="auth-description">{labels.description}</p>
-        <form className="auth-form" onSubmit={submit}>
-          {mode !== "reset" && (
-            <label>
-              Email
-              <input name="email" type="email" autoComplete="email" required maxLength={320} />
-            </label>
-          )}
-          {(mode === "signup" || mode === "login" || mode === "reset") && (
-            <label>
-              Password
-              <input
-                name="password"
-                type="password"
-                autoComplete={mode === "login" ? "current-password" : "new-password"}
-                required
-                minLength={8}
-                maxLength={128}
+    <div className={`${geist.variable} ${geistMono.variable} ${s.page}`}>
+      <div className={s.frame}>
+        <header className={s.top}>
+          <Link className={s.back} href="/">
+            <span aria-hidden="true">←</span> Back to Auterim
+          </Link>
+        </header>
+        <main className={s.main}>
+          <Link className={s.brand} href="/" aria-label="Auterim home">
+            <BrandMark size={30} />
+            Auterim
+          </Link>
+          <section className={s.card} aria-labelledby="auth-title">
+            <div className={s.head}>
+              <p className={s.eyebrow}>
+                <span className={s.dot} aria-hidden="true" />
+                WORKSPACE PROTECTION
+              </p>
+              <h1 id="auth-title" className={s.title}>
+                {labels.title}
+              </h1>
+              <p className={s.lede}>{labels.description}</p>
+            </div>
+            <form className={s.form} onSubmit={submit}>
+              {mode !== "reset" && (
+                <label className={s.field}>
+                  <span className={s.labelRow}>Email</span>
+                  <input
+                    className={s.input}
+                    name="email"
+                    type="email"
+                    autoComplete="email"
+                    placeholder="you@company.com"
+                    required
+                    maxLength={320}
+                  />
+                </label>
+              )}
+              {(mode === "signup" || mode === "login" || mode === "reset") && (
+                <div className={s.field}>
+                  <span className={s.labelRow}>
+                    <label htmlFor="auth-password">Password</label>
+                    {mode === "login" && <Link href="/forgot-password">Forgot password?</Link>}
+                  </span>
+                  <input
+                    id="auth-password"
+                    className={s.input}
+                    name="password"
+                    type="password"
+                    autoComplete={mode === "login" ? "current-password" : "new-password"}
+                    placeholder={mode === "login" ? undefined : "At least 8 characters"}
+                    required
+                    minLength={8}
+                    maxLength={128}
+                  />
+                </div>
+              )}
+              <button className={s.submit} type="submit" disabled={busy}>
+                {busy ? "Please wait…" : labels.submit}
+                <span className={s.arrow} aria-hidden="true">
+                  →
+                </span>
+              </button>
+            </form>
+            {message && (
+              <p className={s.message} role="status">
+                {message}
+              </p>
+            )}
+            <nav className={s.switch} aria-label="Account options">
+              {mode === "signup" && (
+                <>
+                  Already have an account? <Link href="/login">Sign in</Link>
+                </>
+              )}
+              {mode === "login" && (
+                <>
+                  New to Auterim? <Link href="/signup">Create an account</Link>
+                </>
+              )}
+              {(mode === "forgot" || mode === "reset") && (
+                <Link href="/login">Back to sign in</Link>
+              )}
+            </nav>
+          </section>
+          <p className={s.foot}>
+            <svg className={s.lock} aria-hidden="true" width="12" height="12" viewBox="0 0 12 12">
+              <rect
+                x="2"
+                y="5.2"
+                width="8"
+                height="5.6"
+                rx="1.4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.2"
               />
-            </label>
-          )}
-          <button className="primary-link auth-submit" type="submit" disabled={busy}>
-            {busy ? "Please wait…" : labels.submit}
-            <span aria-hidden="true">→</span>
-          </button>
-        </form>
-        {message && (
-          <p className="auth-message" role="status">
-            {message}
+              <path
+                d="M4 5.2V3.8a2 2 0 0 1 4 0v1.4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.2"
+              />
+            </svg>
+            Your workspace and billing access are verified on every server request.
           </p>
-        )}
-        <nav className="auth-links" aria-label="Account options">
-          {mode === "signup" && <Link href="/login">Already have an account? Sign in</Link>}
-          {mode === "login" && (
-            <>
-              <Link href="/signup">Create an account</Link>
-              <Link href="/forgot-password">Forgot password?</Link>
-            </>
-          )}
-          {mode === "forgot" && <Link href="/login">Back to sign in</Link>}
-          {mode === "reset" && <Link href="/login">Back to sign in</Link>}
-        </nav>
-      </section>
-      <p className="auth-footnote">
-        Your workspace and billing access are verified on every server request.
-      </p>
-    </main>
+        </main>
+      </div>
+    </div>
   );
 }
