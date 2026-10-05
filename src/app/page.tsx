@@ -493,7 +493,7 @@ export default function Home() {
             <span>Quiet intelligence for the systems your business depends on.</span>
           </div>
           <nav aria-label="Footer navigation" className={s.footerNav}>
-            <Link href="/changes">Public changes</Link>
+            <Link href="/changes">Provider changes</Link>
             <Link href="/tools">Free tools</Link>
             <a href="#pricing">Pricing</a>
             <Link href="/login">Sign in</Link>

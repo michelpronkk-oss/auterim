@@ -30,7 +30,7 @@ export function PublicFooter() {
       </Link>
       <span>Know what will break before it breaks.</span>
       <nav aria-label="Footer navigation">
-        <Link href="/changes">Public changes</Link>
+        <Link href="/changes">Provider changes</Link>
         <Link href="/tools">Free tools</Link>
         <Link href="/pricing">Pricing</Link>
         <Link href="/signup">Get protected</Link>
