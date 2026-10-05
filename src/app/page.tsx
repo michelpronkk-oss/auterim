@@ -66,7 +66,20 @@ export default function Home() {
                 <span>DEPENDENCY INTELLIGENCE</span>
               </span>
               <h1 id="hero-title" className={s.h1}>
-                Know when your stack <span className={s.h1Accent}>changes.</span>
+                Know when your stack{" "}
+                <span className={`${s.h1Accent} ${s.changing}`}>
+                  <span className={s.srOnly}>changes.</span>
+                  {"changes.".split("").map((letter, i) => (
+                    <span
+                      key={i}
+                      aria-hidden="true"
+                      className={s.changingLetter}
+                      style={{ ["--i" as string]: i }}
+                    >
+                      {letter}
+                    </span>
+                  ))}
+                </span>
               </h1>
               <p className={s.heroLede}>
                 Auterim watches every API, price and policy you rely on. You only hear about what

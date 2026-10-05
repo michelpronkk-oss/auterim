@@ -212,6 +212,85 @@
 .h1Accent {
   color: var(--blue);
 }
+/* "changes." re-prints itself every few seconds, letter by letter, like a fresh version
+   landing, while a thin line sweeps under it. Pure CSS, so it costs nothing to hydrate. */
+.changing {
+  position: relative;
+  display: inline-block;
+  white-space: nowrap;
+}
+.changing::after {
+  content: "";
+  position: absolute;
+  left: 0.02em;
+  right: 0.08em;
+  bottom: -0.06em;
+  height: 0.055em;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--blue), #7fa0f5);
+  transform: scaleX(0);
+  transform-origin: left;
+  animation: changingLine 6s cubic-bezier(0.65, 0, 0.35, 1) 1.4s infinite;
+}
+.changingLetter {
+  display: inline-block;
+  animation: changingLetter 6s cubic-bezier(0.2, 0.7, 0.2, 1) infinite;
+  animation-delay: calc(1.4s + var(--i) * 55ms);
+}
+@keyframes changingLetter {
+  0%,
+  6% {
+    transform: none;
+    opacity: 1;
+    color: var(--blue);
+  }
+  9% {
+    transform: translateY(-0.32em);
+    opacity: 0;
+  }
+  9.01% {
+    transform: translateY(0.32em);
+    opacity: 0;
+    color: #7fa0f5;
+  }
+  14% {
+    transform: none;
+    opacity: 1;
+    color: #7fa0f5;
+  }
+  24%,
+  100% {
+    transform: none;
+    opacity: 1;
+    color: var(--blue);
+  }
+}
+@keyframes changingLine {
+  0%,
+  8% {
+    transform: scaleX(0);
+    transform-origin: left;
+  }
+  18% {
+    transform: scaleX(1);
+    transform-origin: left;
+  }
+  18.01% {
+    transform: scaleX(1);
+    transform-origin: right;
+  }
+  30%,
+  100% {
+    transform: scaleX(0);
+    transform-origin: right;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .changing::after,
+  .changingLetter {
+    animation: none;
+  }
+}
 .h1Keep {
   white-space: nowrap;
 }

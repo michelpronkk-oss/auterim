@@ -216,23 +216,76 @@ export function ScanHero() {
   );
 }
 
-const reads = [
+/** Example of what a fast pass reads: real marker formats, matched to providers. */
+const anatomy: Array<{
+  title: string;
+  hint: string;
+  lines: Array<{ code: [before: string, match: string, after: string]; provider: string }>;
+}> = [
   {
     title: "Response headers",
-    text: "What the server says about itself.",
-    example: "x-vercel-id · cf-ray",
+    hint: "What the server says about itself",
+    lines: [
+      { code: ["", "x-vercel-id", ": fra1::iad1::7wq4c"], provider: "Vercel" },
+      { code: ["", "cf-ray", ": 8c1a2f3e9b7d-AMS"], provider: "Cloudflare" },
+    ],
   },
   {
     title: "Script sources",
-    text: "Where the page loads code from.",
-    example: "js.stripe.com",
+    hint: "Where the page loads code from",
+    lines: [{ code: ['<script src="https://', "js.stripe.com", '/v3">'], provider: "Stripe" }],
   },
   {
     title: "Security policy",
-    text: "Which services the page is allowed to call.",
-    example: "*.supabase.co · api.openai.com",
+    hint: "Which services the page may call",
+    lines: [
+      { code: ["connect-src ", "*.supabase.co", ""], provider: "Supabase" },
+      { code: ["connect-src ", "api.openai.com", ""], provider: "OpenAI" },
+    ],
   },
 ];
+
+function ScanAnatomy() {
+  return (
+    <figure className={s.anatomy} aria-label="Example of what the scan reads">
+      <div className={s.anaHead}>
+        <span className={s.anaReq}>
+          <span className={s.anaVerb}>GET</span> https://acme.com
+        </span>
+        <span className={s.anaTag}>EXAMPLE</span>
+      </div>
+      {anatomy.map((group, g) => (
+        <div key={group.title} className={s.anaGroup}>
+          <div className={s.anaGroupHead}>
+            <span className={s.anaNum}>{String(g + 1).padStart(2, "0")}</span>
+            <span className={s.anaTitle}>{group.title}</span>
+            <span className={s.anaHint}>{group.hint}</span>
+          </div>
+          <ul className={s.anaLines}>
+            {group.lines.map(({ code: [before, match, after], provider }) => (
+              <li key={match} className={s.anaLine}>
+                <code className={s.anaCode}>
+                  {before}
+                  <mark>{match}</mark>
+                  {after}
+                </code>
+                <span aria-hidden="true" className={s.anaLeader} />
+                <span className={s.anaHit}>
+                  <ProviderMark provider={provider} size={20} tone="dark" />
+                  {provider}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+      <figcaption className={s.anaFoot}>
+        <span className={s.anaFootDot} aria-hidden="true" />
+        Each match is checked against Auterim&apos;s provider catalog.
+      </figcaption>
+    </figure>
+  );
+}
 
 const confidenceLevel = { low: 1, medium: 2, high: 3 } as const;
 const confidenceText = { low: "Low", medium: "Medium", high: "High" } as const;
@@ -250,15 +303,7 @@ export function ScanResults() {
       {showIntro ? (
         <>
           <span className={s.label}>WHAT THE SCAN READS</span>
-          <div className={s.reads}>
-            {reads.map((read) => (
-              <div key={read.title} className={s.read}>
-                <span className={s.readTitle}>{read.title}</span>
-                <span className={s.readText}>{read.text}</span>
-                <span className={s.readEx}>{read.example}</span>
-              </div>
-            ))}
-          </div>
+          <ScanAnatomy />
         </>
       ) : null}
 
