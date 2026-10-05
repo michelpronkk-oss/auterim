@@ -1,7 +1,6 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readPublicAttribution, publicConversionEvents } from "@/lib/public/conversion";
 import { publicStackScanResult } from "@/lib/public/stack-scan";
-import { consumePublicRateLimit, resetPublicRateLimitsForTests } from "@/lib/public/rate-limit";
 import { validatePublishableFields } from "@/lib/growth/contract";
 import {
   catalogCoverageLabel,
@@ -12,9 +11,20 @@ import { POST as publicStackScan } from "@/app/api/public/stack-scan/route";
 import { isPublicEvidenceFresh, MAX_PUBLIC_EVIDENCE_AGE_DAYS } from "@/lib/public/freshness";
 import { scopePublicToolItems, scopePublicToolProviders } from "@/lib/public/tool-filter";
 
-describe("public acquisition surfaces", () => {
-  beforeEach(() => resetPublicRateLimitsForTests());
+vi.mock("@/lib/public/rate-limit", () => ({
+  claimPublicRateLimit: vi.fn().mockResolvedValue({
+    status: "allowed",
+    remaining: 3,
+    retryAfterSeconds: 0,
+  }),
+  claimPublicScanSlot: vi.fn().mockResolvedValue({
+    status: "acquired",
+    leaseId: "00000000-0000-4000-8000-000000000011",
+  }),
+  releasePublicScanSlot: vi.fn().mockResolvedValue(true),
+}));
 
+describe("public acquisition surfaces", () => {
   it("defines the first-party funnel event contract", () => {
     expect(publicConversionEvents).toEqual(
       expect.arrayContaining([
@@ -50,21 +60,6 @@ describe("public acquisition surfaces", () => {
       "/tools/stack-scanner?secret=1",
     );
     expect(attribution).toEqual({ utmSource: "partner", utmMedium: "docs", landingPath: "/" });
-  });
-
-  it("limits repeated public scans in a bounded window", () => {
-    expect(
-      consumePublicRateLimit("hashed-client", { now: 10, limit: 2, windowMs: 1000 }).allowed,
-    ).toBe(true);
-    expect(
-      consumePublicRateLimit("hashed-client", { now: 11, limit: 2, windowMs: 1000 }).allowed,
-    ).toBe(true);
-    expect(
-      consumePublicRateLimit("hashed-client", { now: 12, limit: 2, windowMs: 1000 }),
-    ).toMatchObject({ allowed: false, retryAfterSeconds: 1 });
-    expect(
-      consumePublicRateLimit("hashed-client", { now: 1010, limit: 2, windowMs: 1000 }).allowed,
-    ).toBe(true);
   });
 
   it("projects discovery results without returning company origin or raw evidence", () => {

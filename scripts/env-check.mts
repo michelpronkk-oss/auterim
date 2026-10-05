@@ -67,6 +67,9 @@ try {
   console.log(
     `Supabase: ${supabaseConfigured ? "configured" : "NOT configured (expected during foundation setup)"}`,
   );
+  console.log(
+    `Public distributed rate limiting: ${environment.PUBLIC_RATE_LIMIT_HMAC_SECRET ? "configured" : "not configured"}`,
+  );
   if (supabaseConfigured && environment.NEXT_PUBLIC_SUPABASE_URL) {
     const redacted = redactSupabaseUrl(environment.NEXT_PUBLIC_SUPABASE_URL);
     console.log(`  URL host: ${redacted.hostname}`);

@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { normalizePublicWebsiteUrl } from "@/lib/discovery/discovery";
-import { consumePublicRateLimit, publicClientKey } from "@/lib/public/rate-limit";
+import {
+  claimPublicRateLimit,
+  claimPublicScanSlot,
+  releasePublicScanSlot,
+} from "@/lib/public/rate-limit";
 import { discoverPublicStackScan } from "@/lib/public/stack-scan";
 import { SafeFetchError } from "@/lib/monitoring/fetcher";
 
@@ -40,8 +44,14 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 20;
 
 export async function POST(request: Request) {
-  const rate = consumePublicRateLimit(publicClientKey(request));
-  if (!rate.allowed) {
+  const rate = await claimPublicRateLimit(request, "public_stack_scan");
+  if (rate.status === "unavailable") {
+    return Response.json(
+      { error: "rate_limiter_unavailable", message: "Please retry shortly." },
+      { status: 503, headers: { "Retry-After": "5", "Cache-Control": "no-store" } },
+    );
+  }
+  if (rate.status === "limited") {
     return Response.json(
       { error: "rate_limited", message: "Please wait before running another scan." },
       {
@@ -51,6 +61,7 @@ export async function POST(request: Request) {
     );
   }
   let acquiredScanSlot = false;
+  let scanLeaseId: string | null = null;
   try {
     const declaredLength = Number(request.headers.get("content-length") ?? 0);
     if (declaredLength > MAX_REQUEST_BYTES)
@@ -67,6 +78,18 @@ export async function POST(request: Request) {
         },
       );
     }
+    const scanSlot = await claimPublicScanSlot();
+    if (scanSlot.status === "unavailable")
+      return Response.json(
+        { error: "scan_capacity_unavailable", message: "Please retry shortly." },
+        { status: 503, headers: { "Retry-After": "5", "Cache-Control": "no-store" } },
+      );
+    if (scanSlot.status === "full")
+      return Response.json(
+        { error: "scan_capacity_reached", message: "Please retry shortly." },
+        { status: 429, headers: { "Retry-After": "5", "Cache-Control": "no-store" } },
+      );
+    scanLeaseId = scanSlot.leaseId;
     activeScans += 1;
     acquiredScanSlot = true;
     const result = await discoverPublicStackScan(normalizedUrl);
@@ -91,5 +114,6 @@ export async function POST(request: Request) {
     );
   } finally {
     if (acquiredScanSlot) activeScans = Math.max(0, activeScans - 1);
+    if (scanLeaseId) await releasePublicScanSlot(scanLeaseId);
   }
 }

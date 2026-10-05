@@ -23,6 +23,10 @@ export const environmentSchema = z
     NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: optionalSecret,
     SUPABASE_SECRET_KEY: optionalSecret,
     SUPABASE_SERVICE_ROLE_KEY: optionalSecret,
+    PUBLIC_RATE_LIMIT_HMAC_SECRET: z.preprocess(
+      emptyToUndefined,
+      z.string().trim().min(32).optional(),
+    ),
     TRIGGER_SECRET_KEY: optionalSecret,
     RESEND_API_KEY: optionalSecret,
     RESEND_FROM_EMAIL: resendFromAddress,

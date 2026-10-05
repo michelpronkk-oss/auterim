@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { publicClientKey, consumePublicRateLimit } from "@/lib/public/rate-limit";
+import { claimPublicRateLimit } from "@/lib/public/rate-limit";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { z } from "zod";
 
@@ -27,11 +27,13 @@ const inputSchema = z
   .strict();
 
 export async function POST(request: Request) {
-  const rate = consumePublicRateLimit(`conversion:${publicClientKey(request)}`, {
-    limit: 30,
-    windowMs: 15 * 60_000,
-  });
-  if (!rate.allowed)
+  const rate = await claimPublicRateLimit(request, "public_conversion");
+  if (rate.status === "unavailable")
+    return Response.json(
+      { error: "rate_limiter_unavailable" },
+      { status: 503, headers: { "retry-after": "5", "cache-control": "no-store" } },
+    );
+  if (rate.status === "limited")
     return Response.json(
       { error: "rate_limited" },
       { status: 429, headers: { "retry-after": String(rate.retryAfterSeconds) } },
