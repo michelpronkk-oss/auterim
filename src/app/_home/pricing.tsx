@@ -52,7 +52,7 @@ const plans: Plan[] = [
       "Larger limits",
       "Stronger controls",
     ],
-    cta: "Start with Business",
+    cta: "Start Business protection",
   },
 ];
 
@@ -78,10 +78,11 @@ export function PricingSection() {
       <div data-reveal className={s.pricingHead}>
         <span className={s.eyebrow}>10 · PRICING</span>
         <h2 id="pricing-title" className={s.h2}>
-          Pick how far Auterim goes.
+          Choose your level of protection.
         </h2>
         <p className={s.lede}>
-          Every plan watches what you run on. Higher plans prove the impact and prepare the fix.
+          Every plan monitors what your business depends on. Higher plans verify the impact and
+          prepare the fix.
         </p>
       </div>
       <div className={s.planGrid}>
@@ -121,8 +122,7 @@ export function PricingSection() {
         ))}
       </div>
       <p data-reveal className={s.pricingFoot}>
-        All plans start with dependency discovery. Your{" "}
-        <span className={s.nowrap}>5-day Pro trial</span> begins when protection goes live.
+        All plans start with dependency discovery.
       </p>
     </section>
   );
