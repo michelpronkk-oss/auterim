@@ -55,44 +55,6 @@
 }
 
 /* Policy switcher, the same segmented track as the homepage demo tabs. */
-.tabs {
-  display: flex;
-  gap: 2px;
-  max-width: 100%;
-  margin-top: 18px;
-  padding: 4px;
-  border-radius: 12px;
-  background: rgba(14, 27, 46, 0.05);
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.tabs::-webkit-scrollbar {
-  display: none;
-}
-.tab {
-  flex: none;
-  padding: 8px 14px;
-  border-radius: 9px;
-  color: var(--slate);
-  font-size: 14px;
-  font-weight: 500;
-  text-decoration: none;
-  white-space: nowrap;
-  transition:
-    color 0.15s,
-    background 0.15s;
-}
-.tab:hover {
-  color: var(--ink);
-}
-.tab[aria-current="page"] {
-  background: #ffffff;
-  color: var(--ink);
-  box-shadow:
-    0 0 0 1px rgba(14, 27, 46, 0.06),
-    0 1px 2px rgba(14, 27, 46, 0.06);
-}
-
 .intro {
   max-width: 1280px;
   margin: 0 auto;
@@ -280,7 +242,7 @@
   overflow-wrap: normal;
 }
 
-/* ---------- Trust layouts (security, subprocessors) ---------- */
+/* ---------- Trust layouts ---------- */
 .principles {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -422,25 +384,6 @@
   .summary {
     font-size: 16.5px;
   }
-  /* Phones: one even segmented control across the full width, nothing to scroll or wrap. */
-  .tabs {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    align-self: stretch;
-    width: 100%;
-    margin-top: 10px;
-    padding: 4px;
-    border-radius: 14px;
-    background: rgba(255, 255, 255, 0.55);
-    box-shadow: inset 0 0 0 1px rgba(14, 27, 46, 0.08);
-    overflow: visible;
-  }
-  .tab {
-    padding: 10px 0;
-    border-radius: 10px;
-    font-size: 14px;
-    text-align: center;
-  }
   .body {
     padding: 36px 22px 72px;
   }
@@ -508,4 +451,105 @@
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;
+}
+
+/* ---------- More policies ---------- */
+.more {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0 clamp(20px, 4vw, 40px) clamp(64px, 8vw, 104px);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.moreHead {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  color: var(--slate-3);
+}
+.moreList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.moreCard {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 20px;
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow:
+    0 0 0 1px rgba(14, 27, 46, 0.07),
+    0 24px 48px -40px rgba(11, 22, 38, 0.4);
+  color: var(--ink);
+  text-decoration: none;
+  transition: box-shadow 0.15s;
+}
+.moreCard:hover {
+  color: var(--ink);
+  box-shadow:
+    0 0 0 1px rgba(47, 91, 216, 0.45),
+    0 24px 48px -36px rgba(11, 22, 38, 0.45);
+}
+.moreIcon {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 11px;
+  background: #eef2fc;
+  color: var(--blue);
+}
+.moreText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.moreTitle {
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+.moreHint {
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--slate-3);
+}
+.moreArrow {
+  flex: none;
+  color: var(--blue);
+  transition: transform 0.2s;
+}
+.moreCard:hover .moreArrow {
+  transform: translateX(3px);
+}
+@media (max-width: 860px) {
+  .moreList {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+}
+@media (max-width: 560px) {
+  .more {
+    padding: 0 16px 64px;
+  }
+  .moreCard {
+    padding: 14px 16px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .moreArrow {
+    transition: none;
+  }
 }

@@ -26,7 +26,6 @@ const columns: Array<{ title: string; links: Array<[label: string, href: string]
       ["Privacy", "/privacy"],
       ["Terms", "/terms"],
       ["Cookie Policy", "/cookies"],
-      ["Subprocessors", "/subprocessors"],
     ],
   },
   {

@@ -359,12 +359,10 @@ export default function SecurityPage() {
 
       <section className={s.section} aria-label="Related pages">
         <div className={s.related}>
-          <Link href="/subprocessors" className={s.relatedCard}>
+          <Link href="/terms" className={s.relatedCard}>
             <span className={s.relatedText}>
-              <span className={s.relatedTitle}>Subprocessors</span>
-              <span className={s.relatedBody}>
-                The services that process data on Auterim’s behalf.
-              </span>
+              <span className={s.relatedTitle}>Terms</span>
+              <span className={s.relatedBody}>The agreement for using Auterim.</span>
             </span>
             <span className={s.relatedArrow} aria-hidden="true">
               →

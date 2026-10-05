@@ -26,7 +26,6 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     { url: `${origin}/privacy`, changeFrequency: "yearly", priority: 0.3 },
     { url: `${origin}/terms`, changeFrequency: "yearly", priority: 0.3 },
     { url: `${origin}/cookies`, changeFrequency: "yearly", priority: 0.3 },
-    { url: `${origin}/subprocessors`, changeFrequency: "yearly", priority: 0.3 },
   ];
   pages.push(
     ...providers.map((provider) => ({
