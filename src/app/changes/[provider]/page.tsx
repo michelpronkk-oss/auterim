@@ -44,7 +44,7 @@ export default async function ProviderHubPage({
     })),
   );
   return (
-    <PublicShell>
+    <PublicShell current="changes">
       <section className="public-page-intro">
         <p className="eyebrow">PROVIDER HUB · {provider.category.toUpperCase()}</p>
         <h1>{provider.name} changes and updates</h1>

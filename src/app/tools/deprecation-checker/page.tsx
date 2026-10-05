@@ -17,7 +17,7 @@ export default async function DeprecationCheckerPage({
 }) {
   const { provider } = await searchParams;
   return (
-    <PublicShell>
+    <PublicShell current="tools">
       <section className="public-page-intro">
         <p className="eyebrow">DEPRECATION CHECKER</p>
         <h1>Look for an approved deadline signal.</h1>

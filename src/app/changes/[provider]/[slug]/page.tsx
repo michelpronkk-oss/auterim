@@ -72,7 +72,7 @@ export default async function PublicChangePage({
   const data = await pageData(provider, slug);
   if (!data) notFound();
   return (
-    <PublicShell>
+    <PublicShell current="changes">
       <article className="public-change-detail">
         <p className="eyebrow">{data.provider.name} · APPROVED PUBLIC CHANGE</p>
         <h1>{data.headline}</h1>

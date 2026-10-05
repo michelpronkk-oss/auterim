@@ -19,7 +19,7 @@ export default async function ChangesPage() {
     getApprovedPublicProviders(),
   ]);
   return (
-    <PublicShell>
+    <PublicShell current="changes">
       <section className="public-page-intro">
         <p className="eyebrow">PUBLIC SOFTWARE INTELLIGENCE</p>
         <h1>Changes worth a closer look.</h1>

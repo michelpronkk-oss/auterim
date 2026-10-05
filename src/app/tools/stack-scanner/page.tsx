@@ -11,7 +11,7 @@ export const metadata: Metadata = {
 
 export default function StackScannerPage() {
   return (
-    <PublicShell>
+    <PublicShell current="tools">
       <section className="public-page-intro scanner-intro">
         <p className="eyebrow">PUBLIC STACK SCANNER</p>
         <h1>Find likely dependencies from public signals.</h1>

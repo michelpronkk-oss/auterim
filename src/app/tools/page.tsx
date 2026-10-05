@@ -35,7 +35,7 @@ const tools = [
 
 export default function ToolsPage() {
   return (
-    <PublicShell>
+    <PublicShell current="tools">
       <section className="public-page-intro">
         <p className="eyebrow">FREE TOOLS</p>
         <h1>Start with a useful signal.</h1>
