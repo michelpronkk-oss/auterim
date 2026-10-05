@@ -7,6 +7,7 @@ import {
 import { planForDodoProduct } from "@/lib/billing/plan-catalog";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getEnvironment } from "@/lib/env/schema";
+import { readBoundedTextBody } from "@/lib/http/bounded-body";
 
 const MAX_WEBHOOK_BYTES = 256 * 1024;
 const eventSchema = z
@@ -43,12 +44,12 @@ export async function POST(request: Request) {
 
   let body: string;
   try {
-    body = await request.text();
-  } catch {
-    return Response.json({ error: "invalid_payload" }, { status: 400 });
+    body = await readBoundedTextBody(request.body, MAX_WEBHOOK_BYTES);
+  } catch (error) {
+    return error instanceof Error && error.message === "payload_too_large"
+      ? Response.json({ error: "payload_too_large" }, { status: 413 })
+      : Response.json({ error: "invalid_payload" }, { status: 400 });
   }
-  if (new TextEncoder().encode(body).byteLength > MAX_WEBHOOK_BYTES)
-    return Response.json({ error: "payload_too_large" }, { status: 413 });
 
   let verified: unknown;
   try {
