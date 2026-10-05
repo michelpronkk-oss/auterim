@@ -3,7 +3,12 @@ import { discoverCompanySurfaceDependencies } from "@/lib/discovery/company-surf
 import type { UrlDiscoveryResult } from "@/lib/discovery/discovery";
 import type { FetchResult } from "@/lib/monitoring/fetcher";
 import { publicStackScanResult } from "@/lib/public/stack-scan";
-import { publicScanHeadline } from "@/lib/public/stack-scan-copy";
+import {
+  publicAdditionalTechnologyCopy,
+  publicDiscoveryScopeCopy,
+  publicScanHeadline,
+} from "@/lib/public/stack-scan-copy";
+import type { TechnologyObservation } from "@/lib/discovery/technology-registry";
 
 function response(
   url: string,
@@ -24,17 +29,61 @@ function response(
   };
 }
 
+function technologyObservation(
+  technologySlug: string,
+  technologyName: string,
+  overrides: Partial<TechnologyObservation> = {},
+): TechnologyObservation {
+  return {
+    technologySlug,
+    technologyName,
+    category: "framework",
+    fingerprintId: `internal-${technologySlug}-fingerprint`,
+    registryVersion: "internal-registry-version",
+    evidenceFamily: "html_marker",
+    strength: "strong",
+    relationship: "unknown",
+    protectability: "non_protectable",
+    status: "supported",
+    disposition: "suppressed",
+    suppressionReason: "FRAMEWORK",
+    surfaceType: "ROOT_MARKETING",
+    surfaceHost: "private-observed-host.example",
+    sourceHost: "private-source-host.example",
+    ...overrides,
+  };
+}
+
 describe("canonical discovery public projection", () => {
-  it("maps canonical confidence to honest possible/likely copy", () => {
-    expect(publicScanHeadline("completed", ["medium"])).toBe("We found 1 possible dependency.");
-    expect(publicScanHeadline("partial", ["high"])).toBe("We found 1 likely dependency.");
-    expect(publicScanHeadline("completed", ["high", "low"])).toBe(
-      "We found 1 likely dependency and 1 possible dependency.",
+  it("describes zero, one, and many dependency candidates without overclaiming", () => {
+    expect(publicScanHeadline("completed", 0)).toBe(
+      "No dependency candidates were surfaced for review.",
     );
-    expect(publicScanHeadline("completed", [])).toBe(
-      "No supported dependency suggestions were found.",
+    expect(publicScanHeadline("partial", 1)).toBe("Auterim surfaced 1 dependency for review.");
+    expect(publicScanHeadline("completed", 2)).toBe("Auterim surfaced 2 dependencies for review.");
+    expect(publicScanHeadline("failed", 0)).toBe("We couldn't complete this scan.");
+  });
+
+  it("summarizes zero, one, many, and bounded additional technology names", () => {
+    expect(publicAdditionalTechnologyCopy(0, [])).toBe("");
+    expect(publicAdditionalTechnologyCopy(1, ["Next.js"])).toBe(
+      "1 additional technology observed: Next.js.",
     );
-    expect(publicScanHeadline("failed", [])).toBe("We couldn't complete this scan.");
+    expect(publicAdditionalTechnologyCopy(3, ["Next.js", "React", "Tailwind"])).toBe(
+      "3 additional technologies observed: Next.js · React · Tailwind.",
+    );
+    expect(publicAdditionalTechnologyCopy(10, ["A", "B", "C", "D", "E", "F", "G", "H"])).toBe(
+      "10 additional technologies observed: A · B · C · D · E · F · G · H · +2 more.",
+    );
+  });
+
+  it("states partial and complete discovery scope without claiming exhaustiveness", () => {
+    expect(publicDiscoveryScopeCopy(true)).toBe(
+      "Initial discovery is selective by design. This scan may not surface every dependency.",
+    );
+    expect(publicDiscoveryScopeCopy(false)).toBe(
+      "Initial discovery prioritizes evidence-backed matches for review.",
+    );
   });
 
   it("projects canonical company suggestions without recalculating provider truth", async () => {
@@ -61,12 +110,19 @@ describe("canonical discovery public projection", () => {
     expect(projected.candidates.map(({ providerId }) => providerId)).toEqual(
       expect.arrayContaining(["cloudflare", "stripe"]),
     );
-    expect(
-      projected.candidates.every(({ confidenceLabel }) =>
-        result.candidates.some((candidate) => candidate.confidenceLabel === confidenceLabel),
-      ),
-    ).toBe(true);
+    for (const candidate of projected.candidates) {
+      const canonical = result.candidates.find(
+        ({ providerSlug }) => providerSlug === candidate.providerId,
+      );
+      expect(canonical).toBeDefined();
+      expect(candidate.confidence).toBe(canonical?.confidence);
+      expect(candidate.confidenceLabel).toBe(canonical?.confidenceLabel);
+    }
     expect(projected.companyCoverage?.surfacesScanned).toBe(2);
+    expect(projected).toMatchObject({
+      additionalTechnologyCount: 1,
+      additionalTechnologies: ["Next.js"],
+    });
     expect(projected).not.toHaveProperty("technologyObservations");
     expect(projected).not.toHaveProperty("evidence");
     expect(JSON.stringify(projected)).not.toContain("internal-cloudflare-evidence");
@@ -97,6 +153,78 @@ describe("canonical discovery public projection", () => {
     ).toBe(
       result.candidates.find(({ providerSlug }) => providerSlug === "cloudflare")?.confidenceLabel,
     );
+  });
+
+  it("projects only distinct supported non-candidate technology names", async () => {
+    const result = await discoverCompanySurfaceDependencies("https://example.test", {
+      fetcher: async (url) =>
+        url === "https://example.test/" ? response(url, "<html></html>") : response(url, ""),
+    });
+    const companyObservations = [
+      technologyObservation("cloudflare", "Cloudflare"),
+      technologyObservation("nextjs", "Next.js"),
+      technologyObservation("nextjs", "Next.js", { surfaceHost: "app.example.test" }),
+      technologyObservation("react", "React"),
+      technologyObservation("weak-tool", "Weak Tool", { strength: "weak", status: "weak" }),
+      technologyObservation("derived-tool", "Derived Tool", { strength: "derived" }),
+      technologyObservation("conflicted-tool", "Conflicted Tool", { status: "conflicted" }),
+      technologyObservation("unknown-tool", "Unknown Tool", { status: "unknown" }),
+    ];
+    const projected = publicStackScanResult({
+      ...result,
+      candidates: [
+        {
+          providerSlug: "cloudflare",
+          providerName: "Cloudflare",
+          confidence: 0.8,
+          confidenceLabel: "high",
+          evidence: [],
+        },
+      ],
+      technologyObservations: [technologyObservation("root-only", "Root-only")],
+      companyCoverage: {
+        ...result.companyCoverage!,
+        technologyObservations: companyObservations,
+      },
+    });
+
+    expect(projected.additionalTechnologyCount).toBe(2);
+    expect(projected.additionalTechnologies).toEqual(["Next.js", "React"]);
+    expect(projected.candidates.map(({ providerId }) => providerId)).toEqual(["cloudflare"]);
+    const serialized = JSON.stringify(projected);
+    for (const internalValue of [
+      "internal-nextjs-fingerprint",
+      "internal-registry-version",
+      "html_marker",
+      "FRAMEWORK",
+      "private-observed-host.example",
+      "private-source-host.example",
+      "Weak Tool",
+      "Derived Tool",
+      "Conflicted Tool",
+      "Unknown Tool",
+      "Root-only",
+      "workspaceId",
+    ]) {
+      expect(serialized).not.toContain(internalValue);
+    }
+  });
+
+  it("falls back to root observations when company observations are unavailable", async () => {
+    const result = await discoverCompanySurfaceDependencies("https://example.test", {
+      fetcher: async (url) => response(url, "<html></html>"),
+    });
+    const projected = publicStackScanResult({
+      ...result,
+      technologyObservations: [technologyObservation("react", "React")],
+      companyCoverage: {
+        ...result.companyCoverage!,
+        technologyObservations: undefined,
+      },
+    });
+
+    expect(projected.additionalTechnologyCount).toBe(1);
+    expect(projected.additionalTechnologies).toEqual(["React"]);
   });
 
   it("does not expose technology observations as dependency suggestions", () => {

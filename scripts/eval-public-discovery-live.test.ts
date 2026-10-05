@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import { POST as publicStackScan } from "../src/app/api/public/stack-scan/route.ts";
 import { discoverCompanySurfaceDependencies } from "../src/lib/discovery/company-surfaces.ts";
-import type { publicStackScanResult } from "../src/lib/public/stack-scan.ts";
+import { publicStackScanResult } from "../src/lib/public/stack-scan.ts";
 
 const targets = [
   { name: "Cal.com", url: "https://cal.com/" },
@@ -36,6 +36,21 @@ it("checks bounded live public projections against canonical Discovery V1", asyn
       deep: true,
       runtimeEnabled,
     });
+    const canonicalProjection = publicStackScanResult(canonical);
+    const technologyObservations =
+      canonical.companyCoverage?.technologyObservations ?? canonical.technologyObservations ?? [];
+    const technologySlugsByDisposition = {
+      suggested: new Set(
+        technologyObservations
+          .filter(({ disposition }) => disposition === "suggested")
+          .map(({ technologySlug }) => technologySlug),
+      ).size,
+      suppressed: new Set(
+        technologyObservations
+          .filter(({ disposition }) => disposition === "suppressed")
+          .map(({ technologySlug }) => technologySlug),
+      ).size,
+    };
     const canonicalProviders = canonical.candidates.map((candidate) => ({
       providerId: candidate.providerSlug,
       confidence: candidate.confidence,
@@ -54,6 +69,8 @@ it("checks bounded live public projections against canonical Discovery V1", asyn
     expect(projected.companyCoverage?.surfacesScanned).toBe(
       canonical.companyCoverage?.surfacesScanned,
     );
+    expect(projected.additionalTechnologyCount).toBe(canonicalProjection.additionalTechnologyCount);
+    expect(projected.additionalTechnologies).toEqual(canonicalProjection.additionalTechnologies);
 
     results.push({
       site: target.name,
@@ -65,6 +82,17 @@ it("checks bounded live public projections against canonical Discovery V1", asyn
         selected: projected.companyCoverage?.surfacesSelected ?? 1,
         scanned: projected.companyCoverage?.surfacesScanned ?? 1,
       },
+      technologyObservations: {
+        records:
+          canonical.companyCoverage?.technologyObservationsTotal ?? technologyObservations.length,
+        uniqueTechnologies:
+          canonical.companyCoverage?.technologiesObserved ??
+          new Set(technologyObservations.map(({ technologySlug }) => technologySlug)).size,
+        suggestedTechnologies: technologySlugsByDisposition.suggested,
+        suppressedTechnologies: technologySlugsByDisposition.suppressed,
+      },
+      additionalTechnologyCount: projected.additionalTechnologyCount,
+      additionalTechnologies: projected.additionalTechnologies,
       runtime: {
         enabled: runtimeEnabled,
         attempted: canonical.coverage.runtime.attempted,

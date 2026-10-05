@@ -219,7 +219,7 @@ export const discoverTable = [
   },
   {
     name: "Resend",
-    disc: "Possible",
+    disc: "Medium confidence",
     discTone: "possible",
     conf: "Confirmed",
     glyph: "✓",
@@ -227,7 +227,7 @@ export const discoverTable = [
   },
   {
     name: "PostHog",
-    disc: "Possible",
+    disc: "Medium confidence",
     discTone: "possible",
     conf: "Not used",
     glyph: "–",

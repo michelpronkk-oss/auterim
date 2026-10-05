@@ -7,7 +7,11 @@ import {
   WebsiteUrlInputError,
 } from "@/lib/discovery/normalize-website-url";
 import { emitPublicConversionEvent, readPublicAttribution } from "@/lib/public/conversion";
-import { publicScanHeadline } from "@/lib/public/stack-scan-copy";
+import {
+  publicAdditionalTechnologyCopy,
+  publicDiscoveryScopeCopy,
+  publicScanHeadline,
+} from "@/lib/public/stack-scan-copy";
 import { catalog, catalogEntry, demoDefs, suggestedProviders, type CatalogSource } from "./data";
 import { BrandMark, ProviderMark } from "./marks";
 import s from "./home.module.css";
@@ -20,6 +24,8 @@ type Stage = "idle" | "analyzing" | "found" | "confirm" | "coverage" | "error";
 type ScanResponse = {
   status: "completed" | "partial" | "failed";
   partial: boolean;
+  additionalTechnologyCount: number;
+  additionalTechnologies: string[];
   candidates: Array<{
     providerId: string;
     provider: string;
@@ -55,6 +61,11 @@ const checkLabels = [
 
 const CHECK_STEP_MS = 520;
 const SCAN_FALLBACK_MESSAGE = "This website could not be scanned safely.";
+const confidenceCopy = {
+  low: "Low confidence",
+  medium: "Medium confidence",
+  high: "High confidence",
+} as const;
 
 /** Only messages the scan API wrote for people are shown; transport errors get a plain fallback. */
 class ScanError extends Error {}
@@ -145,6 +156,8 @@ export function HeroAnalyzer() {
   const [websiteUrl, setWebsiteUrl] = useState("");
   const [check, setCheck] = useState(0);
   const [found, setFound] = useState<Found[]>([]);
+  const [additionalTechnologyCount, setAdditionalTechnologyCount] = useState(0);
+  const [additionalTechnologies, setAdditionalTechnologies] = useState<string[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [extra, setExtra] = useState<string[]>([]);
   const [search, setSearch] = useState("");
@@ -180,6 +193,8 @@ export function HeroAnalyzer() {
     setWebsiteUrl(canonical);
     setCheck(0);
     setFound([]);
+    setAdditionalTechnologyCount(0);
+    setAdditionalTechnologies([]);
     setPartial(false);
     setSelected([]);
     setExtra([]);
@@ -228,6 +243,8 @@ export function HeroAnalyzer() {
       setCheck(4);
       setPartial(body.partial);
       setFound(unique);
+      setAdditionalTechnologyCount(body.additionalTechnologyCount ?? 0);
+      setAdditionalTechnologies(body.additionalTechnologies ?? []);
       setSelected(
         unique.filter((item) => item.confidenceLabel === "high").map((item) => item.name),
       );
@@ -429,20 +446,15 @@ export function HeroAnalyzer() {
               <div className={s.stageCol}>
                 <div className={s.stageHead}>
                   <span className={s.stageTitle}>
-                    {found.length
-                      ? publicScanHeadline(
-                          partial ? "partial" : "completed",
-                          found.map((item) => item.confidenceLabel),
-                        )
-                      : "No supported dependency suggestions were found."}
+                    {publicScanHeadline(partial ? "partial" : "completed", found.length)}
                   </span>
                   <span className={s.stageSub}>
-                    {found.length
-                      ? `Based on public technical signals from ${domain}.`
-                      : `That doesn't mean ${domain} has no dependencies. Many don't show up in a scan.`}
-                    {partial
-                      ? " The scan reached an inspection limit, so results may be incomplete."
-                      : ""}
+                    {publicAdditionalTechnologyCopy(
+                      additionalTechnologyCount,
+                      additionalTechnologies,
+                    )}
+                    {additionalTechnologyCount > 0 ? " " : ""}
+                    {publicDiscoveryScopeCopy(partial)}
                   </span>
                 </div>
                 {found.length ? (
@@ -463,9 +475,7 @@ export function HeroAnalyzer() {
                         <span
                           className={item.confidenceLabel === "high" ? s.pillHigh : s.pillPossible}
                         >
-                          {item.confidenceLabel === "high"
-                            ? "High confidence"
-                            : `${item.confidenceLabel === "medium" ? "Medium" : "Low"} confidence · Possible`}
+                          {confidenceCopy[item.confidenceLabel]}
                         </span>
                       </div>
                     ))}
@@ -473,8 +483,8 @@ export function HeroAnalyzer() {
                 ) : null}
                 <div className={s.stageFoot}>
                   <span className={s.footNote}>
-                    Auterim finds what it can. Confirm what your business actually relies on to
-                    complete your coverage.
+                    Confirm what your business relies on to turn discovery into continuous
+                    protection.
                   </span>
                   <button type="button" className={s.btnInkSm} onClick={() => setStage("confirm")}>
                     Confirm dependencies →
@@ -531,7 +541,7 @@ export function HeroAnalyzer() {
                     const hint = item
                       ? item.confidenceLabel === "high"
                         ? "High confidence"
-                        : `${item.confidenceLabel === "medium" ? "Medium" : "Low"} confidence · Possible`
+                        : confidenceCopy[item.confidenceLabel]
                       : extra.includes(name)
                         ? "Added by you"
                         : "Not detected";
@@ -718,7 +728,11 @@ function IdleDemo({ dt, dPhase }: { dt: number; dPhase: number }) {
                   r.confirmed ? s.pillConfirmed : r.conf === "high" ? s.pillHigh : s.pillPossible
                 }
               >
-                {r.confirmed ? "✓ Confirmed" : r.conf === "high" ? "High confidence" : "Possible"}
+                {r.confirmed
+                  ? "✓ Confirmed"
+                  : r.conf === "high"
+                    ? "High confidence"
+                    : "Medium confidence"}
               </span>
             </div>
             <div

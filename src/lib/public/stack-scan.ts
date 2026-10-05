@@ -12,6 +12,21 @@ export async function discoverPublicStackScan(websiteUrl: string) {
 
 export function publicStackScanResult(result: UrlDiscoveryResult) {
   const companyCoverage = result.companyCoverage;
+  const candidateSlugs = new Set(result.candidates.map(({ providerSlug }) => providerSlug));
+  const additionalTechnologiesBySlug = new Map<string, string>();
+  for (const observation of companyCoverage?.technologyObservations ??
+    result.technologyObservations ??
+    []) {
+    if (
+      candidateSlugs.has(observation.technologySlug) ||
+      (observation.strength !== "strong" && observation.strength !== "medium") ||
+      (observation.status !== "strong" && observation.status !== "supported")
+    ) {
+      continue;
+    }
+    additionalTechnologiesBySlug.set(observation.technologySlug, observation.technologyName);
+  }
+  const additionalTechnologyNames = [...additionalTechnologiesBySlug.values()];
   return {
     status: result.status,
     outcome: result.outcome,
@@ -39,6 +54,8 @@ export function publicStackScanResult(result: UrlDiscoveryResult) {
           totalRuntimeRequests: companyCoverage.totalRuntimeRequests,
         }
       : null,
+    additionalTechnologyCount: additionalTechnologyNames.length,
+    additionalTechnologies: additionalTechnologyNames.slice(0, 8),
     candidates: result.candidates.slice(0, 25).map((candidate) => ({
       providerId: candidate.providerSlug,
       provider: candidate.providerName,

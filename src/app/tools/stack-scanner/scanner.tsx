@@ -9,7 +9,7 @@ import {
   canonicalizePublicWebsiteUrl,
   WebsiteUrlInputError,
 } from "@/lib/discovery/normalize-website-url";
-import { publicScanHeadline } from "@/lib/public/stack-scan-copy";
+import { publicAdditionalTechnologyCopy, publicScanHeadline } from "@/lib/public/stack-scan-copy";
 import { ToolHero, tools as s } from "../tool-parts";
 
 type Scan = {
@@ -17,6 +17,8 @@ type Scan = {
   partial: boolean;
   outcome: "complete" | "partial" | "empty" | "failed";
   candidateCount: number;
+  additionalTechnologyCount: number;
+  additionalTechnologies: string[];
   candidates: Array<{
     providerId: string;
     provider: string;
@@ -305,14 +307,20 @@ function ScanAnatomy() {
 }
 
 const confidenceLevel = { low: 1, medium: 2, high: 3 } as const;
-const confidenceText = { low: "Low", medium: "Medium", high: "High" } as const;
+const confidenceText = {
+  low: "Low confidence",
+  medium: "Medium confidence",
+  high: "High confidence",
+} as const;
 
 export function ScanResults() {
   const { phase, step, domain, scan, continueUrl } = useScan();
 
   const showIntro = phase === "idle" || (phase === "error" && !scan);
   const rows = scan?.candidates ?? [];
-  const signalTotal = rows.reduce((sum, row) => sum + row.evidenceCount, 0);
+  const additionalTechnologyCopy = scan
+    ? publicAdditionalTechnologyCopy(scan.additionalTechnologyCount, scan.additionalTechnologies)
+    : "";
   const pct = Math.round((Math.min(step + 0.5, STEPS.length - 0.4) / STEPS.length) * 100);
 
   return (
@@ -362,8 +370,8 @@ export function ScanResults() {
             <div role="note" className={s.note}>
               <span aria-hidden="true" className={s.noteMark} />
               <span className={s.noteText}>
-                <b>Reached an inspection limit.</b>
-                This is what we found before the scan stopped. There may be more.
+                <b>Initial discovery is selective by design.</b>
+                This scan may not surface every dependency.
               </span>
             </div>
           ) : null}
@@ -380,21 +388,9 @@ export function ScanResults() {
           {rows.length ? (
             <>
               <div className={s.resultsHead}>
-                <h2 className={s.resultsTitle}>
-                  {publicScanHeadline(
-                    scan.status,
-                    rows.map((row) => row.confidenceLabel),
-                  )}
-                </h2>
-                <span className={s.resultsMeta}>
-                  {domain} · {signalTotal} signal{signalTotal === 1 ? "" : "s"}
-                </span>
+                <h2 className={s.resultsTitle}>{publicScanHeadline(scan.status, rows.length)}</h2>
+                <span className={s.resultsMeta}>{domain}</span>
               </div>
-              <p className={s.resultsNote}>
-                <strong>Suggestions, not confirmations.</strong> High-confidence matches are likely;
-                medium- and low-confidence matches are possible. Based on public technical signals
-                from the company surfaces inspected.
-              </p>
               <div className={s.card}>
                 <div className={s.tableHead} aria-hidden="true">
                   <span>PROVIDER</span>
@@ -402,7 +398,7 @@ export function ScanResults() {
                   <span>SIGNALS</span>
                   <span>EVIDENCE FAMILIES</span>
                 </div>
-                <ul className={s.table} aria-label="Likely dependencies">
+                <ul className={s.table} aria-label="Dependencies surfaced for review">
                   {rows.map((row) => (
                     <li key={row.provider} className={s.row}>
                       <span className={s.rowName}>
@@ -419,7 +415,6 @@ export function ScanResults() {
                           ))}
                         </span>
                         {confidenceText[row.confidenceLabel]}
-                        <span className={s.srOnly}> confidence</span>
                       </span>
                       <span className={s.rowCount}>
                         {row.evidenceCount}
@@ -442,18 +437,24 @@ export function ScanResults() {
               <span aria-hidden="true" className={s.emptyIcon}>
                 <i />
               </span>
-              <h2 className={s.emptyTitle}>No supported provider suggestions were found.</h2>
+              <h2 className={s.emptyTitle}>{publicScanHeadline(scan.status, 0)}</h2>
               <p className={s.emptyText}>
-                That does not mean {domain} has no dependencies. Auterim only reports supported
-                services it can identify from the public surfaces inspected.
+                That does not mean {domain} has no dependencies. Initial discovery prioritizes
+                evidence-backed matches for review.
               </p>
             </div>
           )}
 
+          <p className={s.resultsNote}>
+            <strong>Dependencies surfaced for review are not confirmations.</strong> Confirm which
+            services your business relies on.
+            {additionalTechnologyCopy ? ` ${additionalTechnologyCopy}` : ""}
+          </p>
+
           <div className={s.cta}>
             <span className={s.ctaText}>
-              <b>Confirm it against your code.</b>
-              Auterim checks each one and watches it from here.
+              <b>Confirm what your business relies on.</b>
+              Continue setup to turn discovery into continuous protection.
             </span>
             <Link
               href={continueUrl}
