@@ -132,8 +132,12 @@ export function SiteHeader({
     focusHeroInput();
   };
 
+  // Close only when keyboard focus moves somewhere else. A tap on Safari blurs with no
+  // relatedTarget (buttons don't take focus there), and closing on it would make the burger
+  // tap reopen the menu straight away. Taps outside are handled by the backdrop.
   const onBlurWithin = (event: React.FocusEvent) => {
-    if (open && !wrapRef.current?.contains(event.relatedTarget as Node | null)) close();
+    const next = event.relatedTarget as Node | null;
+    if (open && next && !wrapRef.current?.contains(next)) close();
   };
 
   const isActive = (key?: SiteSection) => (key && key === current ? "page" : undefined);
