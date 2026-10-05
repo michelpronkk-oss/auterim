@@ -20,6 +20,7 @@ import {
   prepareDraftPullRequest,
   validateDraftPullRequest,
 } from "@/lib/preflight/remediation";
+import { prepareGroundedPatch } from "@/lib/preflight/patch-preparation";
 import { GitHubAppRepositoryProvider } from "@/lib/preflight/github-provider";
 
 const shaA = "a".repeat(40);
@@ -438,6 +439,72 @@ describe("offline Preflight evidence evaluation", () => {
         groundedFiles: ["src/model.ts"],
       }),
     ).toThrow("ungrounded_patch_scope");
+  });
+
+  it("prepares only an exact replacement grounded in the verified pinned file", async () => {
+    const path = "src/client.ts";
+    const source = "export const send = () => legacyClient.send();";
+    const result = await inspectRepositories({
+      change: {
+        ...baseChange,
+        affectedEntities: ["legacyClient.send()"],
+        evidence: ["Replace legacyClient.send() with modernClient.send()."],
+      },
+      repositories: [repository],
+      provider: fixtureProvider({ [path]: source }),
+    });
+    expect(result.verifiedImpact).toBe("verified");
+    const prepared = prepareGroundedPatch({
+      preflight: result,
+      files: new Map([[path, { path, text: source, size: Buffer.byteLength(source) }]]),
+      replacement: {
+        authoritative: true,
+        oldExpression: "legacyClient.send()",
+        newExpression: "modernClient.send()",
+        evidenceId: "internal-qa-migration-1",
+      },
+    });
+    expect(prepared).toMatchObject({
+      outcome: "PATCH_PREPARED",
+      baseCommitSha: shaA,
+      affectedFiles: [path],
+      matchedEvidenceIds: ["internal-qa-migration-1"],
+    });
+    if (prepared.outcome === "PATCH_PREPARED") {
+      expect(prepared.patch).toContain("-export const send = () => legacyClient.send();");
+      expect(prepared.patch).toContain("+export const send = () => modernClient.send();");
+    }
+  });
+
+  it("returns safe no-patch outcomes when replacement evidence is absent or mismatched", async () => {
+    const path = "src/client.ts";
+    const source = "export const send = () => legacyClient.send();";
+    const result = await inspectRepositories({
+      change: {
+        ...baseChange,
+        affectedEntities: ["legacyClient.send()"],
+        evidence: ["Replace legacyClient.send() with modernClient.send()."],
+      },
+      repositories: [repository],
+      provider: fixtureProvider({ [path]: source }),
+    });
+    expect(
+      prepareGroundedPatch({ preflight: result, files: new Map(), replacement: null }),
+    ).toMatchObject({
+      outcome: "NO_SAFE_PATCH",
+    });
+    expect(
+      prepareGroundedPatch({
+        preflight: result,
+        files: new Map([[path, { path, text: "export const send = () => changed();", size: 35 }]]),
+        replacement: {
+          authoritative: true,
+          oldExpression: "legacyClient.send()",
+          newExpression: "modernClient.send()",
+          evidenceId: "provider-docs-1",
+        },
+      }),
+    ).toMatchObject({ outcome: "NO_SAFE_PATCH" });
   });
 
   it("20 rejects attempts to disable tests or remove security controls", () => {
