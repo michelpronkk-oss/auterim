@@ -9,19 +9,21 @@ import {
   canonicalizePublicWebsiteUrl,
   WebsiteUrlInputError,
 } from "@/lib/discovery/normalize-website-url";
-import { signalTypesLabel } from "../tool-data";
+import { publicScanHeadline } from "@/lib/public/stack-scan-copy";
 import { ToolHero, tools as s } from "../tool-parts";
 
 type Scan = {
   status: "completed" | "partial" | "failed";
+  partial: boolean;
   outcome: "complete" | "partial" | "empty" | "failed";
   candidateCount: number;
   candidates: Array<{
+    providerId: string;
     provider: string;
     confidence: number;
     confidenceLabel: "low" | "medium" | "high";
     evidenceCount: number;
-    signalTypes: string[];
+    evidenceFamilies: string[];
   }>;
 };
 
@@ -49,13 +51,28 @@ function useScan() {
 
 /** What the scan does, in order. Steps advance on a timer while the request runs. */
 const STEPS = [
-  "Opening the homepage",
-  "Reading response headers",
-  "Reading script sources",
-  "Checking the security policy",
-  "Matching against the catalog",
+  "Opening public company surfaces",
+  "Reading provider and platform signals",
+  "Checking linked technical references",
+  "Inspecting bounded script evidence",
+  "Matching evidence against the catalog",
 ];
 const STEP_MS = 650;
+
+const evidenceFamilyLabels: Record<string, string> = {
+  sdk: "SDK signals",
+  provider_endpoint: "provider endpoints",
+  hosting_infrastructure: "hosting infrastructure",
+  policy_allowlist: "security policy",
+  runtime_host: "runtime hosts",
+  context_reference: "page references",
+};
+
+function evidenceFamiliesLabel(families: string[]) {
+  return [
+    ...new Set(families.map((family) => evidenceFamilyLabels[family] ?? "public signals")),
+  ].join(", ");
+}
 
 function hostOf(url: string) {
   try {
@@ -209,7 +226,7 @@ export function ScanHero() {
           </p>
         ) : null}
         <p id={noteId} className={s.formNote}>
-          Fast pass of the homepage only. No sign-in. No private pages.
+          A bounded scan of public company surfaces. No sign-in or private pages.
         </p>
       </form>
     </ToolHero>
@@ -364,22 +381,26 @@ export function ScanResults() {
             <>
               <div className={s.resultsHead}>
                 <h2 className={s.resultsTitle}>
-                  {rows.length} likely {rows.length === 1 ? "dependency" : "dependencies"}
+                  {publicScanHeadline(
+                    scan.status,
+                    rows.map((row) => row.confidenceLabel),
+                  )}
                 </h2>
                 <span className={s.resultsMeta}>
                   {domain} · {signalTotal} signal{signalTotal === 1 ? "" : "s"}
                 </span>
               </div>
               <p className={s.resultsNote}>
-                <strong>Likely, not confirmed.</strong> Read from signals on the homepage. Auterim
-                confirms each one against your code once you connect.
+                <strong>Suggestions, not confirmations.</strong> High-confidence matches are likely;
+                medium- and low-confidence matches are possible. Based on public technical signals
+                from the company surfaces inspected.
               </p>
               <div className={s.card}>
                 <div className={s.tableHead} aria-hidden="true">
                   <span>PROVIDER</span>
                   <span>CONFIDENCE</span>
                   <span>SIGNALS</span>
-                  <span>SIGNAL TYPES</span>
+                  <span>EVIDENCE FAMILIES</span>
                 </div>
                 <ul className={s.table} aria-label="Likely dependencies">
                   {rows.map((row) => (
@@ -405,11 +426,11 @@ export function ScanResults() {
                         <span className={s.rowCountLabel}>
                           {" "}
                           {row.evidenceCount === 1 ? "signal" : "signals"} ·{" "}
-                          {signalTypesLabel(row.signalTypes)}
+                          {evidenceFamiliesLabel(row.evidenceFamilies)}
                         </span>
                       </span>
                       <span className={s.rowTypes} aria-hidden="true">
-                        {signalTypesLabel(row.signalTypes)}
+                        {evidenceFamiliesLabel(row.evidenceFamilies)}
                       </span>
                     </li>
                   ))}
@@ -421,10 +442,10 @@ export function ScanResults() {
               <span aria-hidden="true" className={s.emptyIcon}>
                 <i />
               </span>
-              <h2 className={s.emptyTitle}>No signals found on {domain}.</h2>
+              <h2 className={s.emptyTitle}>No supported provider suggestions were found.</h2>
               <p className={s.emptyText}>
-                The homepage didn&apos;t show any. Services behind sign-in or on other pages
-                won&apos;t appear in a fast pass.
+                That does not mean {domain} has no dependencies. Auterim only reports supported
+                services it can identify from the public surfaces inspected.
               </p>
             </div>
           )}

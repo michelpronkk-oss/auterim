@@ -7,6 +7,7 @@ import {
   WebsiteUrlInputError,
 } from "@/lib/discovery/normalize-website-url";
 import { emitPublicConversionEvent, readPublicAttribution } from "@/lib/public/conversion";
+import { publicScanHeadline } from "@/lib/public/stack-scan-copy";
 import { catalog, catalogEntry, demoDefs, suggestedProviders, type CatalogSource } from "./data";
 import { BrandMark, ProviderMark } from "./marks";
 import s from "./home.module.css";
@@ -18,26 +19,31 @@ type Stage = "idle" | "analyzing" | "found" | "confirm" | "coverage" | "error";
 
 type ScanResponse = {
   status: "completed" | "partial" | "failed";
+  partial: boolean;
   candidates: Array<{
+    providerId: string;
     provider: string;
     confidenceLabel: "low" | "medium" | "high";
-    signalTypes: string[];
+    evidenceCount: number;
+    evidenceFamilies: string[];
   }>;
   message?: string;
 };
 
-type Found = { name: string; category: string; signal: string; high: boolean };
+type Found = {
+  name: string;
+  category: string;
+  signal: string;
+  confidenceLabel: "low" | "medium" | "high";
+};
 
 const signalLabel: Record<string, string> = {
-  response_header: "response headers",
-  script_host: "script source",
-  script_path: "script source",
-  document_host: "linked hosts",
-  embedded_url: "embedded URL",
-  markup_marker: "page markup",
-  resource_host: "resource host",
-  csp_host: "security policy",
-  redirect_host: "redirects",
+  sdk: "SDK signals",
+  provider_endpoint: "provider endpoint",
+  hosting_infrastructure: "hosting infrastructure",
+  policy_allowlist: "security policy",
+  runtime_host: "runtime host",
+  context_reference: "page reference",
 };
 
 const checkLabels = [
@@ -205,22 +211,26 @@ export function HeroAnalyzer() {
         const entry = catalogEntry(candidate.provider);
         const name = entry?.[0] ?? candidate.provider;
         const signals = [
-          ...new Set(candidate.signalTypes.map((t) => signalLabel[t] ?? t.replace(/_/g, " "))),
+          ...new Set(
+            candidate.evidenceFamilies.map((family) => signalLabel[family] ?? "public signals"),
+          ),
         ];
         return {
           name,
           category: entry?.[1][0] ?? "Detected service",
-          signal: signals.join(", ") || "site signal",
-          high: candidate.confidenceLabel === "high",
+          signal: signals.join(", ") || "public signals",
+          confidenceLabel: candidate.confidenceLabel,
         };
       });
       const unique = results.filter(
         (item, index) => results.findIndex((other) => other.name === item.name) === index,
       );
       setCheck(4);
-      setPartial(body.status !== "completed");
+      setPartial(body.partial);
       setFound(unique);
-      setSelected(unique.filter((item) => item.high).map((item) => item.name));
+      setSelected(
+        unique.filter((item) => item.confidenceLabel === "high").map((item) => item.name),
+      );
       setStage("found");
       emitPublicConversionEvent("stack_scan_completed", attr);
     } catch (error) {
@@ -420,12 +430,15 @@ export function HeroAnalyzer() {
                 <div className={s.stageHead}>
                   <span className={s.stageTitle}>
                     {found.length
-                      ? `We found ${found.length} likely ${found.length === 1 ? "dependency" : "dependencies"}.`
-                      : "No provider markers found."}
+                      ? publicScanHeadline(
+                          partial ? "partial" : "completed",
+                          found.map((item) => item.confidenceLabel),
+                        )
+                      : "No supported dependency suggestions were found."}
                   </span>
                   <span className={s.stageSub}>
                     {found.length
-                      ? `Each one is based on a signal from ${domain}.`
+                      ? `Based on public technical signals from ${domain}.`
                       : `That doesn't mean ${domain} has no dependencies. Many don't show up in a scan.`}
                     {partial
                       ? " The scan reached an inspection limit, so results may be incomplete."
@@ -447,8 +460,12 @@ export function HeroAnalyzer() {
                             {item.category} · {item.signal}
                           </span>
                         </div>
-                        <span className={item.high ? s.pillHigh : s.pillPossible}>
-                          {item.high ? "High confidence" : "Possible"}
+                        <span
+                          className={item.confidenceLabel === "high" ? s.pillHigh : s.pillPossible}
+                        >
+                          {item.confidenceLabel === "high"
+                            ? "High confidence"
+                            : `${item.confidenceLabel === "medium" ? "Medium" : "Low"} confidence · Possible`}
                         </span>
                       </div>
                     ))}
@@ -512,9 +529,9 @@ export function HeroAnalyzer() {
                     const on = selected.includes(name);
                     const item = found.find((f) => f.name === name);
                     const hint = item
-                      ? item.high
+                      ? item.confidenceLabel === "high"
                         ? "High confidence"
-                        : "Possible"
+                        : `${item.confidenceLabel === "medium" ? "Medium" : "Low"} confidence · Possible`
                       : extra.includes(name)
                         ? "Added by you"
                         : "Not detected";

@@ -29,8 +29,9 @@ it("checks bounded live public projections against canonical Discovery V1", asyn
         body: JSON.stringify({ websiteUrl: target.url }),
       }),
     );
-    expect(publicResponse.status).toBe(200);
-    const projected = (await publicResponse.json()) as ReturnType<typeof publicStackScanResult>;
+    const publicBody = await publicResponse.json();
+    expect(publicResponse.status, JSON.stringify(publicBody)).toBe(200);
+    const projected = publicBody as ReturnType<typeof publicStackScanResult>;
     const canonical = await discoverCompanySurfaceDependencies(target.url, {
       deep: true,
       runtimeEnabled,
