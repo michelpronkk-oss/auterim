@@ -693,10 +693,77 @@
   overflow: hidden;
 }
 .panelLayer > .stageCol {
+  position: relative;
   flex: 1;
 }
 .panelLayer .stageFoot {
   margin-top: auto;
+}
+.demoSignals {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 58px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  pointer-events: none;
+  transition: opacity 0.35s ease;
+}
+.demoSignalsLabel {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--slate-4);
+}
+.demoSignalsGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.demoSignal {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 12px 13px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.7);
+  box-shadow: inset 0 0 0 1px rgba(14, 27, 46, 0.07);
+}
+.demoSignalTop {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--slate-3);
+}
+.demoSignalTop span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.demoSignalTop strong {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.demoSignalBar {
+  height: 3px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(14, 27, 46, 0.07);
+}
+.demoSignalBar > span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--blue-bright);
+  transform-origin: left;
+  transition: transform 0.6s cubic-bezier(0.2, 0.7, 0.2, 1);
 }
 .demoMeta {
   display: inline-flex;
@@ -4223,11 +4290,27 @@ button.orbitTile:focus-visible {
   .ledeDark {
     font-size: 18.5px;
   }
+  /* One type scale: hero 84, closing 78, quiet statement 70, section 60. */
   .h1 {
     font-size: clamp(40px, 5.8vw, 84px);
   }
+  .h2Final {
+    font-size: clamp(38px, 5.6vw, 78px);
+  }
+  .h2Quiet {
+    font-size: clamp(36px, 5vw, 70px);
+  }
   .h2 {
-    font-size: clamp(34px, 4.4vw, 62px);
+    font-size: clamp(34px, 4.2vw, 60px);
+    line-height: 1.03;
+  }
+  .problemCopy {
+    max-width: 500px;
+    padding-bottom: 6px;
+    font-size: 18.5px;
+  }
+  .problemCopy .problemPunch {
+    font-size: 22px;
   }
 }
 @media (min-width: 1680px) {
@@ -4243,5 +4326,10 @@ button.orbitTile:focus-visible {
 @media (min-width: 2300px) {
   .frame {
     zoom: 1.32;
+  }
+}
+@media (max-width: 599px) {
+  .demoSignals {
+    display: none;
   }
 }
