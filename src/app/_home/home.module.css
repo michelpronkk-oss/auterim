@@ -61,6 +61,22 @@
     0 30px 60px -40px rgba(11, 22, 38, 0.35);
 }
 
+/* Phones: the page itself is the frame, edge to edge, so there is no box inside a box. */
+@media (max-width: 560px) {
+  .page {
+    padding: 0;
+    background: var(--paper);
+  }
+  .frame {
+    border-radius: 0;
+    box-shadow: none;
+  }
+}
+/* Let the browser's own bars (iOS Safari) pick up the hero's top color. */
+:global(html):has(.page) {
+  background: #e4ebf9;
+}
+
 .srOnly {
   position: absolute;
   width: 1px;
