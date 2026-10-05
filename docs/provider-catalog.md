@@ -21,6 +21,8 @@ These labels describe the number of configured source-type buckets, not independ
 
 Existing sources are global and shared across workspaces. A source is not copied or fetched separately for each customer. No source body is placed in tenant tables.
 
+The launch source expansion adds provider-owned release/changelog pages for Vercel, Cloudflare, DigitalOcean, MongoDB Atlas, GitLab, Slack, Linear, Twilio, PostHog, Intercom, Clerk, Auth0, Okta, Adyen, PlanetScale, Neon, New Relic, and Algolia. These additions each contribute one configured source type and therefore remain **partial source coverage**. Several pages cover a broad provider product stream rather than a specific API surface; a catalog row is source eligibility, not proof that every product is covered or that a scan has succeeded. AWS and Google Cloud remain pending because their broad feeds need service-level identity/scope before they can represent a customer dependency honestly. Twilio's source is not duplicated under SendGrid or Segment.
+
 ## Search and onboarding
 
 `search_onboarding_dependency_catalog(workspace_id, query)` requires an authenticated workspace member. It searches enabled canonical names, slugs, aliases, and categories case-insensitively; literal `%` and `_` characters do not become SQL wildcards. Exact canonical-name/slug matches rank first, followed by exact aliases, partial provider matches, aliases, and category matches. Results include the real enabled-source count and a coverage label. The result cap is 200, above the current catalog size, while the empty initial query remains bounded.

@@ -161,7 +161,25 @@ from (values
   ('sentry','Sentry changelog','changelog','https://sentry.io/changelog/'),
   ('github','GitHub REST API breaking changes','documentation','https://docs.github.com/en/rest/about-the-rest-api/breaking-changes'),
   ('github','GitHub GraphQL breaking changes','documentation','https://docs.github.com/en/graphql/overview/breaking-changes'),
-  ('hubspot','HubSpot developer changelog','changelog','https://developers.hubspot.com/changelog')
+  ('hubspot','HubSpot developer changelog','changelog','https://developers.hubspot.com/changelog'),
+  ('vercel','Vercel product changelog','changelog','https://vercel.com/changelog'),
+  ('cloudflare','Cloudflare developer changelog','changelog','https://developers.cloudflare.com/changelog/'),
+  ('digitalocean','DigitalOcean release notes','changelog','https://docs.digitalocean.com/release-notes/'),
+  ('mongodb-atlas','MongoDB Atlas release notes','changelog','https://www.mongodb.com/docs/atlas/release-notes/'),
+  ('gitlab','GitLab product release notes','changelog','https://about.gitlab.com/whats-new/'),
+  ('slack','Slack developer changelog','changelog','https://docs.slack.dev/changelog/'),
+  ('linear','Linear product changelog','changelog','https://linear.app/changelog'),
+  ('twilio','Twilio product changelog','changelog','https://www.twilio.com/en-us/changelog'),
+  ('posthog','PostHog product changelog','changelog','https://posthog.com/changelog'),
+  ('intercom','Intercom product changes','changelog','https://www.intercom.com/changes/en'),
+  ('clerk','Clerk product changelog','changelog','https://clerk.com/changelog'),
+  ('auth0','Auth0 product changelog','changelog','https://auth0.com/changelog'),
+  ('okta','Okta developer release notes','changelog','https://developer.okta.com/docs/release-notes/'),
+  ('adyen','Adyen developer release notes','changelog','https://docs.adyen.com/release-notes'),
+  ('planetscale','PlanetScale changelog','changelog','https://planetscale.com/changelog'),
+  ('neon','Neon product changelog','changelog','https://neon.com/blog/category/changelog'),
+  ('new-relic','New Relic product release notes','changelog','https://docs.newrelic.com/docs/release-notes/'),
+  ('algolia','Algolia product changelog','changelog','https://changelog.algolia.com/')
 ) as source(provider_slug, name, source_type, url)
 join public.dependency_catalog provider on provider.slug = source.provider_slug
 on conflict (dependency_id, source_type, name) do update set

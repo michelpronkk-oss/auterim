@@ -125,6 +125,31 @@ describe("onboarding activation backend", () => {
       "select count(*)::int as count,count(distinct slug)::int as distinct_count from public.dependency_catalog where enabled",
     );
     expect(identities.rows[0]).toEqual({ count: 115, distinct_count: 115 });
+    const sourceCoverage = await db.query<{ providers: number; strong: number; partial: number }>(
+      `select count(distinct dependency_id)::int as providers,
+         count(distinct dependency_id) filter (where source_types >= 3)::int as strong,
+         count(distinct dependency_id) filter (where source_types between 1 and 2)::int as partial
+       from (select dependency_id,count(distinct source_type)::int as source_types
+         from public.source_catalog where enabled group by dependency_id) coverage`,
+    );
+    expect(sourceCoverage.rows[0]).toEqual({ providers: 29, strong: 1, partial: 28 });
+    const sourceRowsBeforeRetry = await db.query<{ count: number }>(
+      "select count(*)::int as count from public.source_catalog where enabled",
+    );
+    await db.exec(migrations[migrations.length - 1]!);
+    const sourceRowsAfterRetry = await db.query<{ count: number }>(
+      "select count(*)::int as count from public.source_catalog where enabled",
+    );
+    expect(sourceRowsAfterRetry.rows[0]!.count).toBe(sourceRowsBeforeRetry.rows[0]!.count);
+    const targeted = await db.query<{ result: Array<Record<string, unknown>> }>(
+      "select public.search_onboarding_dependency_catalog($1,'Cloudflare') as result",
+      [workspaceId],
+    );
+    expect(targeted.rows[0]!.result[0]).toMatchObject({
+      slug: "cloudflare",
+      coverageStatus: "partial_coverage",
+      authoritativeSourceCount: 1,
+    });
     const categoryRows = await db.query<{ category: string; count: number }>(
       "select category,count(*)::int as count from public.dependency_catalog where enabled group by category order by category",
     );
@@ -790,7 +815,7 @@ describe("onboarding activation backend", () => {
     );
     expect(activeResume.rows[0]!.value.state).toBe("active");
     expect(active.rows[0]!.value.protection.dependencies).toBe(1);
-    expect(active.rows[0]!.value.protection.baselineStatus).toBe("partial");
+    expect(active.rows[0]!.value.protection.baselineStatus).toBe("in_progress");
     expect(
       (
         await db.query<{ count: number }>(
