@@ -639,18 +639,12 @@ function IdleDemo({ dt, dPhase }: { dt: number; dPhase: number }) {
   });
   const shownN = Math.min(4, dt + 1);
   const coveredSources = rows.filter((r) => r.covered).reduce((a, r) => a + r.sources.length, 0);
-  const title =
-    dPhase === 0
-      ? `Discovering · ${shownN} likely ${shownN === 1 ? "dependency" : "dependencies"}`
-      : dPhase === 1
-        ? "Confirm what you rely on"
-        : "Coverage";
   const meta =
     dPhase === 0
-      ? "scanning"
+      ? `${shownN} of 4 found`
       : dPhase === 1
         ? "confirmed by you"
-        : `${coveredSources} sources · watching`;
+        : `${coveredSources} sources`;
   const foot =
     dPhase === 0
       ? "Reading response headers, page markup and script sources."
@@ -660,11 +654,19 @@ function IdleDemo({ dt, dPhase }: { dt: number; dPhase: number }) {
   return (
     <div className={s.stageCol}>
       <div className={s.demoHead}>
-        <span className={s.demoTitle}>{title}</span>
-        <span className={s.demoMeta}>
-          {dPhase === 0 ? <span aria-hidden="true" className={s.liveDot} /> : null}
-          {meta}
-        </span>
+        <ol className={s.demoSteps}>
+          {["Discover", "Confirm", "Watch"].map((step, i) => (
+            <li
+              key={step}
+              className={i === dPhase ? s.demoStepOn : i < dPhase ? s.demoStepDone : s.demoStep}
+              aria-current={i === dPhase ? "step" : undefined}
+            >
+              {i === dPhase ? <span aria-hidden="true" className={s.liveDot} /> : null}
+              {step}
+            </li>
+          ))}
+        </ol>
+        <span className={s.demoMeta}>{meta}</span>
       </div>
       <div className={s.demoRows}>
         {rows.map((r) => (

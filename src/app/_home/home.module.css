@@ -834,14 +834,42 @@
 .demoHead {
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
+  align-items: center;
   gap: 12px;
   flex-wrap: wrap;
 }
-.demoTitle {
-  font-size: 17px;
+.demoSteps {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.demoStep,
+.demoStepDone,
+.demoStepOn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
   font-weight: 500;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.005em;
+  color: rgba(14, 27, 46, 0.34);
+  transition: color 0.4s ease;
+}
+.demoStepDone {
+  color: var(--slate-3);
+}
+.demoStepOn {
+  color: var(--ink);
+}
+.demoSteps li + li::before {
+  content: "";
+  width: 14px;
+  height: 1px;
+  margin-right: 7px;
+  background: rgba(14, 27, 46, 0.16);
 }
 .demoRows {
   display: flex;
@@ -2963,8 +2991,17 @@
   .stageCol {
     gap: 12px;
   }
-  .demoTitle {
-    font-size: 15.5px;
+  .demoSteps {
+    gap: 9px;
+  }
+  .demoSteps li + li::before {
+    width: 10px;
+    margin-right: 4px;
+  }
+  .demoStep,
+  .demoStepDone,
+  .demoStepOn {
+    font-size: 12.5px;
   }
   .demoRowMain {
     gap: 10px;
@@ -3740,5 +3777,11 @@ button.orbitTile:focus-visible {
 @keyframes breathe {
   50% {
     opacity: 0.35;
+  }
+}
+
+@media (max-width: 420px) {
+  .demoHead .demoMeta {
+    display: none;
   }
 }
