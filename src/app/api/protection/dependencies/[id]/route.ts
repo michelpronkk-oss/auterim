@@ -48,17 +48,16 @@ export async function GET(request: Request, routeContext: { params: Promise<{ id
   const coveredSources = sources.data ?? [];
   const sourceIds = coveredSources.map((source) => source.id);
   const { data: snapshots, error: snapshotError } = sourceIds.length
-    ? await auth.client
-        .from("source_snapshots")
-        .select("source_id,created_at")
-        .in("source_id", sourceIds)
+    ? await auth.client.rpc("get_dependency_source_baselines", {
+        p_workspace_id: workspaceId.data,
+        p_source_ids: sourceIds,
+      })
     : { data: [], error: null };
   if (snapshotError) return Response.json({ error: "dependency_unavailable" }, { status: 503 });
   const snapshotsBySource = new Map<string, string>();
   for (const snapshot of snapshots ?? []) {
-    const current = snapshotsBySource.get(snapshot.source_id);
-    if (!current || snapshot.created_at > current)
-      snapshotsBySource.set(snapshot.source_id, snapshot.created_at);
+    if (snapshot.latest_baseline_at)
+      snapshotsBySource.set(snapshot.source_id, snapshot.latest_baseline_at);
   }
   const latestImpact = impacts.data?.[0] ?? null;
   const contextValue: unknown = dependency.dependency_context;

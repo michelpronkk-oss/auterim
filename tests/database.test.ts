@@ -118,6 +118,12 @@ const growthFeedbackMigration = await readFile(
   ),
   "utf8",
 );
+const protectionDependencyDetailMigration = await readFile(
+  fileURLToPath(
+    new URL("../supabase/migrations/20261020000000_m15_production_hardening.sql", import.meta.url),
+  ),
+  "utf8",
+);
 const growthSearchConsoleScopeMigration = await readFile(
   fileURLToPath(
     new URL(
@@ -246,6 +252,7 @@ async function makeDatabase(applyCompanySurfaceMigration = true) {
     await db.exec(technologyObservationReasonCodesMigration);
     await db.exec(completeTechnologyFingerprintMigration);
   }
+  await db.exec(protectionDependencyDetailMigration);
   return db;
 }
 
@@ -597,6 +604,11 @@ describe("Auterim migration and monitoring transaction", () => {
        values ($1,'pro','active',now(),now()+interval '30 days')`,
       [workspaceId],
     );
+    const proRepositoryLimit = await m7db.query<{ limit: number }>(
+      "select private.workspace_repository_limit($1) as limit",
+      [workspaceId],
+    );
+    expect(proRepositoryLimit.rows[0]!.limit).toBe(5);
     const connection = await m7db.query<{ id: string }>(
       `insert into public.repository_connections(workspace_id,installation_id,account_login,connected_by)
        values ($1,9001,'auterim-fixture',$2) returning id`,
@@ -639,6 +651,21 @@ describe("Auterim migration and monitoring transaction", () => {
     ).toHaveLength(1);
     await m7db.exec("reset role");
 
+    await m7db.exec("set role service_role");
+    await m7db.query(
+      "update public.workspace_subscriptions set plan='business' where workspace_id=$1",
+      [workspaceId],
+    );
+    const businessRepositoryLimit = await m7db.query<{ limit: number }>(
+      "select private.workspace_repository_limit($1) as limit",
+      [workspaceId],
+    );
+    expect(businessRepositoryLimit.rows[0]!.limit).toBe(25);
+    await m7db.query("update public.workspace_subscriptions set plan='pro' where workspace_id=$1", [
+      workspaceId,
+    ]);
+    await m7db.exec("reset role");
+
     await m7db.query("select set_config('request.jwt.claim.sub',$1,false)", [unrelated]);
     await m7db.exec("set role authenticated");
     expect(
@@ -661,6 +688,118 @@ describe("Auterim migration and monitoring transaction", () => {
       m7db.query("select * from public.repository_installation_states"),
     ).rejects.toBeTruthy();
     await m7db.exec("reset role");
+  });
+
+  it("returns dependency baseline metadata to workspace members without granting snapshot reads", async () => {
+    const baselineDb = await makeDatabase();
+    const owner = "12121212-1212-4212-8212-121212121212";
+    const outsider = "34343434-3434-4434-8434-343434343434";
+    await baselineDb.query("insert into auth.users (id) values ($1),($2)", [owner, outsider]);
+    await baselineDb.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    await baselineDb.exec("set role authenticated");
+    const workspace = await baselineDb.query<{ id: string }>(
+      "select public.create_workspace('Baseline tenant') as id",
+    );
+    const workspaceId = workspace.rows[0]!.id;
+    await baselineDb.exec("reset role; set role service_role");
+    const provider = await baselineDb.query<{ id: string }>(
+      "select id from public.dependency_catalog where slug='openai'",
+    );
+    await baselineDb.query(
+      "insert into public.workspace_dependencies(workspace_id,dependency_id,selected_by) values ($1,$2,$3)",
+      [workspaceId, provider.rows[0]!.id, owner],
+    );
+    const source = await baselineDb.query<{ id: string }>(
+      "select id from public.source_catalog where dependency_id=$1 and enabled order by id limit 1",
+      [provider.rows[0]!.id],
+    );
+    await baselineDb.exec("reset role; set role authenticated");
+    const baseline = await baselineDb.query<{
+      source_id: string;
+      latest_baseline_at: string | null;
+    }>("select * from public.get_dependency_source_baselines($1,array[$2::uuid])", [
+      workspaceId,
+      source.rows[0]!.id,
+    ]);
+    expect(baseline.rows).toEqual([{ source_id: source.rows[0]!.id, latest_baseline_at: null }]);
+    await expect(baselineDb.query("select * from public.source_snapshots")).rejects.toBeTruthy();
+    await baselineDb.query("select set_config('request.jwt.claim.sub',$1,false)", [outsider]);
+    await expect(
+      baselineDb.query("select * from public.get_dependency_source_baselines($1,array[$2::uuid])", [
+        workspaceId,
+        source.rows[0]!.id,
+      ]),
+    ).rejects.toThrow();
+    await baselineDb.close();
+  });
+
+  it("atomically enforces a service-only public rate-limit bucket", async () => {
+    const rateDb = await makeDatabase();
+    await rateDb.exec("set role service_role");
+    const fingerprint = "a".repeat(64);
+    const first = await rateDb.query<{
+      allowed: boolean;
+      remaining: number;
+      retry_after_seconds: number;
+    }>(
+      "select * from public.claim_public_rate_limit('public_stack_scan',$1,1,1800,'2026-10-05T12:00:00Z'::timestamptz)",
+      [fingerprint],
+    );
+    const second = await rateDb.query<{
+      allowed: boolean;
+      remaining: number;
+      retry_after_seconds: number;
+    }>(
+      "select * from public.claim_public_rate_limit('public_stack_scan',$1,1,1800,'2026-10-05T12:00:00Z'::timestamptz)",
+      [fingerprint],
+    );
+    const stored = await rateDb.query<{ request_count: number }>(
+      "select request_count from public.public_rate_limit_buckets where client_fingerprint=$1",
+      [fingerprint],
+    );
+    expect(stored.rows).toEqual([{ request_count: 2 }]);
+    expect(first.rows[0]).toMatchObject({ allowed: true, remaining: 0 });
+    expect(second.rows[0]).toMatchObject({ allowed: false, remaining: 0 });
+    expect(second.rows[0]!.retry_after_seconds).toBeGreaterThan(0);
+    await rateDb.exec("reset role; set role authenticated");
+    await expect(rateDb.query("select * from public.public_rate_limit_buckets")).rejects.toThrow();
+    await expect(
+      rateDb.query(
+        "select * from public.claim_public_rate_limit('public_stack_scan',$1,1,1800,now())",
+        [fingerprint],
+      ),
+    ).rejects.toThrow();
+    await rateDb.close();
+  });
+
+  it("bounds global public scan concurrency with expiring service-only leases", async () => {
+    const leaseDb = await makeDatabase();
+    await leaseDb.exec("set role service_role");
+    const firstLease = "11111111-1111-4111-8111-111111111111";
+    const secondLease = "22222222-2222-4222-8222-222222222222";
+    const first = await leaseDb.query<{ acquired: boolean; lease_id: string | null }>(
+      "select * from public.claim_public_scan_slot($1,1,30)",
+      [firstLease],
+    );
+    const second = await leaseDb.query<{ acquired: boolean; lease_id: string | null }>(
+      "select * from public.claim_public_scan_slot($1,1,30)",
+      [secondLease],
+    );
+    expect(first.rows[0]).toEqual({ acquired: true, lease_id: firstLease });
+    expect(second.rows[0]).toEqual({ acquired: false, lease_id: null });
+    const released = await leaseDb.query<{ release_public_scan_slot: boolean }>(
+      "select public.release_public_scan_slot($1)",
+      [firstLease],
+    );
+    expect(released.rows[0]!.release_public_scan_slot).toBe(true);
+    const retried = await leaseDb.query<{ acquired: boolean; lease_id: string | null }>(
+      "select * from public.claim_public_scan_slot($1,1,30)",
+      [secondLease],
+    );
+    expect(retried.rows[0]).toEqual({ acquired: true, lease_id: secondLease });
+    await leaseDb.exec("reset role; set role authenticated");
+    await expect(leaseDb.query("select * from public.public_scan_leases")).rejects.toThrow();
+    await leaseDb.close();
   });
 
   it("isolates discovery evidence by workspace and preserves confirmed dependency decisions", async () => {
