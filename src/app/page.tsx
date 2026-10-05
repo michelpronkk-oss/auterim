@@ -19,6 +19,7 @@ import {
 import { HeaderCta, HeroAnalyzer, HeroClouds } from "@/app/_home/hero";
 import { ChangeInbox, CoverageCatalog, DependencyMap, FinalCtaForm } from "@/app/_home/interactive";
 import { BrandMark, ProviderMark } from "@/app/_home/marks";
+import { PricingSection } from "@/app/_home/pricing";
 import { RevealOnScroll } from "@/app/_home/reveal";
 import s from "@/app/_home/home.module.css";
 
@@ -459,7 +460,10 @@ export default function Home() {
           </p>
         </section>
 
-        {/* 10 Final CTA */}
+        {/* 10 Pricing */}
+        <PricingSection />
+
+        {/* 11 Final CTA */}
         <section className={s.finalCta} aria-labelledby="cta-title">
           <div className={s.finalInner}>
             <h2 data-reveal id="cta-title" className={s.h2Final}>
@@ -492,7 +496,7 @@ export default function Home() {
           <nav aria-label="Footer navigation" className={s.footerNav}>
             <Link href="/changes">Public changes</Link>
             <Link href="/tools">Free tools</Link>
-            <Link href="/pricing">Pricing</Link>
+            <a href="#pricing">Pricing</a>
             <Link href="/login">Sign in</Link>
           </nav>
           <span className={s.copyright}>© 2026 Auterim</span>
