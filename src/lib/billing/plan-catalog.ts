@@ -89,7 +89,7 @@ export const PLAN_CATALOG: Record<
     trialNote: "Your 5-day Pro trial starts when protection goes live.",
     limits: {
       protectedDependencies: 75,
-      repositories: 25,
+      repositories: 5,
       members: 10,
       preflightRuns: 500,
       remediationRuns: 30,
@@ -126,7 +126,7 @@ export const PLAN_CATALOG: Record<
     ctaHref: "/signup",
     limits: {
       protectedDependencies: 250,
-      repositories: 100,
+      repositories: 25,
       members: 50,
       preflightRuns: 5000,
       remediationRuns: 500,

@@ -9,6 +9,18 @@ const workspaceId = "00000000-0000-4000-8000-000000000011";
 
 describe("billing plans and workspace entitlements", () => {
   it("keeps launch packaging, capacities, trial copy, and signup actions aligned", () => {
+    expect(PLAN_CATALOG.core.limits).toMatchObject({
+      protectedDependencies: 20,
+      repositories: 0,
+    });
+    expect(PLAN_CATALOG.pro.limits).toMatchObject({
+      protectedDependencies: 75,
+      repositories: 5,
+    });
+    expect(PLAN_CATALOG.business.limits).toMatchObject({
+      protectedDependencies: 250,
+      repositories: 25,
+    });
     expect(PLAN_CATALOG.core).toMatchObject({
       priceUsdMonthly: 29,
       tagline: "Know what matters.",
