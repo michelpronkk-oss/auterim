@@ -6,7 +6,7 @@ import { validatePublishableFields } from "@/lib/growth/contract";
 import { summarizeEnabledSources } from "@/lib/public/coverage";
 import { POST as publicStackScan } from "@/app/api/public/stack-scan/route";
 import { isPublicEvidenceFresh, MAX_PUBLIC_EVIDENCE_AGE_DAYS } from "@/lib/public/freshness";
-import { scopePublicToolProviders } from "@/lib/public/tool-filter";
+import { scopePublicToolItems, scopePublicToolProviders } from "@/lib/public/tool-filter";
 
 describe("public acquisition surfaces", () => {
   beforeEach(() => resetPublicRateLimitsForTests());
@@ -218,6 +218,19 @@ describe("public acquisition surfaces", () => {
       selected: null,
       providers: [],
     });
+
+    const changes = [
+      { provider: { slug: "openai" }, id: "openai-change" },
+      { provider: { slug: "stripe" }, id: "stripe-change" },
+    ];
+    expect(scopePublicToolItems(changes, directory).map(({ id }) => id)).toEqual([
+      "openai-change",
+      "stripe-change",
+    ]);
+    expect(scopePublicToolItems(changes, directory, "stripe").map(({ id }) => id)).toEqual([
+      "stripe-change",
+    ]);
+    expect(scopePublicToolItems(changes, directory, "unknown-provider")).toEqual([]);
   });
 
   it("rejects malformed public scan requests without echoing submitted data", async () => {
