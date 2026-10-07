@@ -1,15 +1,4 @@
-export const legacyClient = {
-  send(): string {
-    return "fixture response";
-  },
-};
-
-export const modernClient = {
-  send(): string {
-    return "fixture response";
-  },
-};
-
-export function sendFixtureMessage() {
-  return legacyClient.send();
-}
+export const configuredEntity = "fixture-client";
+const legacyClient = { send: () => "old" };
+export const modernClient = { send: () => "new" };
+export const client = legacyClient.send();

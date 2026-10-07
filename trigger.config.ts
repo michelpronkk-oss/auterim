@@ -21,6 +21,8 @@ export default defineConfig({
   },
   dirs: ["./src/trigger"],
   build: {
+    // Preserve Playwright's lazy optional bidi imports during local dev bundling.
+    external: ["playwright"],
     extensions: [playwright({ browsers: ["chromium"] })],
   },
 });

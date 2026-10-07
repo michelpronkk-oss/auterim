@@ -473,6 +473,10 @@ function canonicalJson(value: unknown): string {
 export function buildCustomerImpactPacket(input: unknown): CustomerImpactPacket {
   const value = z
     .object({
+      // The persisted packet RPC includes these join keys for its own caller.
+      // Accept and discard them here so they never enter the model-facing packet.
+      workspaceId: z.string().uuid().optional(),
+      workspaceDependencyId: z.string().uuid().optional(),
       dependencyName: z.string().trim().min(1).max(120),
       context: dependencyImpactContextSchema,
       globalChange: z

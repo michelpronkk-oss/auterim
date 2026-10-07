@@ -630,6 +630,17 @@ describe("offline customer impact evaluation", () => {
     );
   });
 
+  it("discards persisted impact join keys before building the model-facing packet", () => {
+    const packet = buildCustomerImpactPacket({
+      ...pricingPacket,
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      workspaceDependencyId: "22222222-2222-4222-8222-222222222222",
+    });
+    expect(packet).toEqual(pricingPacket);
+    expect(packet).not.toHaveProperty("workspaceId");
+    expect(packet).not.toHaveProperty("workspaceDependencyId");
+  });
+
   it("rejects ungrounded evidence and inconsistent schema output", () => {
     const bad = output({ evidenceRefs: [{ source: "global_evidence", excerpt: "made up fact" }] });
     expect(() => applyCustomerImpactPolicy(bad, pricingPacket)).toThrow(

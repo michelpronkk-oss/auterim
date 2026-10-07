@@ -311,6 +311,23 @@ export async function getChangesOverview(
     if (!latestByDependencyChange.has(key)) latestByDependencyChange.set(key, row);
   }
   const deduped = [...latestByDependencyChange.values()];
+  const resolutionResult = deduped.length
+    ? await client
+        .from("customer_risk_resolutions")
+        .select("impact_assessment_id,resolution_kind,resolved_at,resolved_by")
+        .eq("workspace_id", workspaceId)
+        .in(
+          "impact_assessment_id",
+          deduped.map((row) => row.id),
+        )
+    : { data: [], error: null };
+  if (resolutionResult.error) throw new Error("changes_overview_unavailable");
+  const resolutions = new Map(
+    (resolutionResult.data ?? []).map((resolution) => [
+      resolution.impact_assessment_id,
+      resolution,
+    ]),
+  );
   const runRows = runs.data ?? [];
   const latestTerminalRunByAssessment = latestTerminalPreflightRuns(runRows);
   const verifiedAssessmentIds = new Set(
@@ -321,7 +338,7 @@ export async function getChangesOverview(
   const filtered = deduped.filter(
     (row) =>
       (!options.verifiedOnly || verifiedAssessmentIds.has(row.id)) &&
-      (!options.unresolvedOnly || row.relevant),
+      (!options.unresolvedOnly || (row.relevant && !resolutions.has(row.id))),
   );
   const visible = filtered.slice(0, PAGE_SIZE);
   return {
@@ -353,6 +370,13 @@ export async function getChangesOverview(
           recommendedAction: row.recommended_action,
           actionRequired: row.action_required,
           confidence: row.confidence,
+          resolution: resolutions.get(row.id)
+            ? {
+                kind: resolutions.get(row.id)!.resolution_kind,
+                resolvedAt: resolutions.get(row.id)!.resolved_at,
+                resolvedBy: resolutions.get(row.id)!.resolved_by,
+              }
+            : null,
         },
         preflight: preflight
           ? {

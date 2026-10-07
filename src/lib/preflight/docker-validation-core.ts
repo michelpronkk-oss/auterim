@@ -20,12 +20,8 @@ function inside(parent: string, child: string) {
 async function measureSafeTree(root: string, current = root): Promise<number> {
   let total = 0;
   for (const entry of await readdir(current, { withFileTypes: true })) {
-    if (
-      entry.name === ".git" ||
-      entry.name === "node_modules" ||
-      entry.name === ".env" ||
-      entry.name.startsWith(".env.")
-    )
+    const name = entry.name.toLowerCase();
+    if (name === ".git" || name === "node_modules" || name === ".env" || name.startsWith(".env."))
       continue;
     const target = path.join(current, entry.name);
     const stat = await lstat(target);
@@ -63,7 +59,7 @@ export async function validatePatchInDocker(input: {
     await cp(source, repo, {
       recursive: true,
       filter: (candidate) => {
-        const name = path.basename(candidate);
+        const name = path.basename(candidate).toLowerCase();
         return (
           name !== ".git" && name !== "node_modules" && name !== ".env" && !name.startsWith(".env.")
         );

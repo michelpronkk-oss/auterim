@@ -1,5 +1,8 @@
 import "server-only";
 import { createSign } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { gunzipSync } from "node:zlib";
 import type {
   CodeSearchHit,
   RepositoryFile,
@@ -22,6 +25,57 @@ function createAppJwt(appId: string, privateKey: string, now = Date.now()) {
   signer.update(unsigned);
   signer.end();
   return `${unsigned}.${signer.sign(privateKey).toString("base64url")}`;
+}
+
+const MAX_ARCHIVE_COMPRESSED_BYTES = 16 * 1024 * 1024;
+const MAX_ARCHIVE_EXPANDED_BYTES = 28 * 1024 * 1024;
+const MAX_ARCHIVE_FILES = 1_000;
+const MAX_ARCHIVE_FILE_BYTES = 1_000_000;
+
+function safeArchivePath(root: string, name: string) {
+  if (!name || name.includes("\\") || name.includes("\0") || name.startsWith("/")) return null;
+  const parts = name.split("/");
+  if (parts.length < 2 || parts.some((part) => !part || part === "." || part === "..")) return null;
+  const relative = parts.slice(1).join("/");
+  if (
+    !relative ||
+    relative.split("/").some((part) => [".git", "node_modules"].includes(part.toLowerCase())) ||
+    relative
+      .split("/")
+      .some((part) => part.toLowerCase() === ".env" || part.toLowerCase().startsWith(".env."))
+  )
+    return null;
+  const target = path.resolve(root, ...relative.split("/"));
+  return target.startsWith(`${path.resolve(root)}${path.sep}`) ? { target, relative } : null;
+}
+
+async function boundedBody(response: Response, maximum: number) {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > maximum) {
+    throw new Error("github_repository_archive_too_large");
+  }
+  if (!response.body) throw new Error("github_repository_archive_unavailable");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > maximum) {
+        await reader.cancel("archive_bound_exceeded");
+        throw new Error("github_repository_archive_too_large");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(
+    chunks.map((chunk) => Buffer.from(chunk)),
+    length,
+  );
 }
 
 async function githubJson<T>(
@@ -274,5 +328,81 @@ export class GitHubAppRepositoryProvider implements RepositoryProvider {
     const text = bytes.toString("utf8");
     if (text.includes("\u0000")) return { path, text: "", size: bytes.byteLength };
     return { path, text, size: bytes.byteLength };
+  }
+
+  /** Materialize only a bounded, regular-file snapshot at the exact verified commit. */
+  async materializeRepository(repository: RepositoryTarget, ref: string, destination: string) {
+    if (!/^[a-f0-9]{40,64}$/.test(ref)) throw new Error("github_invalid_repository_ref");
+    const token = await this.installationToken(repository);
+    const archiveUrl = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/tarball/${ref}`;
+    let response = await fetch(archiveUrl, {
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${token}`,
+        "x-github-api-version": "2022-11-28",
+        "user-agent": "Auterim-Preflight/1.0",
+      },
+      signal: AbortSignal.timeout(20_000),
+      redirect: "manual",
+      cache: "no-store",
+    });
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (!location) throw new Error("github_repository_archive_unavailable");
+      const redirect = new URL(location, archiveUrl);
+      if (
+        redirect.protocol !== "https:" ||
+        redirect.hostname !== "codeload.github.com" ||
+        (redirect.port !== "" && redirect.port !== "443")
+      ) {
+        throw new Error("github_repository_archive_redirect_rejected");
+      }
+      response = await fetch(redirect, {
+        signal: AbortSignal.timeout(20_000),
+        redirect: "error",
+        cache: "no-store",
+      });
+    }
+    if (!response.ok) throw new Error(`github_repository_archive_${response.status}`);
+    const compressed = await boundedBody(response, MAX_ARCHIVE_COMPRESSED_BYTES);
+    let tar: Buffer;
+    try {
+      tar = gunzipSync(compressed, { maxOutputLength: MAX_ARCHIVE_EXPANDED_BYTES });
+    } catch {
+      throw new Error("github_repository_archive_invalid");
+    }
+    await mkdir(destination, { recursive: true });
+    let offset = 0;
+    let files = 0;
+    let extracted = 0;
+    while (offset + 512 <= tar.length) {
+      const header = tar.subarray(offset, offset + 512);
+      if (header.every((byte) => byte === 0)) break;
+      const nul = header.indexOf(0, 0);
+      const rawName = header.subarray(0, nul < 0 ? 100 : nul).toString("utf8");
+      const rawPrefix = header.subarray(345, 500).toString("utf8").replace(/\0.*$/, "");
+      const archiveName = rawPrefix ? `${rawPrefix}/${rawName}` : rawName;
+      const rawSize = header.subarray(124, 136).toString("ascii").replace(/\0.*$/, "").trim();
+      const size = rawSize ? Number.parseInt(rawSize, 8) : 0;
+      const kind = header[156] === 0 ? "0" : String.fromCharCode(header[156]!);
+      if (!Number.isSafeInteger(size) || size < 0 || offset + 512 + size > tar.length) {
+        throw new Error("github_repository_archive_invalid");
+      }
+      if (kind === "0" && size > 0) {
+        const entry = safeArchivePath(destination, archiveName);
+        if (entry && size <= MAX_ARCHIVE_FILE_BYTES) {
+          if (++files > MAX_ARCHIVE_FILES || extracted + size > MAX_ARCHIVE_EXPANDED_BYTES) {
+            throw new Error("github_repository_archive_bounds_exceeded");
+          }
+          const data = tar.subarray(offset + 512, offset + 512 + size);
+          await mkdir(path.dirname(entry.target), { recursive: true });
+          await writeFile(entry.target, data, { flag: "wx" });
+          extracted += size;
+        }
+      }
+      offset += 512 + Math.ceil(size / 512) * 512;
+    }
+    if (files === 0) throw new Error("github_repository_archive_empty");
+    return { files, bytes: extracted };
   }
 }

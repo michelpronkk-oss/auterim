@@ -1,6 +1,42 @@
 import { z } from "zod";
-import { authenticateOnboardingRequest } from "@/lib/onboarding/auth";
+import { authenticateOnboardingRequest, parseJsonBody } from "@/lib/onboarding/auth";
 import { getWorkspaceRole } from "@/lib/billing/server";
+
+const disableSchema = z
+  .object({ workspaceId: z.string().uuid(), action: z.literal("disable") })
+  .strict();
+
+export async function PATCH(request: Request, routeContext: { params: Promise<{ id: string }> }) {
+  const auth = await authenticateOnboardingRequest(request);
+  if (!auth.ok) return auth.response;
+  const { id } = await routeContext.params;
+  const dependencyId = z.string().uuid().safeParse(id);
+  if (!dependencyId.success) return Response.json({ error: "invalid_dependency" }, { status: 400 });
+
+  let input: z.infer<typeof disableSchema>;
+  try {
+    input = disableSchema.parse(await parseJsonBody(request));
+  } catch {
+    return Response.json({ error: "invalid_dependency_operation" }, { status: 400 });
+  }
+  const role = await getWorkspaceRole(auth.client, input.workspaceId, auth.user.id).catch(
+    () => null,
+  );
+  if (role !== "owner" && role !== "admin")
+    return Response.json({ error: "owner_or_admin_required" }, { status: 403 });
+
+  const { data, error } = await auth.client.rpc("disable_workspace_dependency", {
+    p_workspace_id: input.workspaceId,
+    p_workspace_dependency_id: dependencyId.data,
+  });
+  if (error) {
+    if (error.code === "P0002")
+      return Response.json({ error: "dependency_not_found" }, { status: 404 });
+    if (error.code === "42501") return Response.json({ error: "forbidden" }, { status: 403 });
+    return Response.json({ error: "dependency_update_failed" }, { status: 503 });
+  }
+  return Response.json(data);
+}
 
 export async function GET(request: Request, routeContext: { params: Promise<{ id: string }> }) {
   const auth = await authenticateOnboardingRequest(request);
@@ -78,15 +114,15 @@ export async function GET(request: Request, routeContext: { params: Promise<{ id
       usedFor: dependencyContext?.used_for,
       contextNote: dependencyContext?.context_note,
       createdAt: dependency.created_at,
-      protectionState: latestImpact?.relevant
-        ? "attention_required"
-        : snapshotsBySource.size
-          ? "monitoring_evidence_available"
-          : coveredSources.length
-            ? "baseline_pending"
-            : dependency.monitoring_enabled
-              ? "coverage_pending"
-              : "unsupported",
+      protectionState: !dependency.monitoring_enabled
+        ? "disabled"
+        : latestImpact?.relevant
+          ? "attention_required"
+          : snapshotsBySource.size
+            ? "monitoring_evidence_available"
+            : coveredSources.length
+              ? "baseline_pending"
+              : "coverage_pending",
       latestImpact,
       sources: coveredSources.map((source) => ({
         ...source,

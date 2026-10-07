@@ -56,4 +56,29 @@ The shared remediation library now contains a deterministic patch builder. It em
 
 A disposable fixture validator image is pinned to Node 24.8.0 Alpine and runs the internal fixture tests and TypeScript check with no network, no inherited secrets, a read-only root filesystem, and bounded CPU, memory, process count, and temporary storage. The Business policy evaluator requires current canonical Business capabilities, an enabled versioned policy, an allowed repository, a protected product, and successful validation. Policy persistence and Trigger handoff are not yet connected.
 
-`npm run acceptance:m15` provisions an isolated local Supabase project with separate ports and checks the fixture patch in the bounded validator. It reports a non-zero result until real local RLS/product/queue execution, Trigger.dev dispatch and retries, automatic proposal persistence, and lifecycle/idempotency checks are connected. Passing unit or fixture checks alone does not mean the M15 money path is proven.
+`npm run acceptance:m15` provisions an isolated local Supabase project with separate ports and runs real local Auth/JWT and RLS checks. Its persisted synthetic change passes through the normal scanner, classifier, customer-impact queue, and assessment repository, then verifies durable Preflight queue creation. The local integration deliberately does not call `runPreflight` directly; the Preflight result and downstream remediation queue must be produced by the actual Trigger.dev development worker. The only substituted inputs in the verified upstream portion are deterministic classifiers, a bounded safe-fetch fixture, and synthetic/internal-only replacement evidence that is excluded from public use.
+
+The persisted money path uses durable Preflight, preparation, and validation queues. The preparation worker rechecks eligibility before creating an idempotent proposal; the validation worker rechecks the proposal and entitlements, verifies the patch fingerprint, obtains the exact repository commit in a bounded temporary checkout, runs the no-network Docker validator, and persists bounded attempt diagnostics. It emits a deduplicated protection event. A workspace member may record an explicit risk resolution (`reviewed`, `mitigated_externally`, `accepted_risk`, or `no_longer_applicable`); resolution history is append-only and removes that item from unresolved actions without claiming Auterim applied the fix.
+
+This remains a partial acceptance until the actual Trigger.dev development worker exercises dispatch, retries, patch persistence, asynchronous Docker validation, execution-time policy checks, lifecycle/resolution/history, crash recovery, and Postgres concurrency. The accepted harness continues to report each unproven stage as `FAIL`; standalone patch-builder, schema, and Docker fixture tests are supporting evidence only. Use a dedicated Auterim `tr_dev` key and configure the worker with the isolated local Supabase URL and keys before running the live local-worker portion. No remote Supabase migration or production Trigger deployment is part of this phase.
+
+## Dependency lifecycle and Business handoff preparation
+
+An owner or admin can stop protection for one product dependency with `PATCH
+/api/protection/dependencies/:id` and `{ "workspaceId": "…", "action": "disable" }`.
+The canonical `disable_workspace_dependency` operation serializes against product,
+dependency, and worker lifecycle claims. It sets `monitoring_enabled` to false while
+retaining discovery, impact, Preflight, remediation, and history rows. Existing queued
+work rechecks that state when the worker claims it and is denied if the dependency was
+disabled after queueing.
+
+Business work can request policy-gated handoff preparation at
+`POST /api/preflight/:id/handoff`. This operation requires current Business
+entitlement, a verified and validated remediation, and the selected repository to
+remain inside the current product policy. A scheduled Trigger dispatcher persists
+the child task identity; the child rechecks entitlement, product/dependency state,
+Preflight/proposal currency, validation, repository access, policy permission, and
+policy version before preparing a deterministic branch reference. If the policy
+version changed while the request was queued, the stale request is denied. This is
+only the local persisted preparation boundary: it does not call GitHub or create a
+pull request. Approval remains required in the prepared result.

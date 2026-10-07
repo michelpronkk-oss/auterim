@@ -211,6 +211,54 @@ const completeTechnologyFingerprintMigration = await readFile(
   ),
   "utf8",
 );
+const protectedProductMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261021000000_m15_protected_product_entitlements.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
+const productScopedDependencyMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261022000000_m15_product_scoped_dependencies_and_idempotency.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
+const persistedMoneyPathMigration = await readFile(
+  fileURLToPath(
+    new URL("../supabase/migrations/20261023000000_m15_persisted_money_path.sql", import.meta.url),
+  ),
+  "utf8",
+);
+const phase4cCorrectnessMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261023100000_m15_phase4c_retry_and_quota_fixes.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
+const dependencyLifecycleMigration = await readFile(
+  fileURLToPath(
+    new URL("../supabase/migrations/20261024020000_m15_dependency_lifecycle.sql", import.meta.url),
+  ),
+  "utf8",
+);
+const businessHandoffMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261024030000_m15_business_handoff_preparation.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase(applyCompanySurfaceMigration = true) {
   const db = new PGlite();
@@ -253,6 +301,12 @@ async function makeDatabase(applyCompanySurfaceMigration = true) {
     await db.exec(completeTechnologyFingerprintMigration);
   }
   await db.exec(protectionDependencyDetailMigration);
+  await db.exec(protectedProductMigration);
+  await db.exec(productScopedDependencyMigration);
+  await db.exec(persistedMoneyPathMigration);
+  await db.exec(phase4cCorrectnessMigration);
+  await db.exec(dependencyLifecycleMigration);
+  await db.exec(businessHandoffMigration);
   return db;
 }
 
@@ -1444,6 +1498,48 @@ describe("Auterim migration and monitoring transaction", () => {
       [workspaceA.rows[0]!.id, workspaceDependencyA.rows[0]!.id, classification.rows[0]!.id],
     );
 
+    await db.query(
+      `insert into public.workspace_subscriptions (
+         workspace_id,plan,status,current_period_start,current_period_end
+       ) values ($1,'pro','active',now(),now()+interval '30 days')
+       on conflict (workspace_id) do update set plan='pro',status='active',
+         current_period_start=now(),current_period_end=now()+interval '30 days',
+         trial_started_at=null,trial_ends_at=null`,
+      [workspaceA.rows[0]!.id],
+    );
+    const retryQueue = await db.query<{ id: string }>(
+      `insert into public.preflight_dispatch_queue (
+         workspace_id,impact_assessment_id,repository_set_fingerprint,status,attempt_count,trigger_run_id
+       ) values ($1,$2,repeat('d',64),'failed',2,'stale-trigger-run') returning id`,
+      [workspaceA.rows[0]!.id, assessment.rows[0]!.id],
+    );
+    const retriedAttempt = await db.query<{ attempt: number }>(
+      "select public.mark_preflight_dispatch($1,'dispatched') as attempt",
+      [retryQueue.rows[0]!.id],
+    );
+    expect(retriedAttempt.rows[0]!.attempt).toBe(3);
+    expect(
+      (
+        await db.query<{ trigger_run_id: string | null }>(
+          "select trigger_run_id from public.preflight_dispatch_queue where id=$1",
+          [retryQueue.rows[0]!.id],
+        )
+      ).rows[0]!.trigger_run_id,
+    ).toBeNull();
+    const acceptedRunIdentity = await db.query<{ accepted: boolean }>(
+      "select public.mark_preflight_dispatch_run($1,3,'fresh-trigger-run') as accepted",
+      [retryQueue.rows[0]!.id],
+    );
+    expect(acceptedRunIdentity.rows[0]!.accepted).toBe(true);
+    expect(
+      (
+        await db.query<{ trigger_run_id: string | null }>(
+          "select trigger_run_id from public.preflight_dispatch_queue where id=$1",
+          [retryQueue.rows[0]!.id],
+        )
+      ).rows[0]!.trigger_run_id,
+    ).toBe("fresh-trigger-run");
+
     const packet = await db.query<{ value: Record<string, unknown> }>(
       "select public.load_customer_impact_packet($1,$2) as value",
       [workspaceDependencyA.rows[0]!.id, classification.rows[0]!.id],
@@ -2046,5 +2142,142 @@ describe("Auterim migration and monitoring transaction", () => {
     );
     expect(counts.rows[0]).toEqual({ topics: 1, opportunities: 1, evaluations: 1, evidence: 1 });
     await db.exec("reset role");
+  });
+
+  it("keeps persisted remediation credentials private and validation/policy reads tenant gated", async () => {
+    const db = await makeDatabase();
+    const relations = await db.query<{ relname: string; relrowsecurity: boolean }>(
+      `select relation.relname,relation.relrowsecurity
+       from pg_class relation join pg_namespace namespace on namespace.oid=relation.relnamespace
+       where namespace.nspname='public' and relation.relname = any($1::text[])`,
+      [
+        [
+          "source_remediation_replacements",
+          "product_remediation_policies",
+          "remediation_validation_queue",
+          "remediation_validation_attempts",
+          "remediation_preparation_queue",
+          "customer_risk_resolutions",
+        ],
+      ],
+    );
+    expect(relations.rows).toHaveLength(6);
+    expect(relations.rows.every((relation) => relation.relrowsecurity)).toBe(true);
+
+    const privileges = await db.query<{
+      policyRead: boolean;
+      queueRead: boolean;
+      attemptsRead: boolean;
+      preparationRead: boolean;
+      resolutionRead: boolean;
+      resolutionWrite: boolean;
+      replacementRead: boolean;
+      queueWrite: boolean;
+      preparationWrite: boolean;
+      policyWrite: boolean;
+      setPolicy: boolean;
+      anonSetPolicy: boolean;
+      serviceClaim: boolean;
+      memberClaim: boolean;
+      request_result_type: string;
+      request_rpc_exposes_claim_token: boolean;
+      servicePreparationClaim: boolean;
+      memberPreparationClaim: boolean;
+      serviceDispatchRun: boolean;
+      memberDispatchRun: boolean;
+      resolveRisk: boolean;
+      anonResolveRisk: boolean;
+    }>(`
+      select
+        has_table_privilege('authenticated','public.product_remediation_policies','select') policy_read,
+        has_table_privilege('authenticated','public.remediation_validation_queue','select') queue_read,
+        has_table_privilege('authenticated','public.remediation_validation_attempts','select') attempts_read,
+        has_table_privilege('authenticated','public.remediation_preparation_queue','select') preparation_read,
+        has_table_privilege('authenticated','public.customer_risk_resolutions','select') resolution_read,
+        has_table_privilege('authenticated','public.customer_risk_resolutions','insert,update,delete') resolution_write,
+        has_table_privilege('authenticated','public.source_remediation_replacements','select') replacement_read,
+        has_table_privilege('authenticated','public.remediation_validation_queue','insert,update,delete') queue_write,
+        has_table_privilege('authenticated','public.remediation_preparation_queue','insert,update,delete') preparation_write,
+        has_table_privilege('authenticated','public.product_remediation_policies','insert,update,delete') policy_write,
+        has_function_privilege('authenticated','public.set_product_remediation_policy(uuid,uuid,boolean,boolean,boolean,boolean,uuid[])','execute') set_policy,
+        has_function_privilege('anon','public.set_product_remediation_policy(uuid,uuid,boolean,boolean,boolean,boolean,uuid[])','execute') anon_set_policy,
+        has_function_privilege('service_role','public.claim_remediation_validation(uuid,integer)','execute') service_claim,
+        has_function_privilege('authenticated','public.claim_remediation_validation(uuid,integer)','execute') member_claim,
+        has_function_privilege('service_role','public.claim_remediation_preparation(uuid,integer)','execute') service_preparation_claim,
+        has_function_privilege('authenticated','public.claim_remediation_preparation(uuid,integer)','execute') member_preparation_claim,
+        has_function_privilege('service_role','public.mark_preflight_dispatch_run(uuid,integer,text)','execute') service_dispatch_run,
+        has_function_privilege('authenticated','public.mark_preflight_dispatch_run(uuid,integer,text)','execute') member_dispatch_run,
+        has_function_privilege('authenticated','public.resolve_customer_risk(uuid,uuid,text)','execute') resolve_risk,
+        has_function_privilege('anon','public.resolve_customer_risk(uuid,uuid,text)','execute') anon_resolve_risk
+    `);
+    expect(privileges.rows[0]).toEqual({
+      policy_read: true,
+      queue_read: true,
+      attempts_read: true,
+      preparation_read: true,
+      resolution_read: true,
+      resolution_write: false,
+      replacement_read: false,
+      queue_write: false,
+      preparation_write: false,
+      policy_write: false,
+      set_policy: true,
+      anon_set_policy: false,
+      service_claim: true,
+      member_claim: false,
+      service_preparation_claim: true,
+      member_preparation_claim: false,
+      service_dispatch_run: true,
+      member_dispatch_run: false,
+      resolve_risk: true,
+      anon_resolve_risk: false,
+    });
+  });
+
+  it("keeps Business handoff requests tenant-readable and worker mutations service-only", async () => {
+    const db = await makeDatabase();
+    const relations = await db.query<{ relrowsecurity: boolean }>(`
+      select relrowsecurity from pg_class relation
+      join pg_namespace namespace on namespace.oid=relation.relnamespace
+      where namespace.nspname='public' and relation.relname='business_handoff_requests'
+    `);
+    expect(relations.rows).toEqual([{ relrowsecurity: true }]);
+    const privileges = await db.query<{
+      memberRead: boolean;
+      memberSafeStatusRead: boolean;
+      memberClaimTokenRead: boolean;
+      memberWrite: boolean;
+      serviceWrite: boolean;
+      requestRpc: boolean;
+      anonRequestRpc: boolean;
+      serviceClaim: boolean;
+      memberClaim: boolean;
+    }>(`
+      select
+        has_table_privilege('authenticated','public.business_handoff_requests','select') member_read,
+        has_column_privilege('authenticated','public.business_handoff_requests','status','select') member_safe_status_read,
+        has_column_privilege('authenticated','public.business_handoff_requests','claim_token','select') member_claim_token_read,
+        has_table_privilege('authenticated','public.business_handoff_requests','insert,update,delete') member_write,
+        has_table_privilege('service_role','public.business_handoff_requests','insert,update,delete') service_write,
+        has_function_privilege('authenticated','public.request_business_handoff(uuid,uuid,uuid,text)','execute') request_rpc,
+        has_function_privilege('anon','public.request_business_handoff(uuid,uuid,uuid,text)','execute') anon_request_rpc,
+        has_function_privilege('service_role','public.claim_business_handoff_execution(uuid,integer)','execute') service_claim,
+        has_function_privilege('authenticated','public.claim_business_handoff_execution(uuid,integer)','execute') member_claim,
+        pg_get_function_result('public.request_business_handoff(uuid,uuid,uuid,text)'::regprocedure) request_result_type,
+        position('claim_token' in pg_get_functiondef('public.request_business_handoff(uuid,uuid,uuid,text)'::regprocedure)) > 0 request_rpc_exposes_claim_token
+    `);
+    expect(privileges.rows[0]).toEqual({
+      member_read: false,
+      member_safe_status_read: true,
+      member_claim_token_read: false,
+      member_write: false,
+      service_write: true,
+      request_rpc: true,
+      anon_request_rpc: false,
+      service_claim: true,
+      member_claim: false,
+      request_result_type: "jsonb",
+      request_rpc_exposes_claim_token: false,
+    });
   });
 });

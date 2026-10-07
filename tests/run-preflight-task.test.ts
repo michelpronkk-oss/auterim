@@ -27,6 +27,7 @@ function taskRun() {
         queueId: string;
         workspaceId: string;
         impactAssessmentId: string;
+        attempt: number;
       }) => Promise<unknown>;
     }
   ).run;
@@ -38,6 +39,7 @@ function clientWithQueue(status: string) {
       workspace_id: "11111111-1111-4111-8111-111111111111",
       impact_assessment_id: "22222222-2222-4222-8222-222222222222",
       status,
+      attempt_count: 1,
     },
     error: null,
   });
@@ -59,6 +61,7 @@ describe("run-preflight Trigger task lifecycle", () => {
       queueId: "33333333-3333-4333-8333-333333333333",
       workspaceId: "11111111-1111-4111-8111-111111111111",
       impactAssessmentId: "22222222-2222-4222-8222-222222222222",
+      attempt: 1,
     });
 
     expect(result).toEqual({ status: "superseded" });
@@ -74,6 +77,7 @@ describe("run-preflight Trigger task lifecycle", () => {
       queueId: "33333333-3333-4333-8333-333333333333",
       workspaceId: "11111111-1111-4111-8111-111111111111",
       impactAssessmentId: "22222222-2222-4222-8222-222222222222",
+      attempt: 1,
     });
 
     expect(result).toEqual({ status: "complete" });
