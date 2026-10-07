@@ -259,6 +259,15 @@ const businessHandoffMigration = await readFile(
   ),
   "utf8",
 );
+const preflightWorkerRpcAclMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261109000000_m15_preflight_worker_rpc_acl_hardening.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase(applyCompanySurfaceMigration = true) {
   const db = new PGlite();
@@ -307,6 +316,7 @@ async function makeDatabase(applyCompanySurfaceMigration = true) {
   await db.exec(phase4cCorrectnessMigration);
   await db.exec(dependencyLifecycleMigration);
   await db.exec(businessHandoffMigration);
+  await db.exec(preflightWorkerRpcAclMigration);
   return db;
 }
 
@@ -2142,6 +2152,53 @@ describe("Auterim migration and monitoring transaction", () => {
     );
     expect(counts.rows[0]).toEqual({ topics: 1, opportunities: 1, evaluations: 1, evidence: 1 });
     await db.exec("reset role");
+  });
+
+  it("restricts preflight dispatch worker RPCs to service_role", async () => {
+    const db = await makeDatabase();
+    const privileges = await db.query<{
+      function_name: string;
+      anon_execute: boolean;
+      authenticated_execute: boolean;
+      service_role_execute: boolean;
+      public_execute: boolean;
+    }>(`
+      select
+        procedure.proname as function_name,
+        has_function_privilege('anon', procedure.oid, 'execute') as anon_execute,
+        has_function_privilege('authenticated', procedure.oid, 'execute') as authenticated_execute,
+        has_function_privilege('service_role', procedure.oid, 'execute') as service_role_execute,
+        exists (
+          select 1
+          from aclexplode(procedure.proacl) privilege
+          where privilege.grantee = 0 and privilege.privilege_type = 'EXECUTE'
+        ) as public_execute
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = 'public'
+        and procedure.oid in (
+          'public.list_preflight_dispatch_queue(integer)'::regprocedure,
+          'public.mark_preflight_dispatch(uuid,text,text)'::regprocedure
+        )
+      order by procedure.proname
+    `);
+
+    expect(privileges.rows).toEqual([
+      {
+        function_name: "list_preflight_dispatch_queue",
+        anon_execute: false,
+        authenticated_execute: false,
+        service_role_execute: true,
+        public_execute: false,
+      },
+      {
+        function_name: "mark_preflight_dispatch",
+        anon_execute: false,
+        authenticated_execute: false,
+        service_role_execute: true,
+        public_execute: false,
+      },
+    ]);
   });
 
   it("keeps persisted remediation credentials private and validation/policy reads tenant gated", async () => {
