@@ -348,6 +348,10 @@ async function assertLocalEntitlementMatrixGuard() {
     localTarget = false;
   }
   const triggerConfig = await readFile(path.resolve(process.cwd(), "trigger.config.ts"), "utf8");
+  const localTriggerConfig = await readFile(
+    path.resolve(process.cwd(), "trigger.m15-local.config.ts"),
+    "utf8",
+  );
   if (
     process.env.NODE_ENV === "production" ||
     process.env.AUTERIM_M15_LOCAL_INTEGRATION !== "1" ||
@@ -357,6 +361,11 @@ async function assertLocalEntitlementMatrixGuard() {
     !process.env.TRIGGER_SECRET_KEY?.startsWith("tr_dev_sk_") ||
     !localTarget ||
     !/project:\s*["']proj_hwqtxtyrvwykjirkrdoh["']/.test(triggerConfig) ||
+    !/dirs\s*:\s*\[\s*["']\.\/src\/trigger["']\s*\]/m.test(triggerConfig) ||
+    !/project:\s*["']proj_hwqtxtyrvwykjirkrdoh["']/.test(localTriggerConfig) ||
+    !/dirs\s*:\s*\[\s*["']\.\/src\/trigger["']\s*,\s*["']\.\/src\/trigger-m15-local["']\s*\]/m.test(
+      localTriggerConfig,
+    ) ||
     !root ||
     path.win32.resolve(root).toLowerCase() !== "c:\\users\\miche\\desktop\\auterim" ||
     path.win32.resolve(process.cwd()).toLowerCase() !== "c:\\users\\miche\\desktop\\auterim"

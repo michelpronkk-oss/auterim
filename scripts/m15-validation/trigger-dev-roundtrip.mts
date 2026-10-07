@@ -462,6 +462,8 @@ async function runEntitlementWorkerRound(input: {
       `trigger.dev@${triggerCliVersion}`,
       "dev",
       "start",
+      "--config",
+      "trigger.m15-local.config.ts",
       "--project-ref",
       expectedProject,
       "--skip-update-check",
@@ -723,6 +725,21 @@ async function main() {
   const triggerConfig = await readFile(path.join(repoRoot, "trigger.config.ts"), "utf8");
   if (!new RegExp(`project\\s*:\\s*["']${expectedProject}["']`).test(triggerConfig)) {
     fail("trigger_project_mismatch");
+  }
+  if (!/dirs\s*:\s*\[\s*["']\.\/src\/trigger["']\s*\]/m.test(triggerConfig)) {
+    fail("production_trigger_manifest_not_isolated");
+  }
+  const localTriggerConfig = await readFile(
+    path.join(repoRoot, "trigger.m15-local.config.ts"),
+    "utf8",
+  );
+  if (
+    !new RegExp(`project\\s*:\\s*["']${expectedProject}["']`).test(localTriggerConfig) ||
+    !/dirs\s*:\s*\[\s*["']\.\/src\/trigger["']\s*,\s*["']\.\/src\/trigger-m15-local["']\s*\]/m.test(
+      localTriggerConfig,
+    )
+  ) {
+    fail("local_trigger_manifest_mismatch");
   }
   if (triggerCliVersion !== "4.7.2") fail("trigger_cli_sdk_version_mismatch");
   localEnvContents = await readFile(path.join(repoRoot, ".env.local"), "utf8");
@@ -1439,6 +1456,8 @@ async function main() {
       `trigger.dev@${triggerCliVersion}`,
       "dev",
       "start",
+      "--config",
+      "trigger.m15-local.config.ts",
       "--project-ref",
       expectedProject,
       "--skip-update-check",
