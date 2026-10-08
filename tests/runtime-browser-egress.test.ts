@@ -225,33 +225,40 @@ describe("application-level Chromium egress isolation", () => {
     let browser: Browser | undefined;
     const url = "https://stalled.runtime-fixture.test/";
     const html = "<!doctype html><script>setInterval(() => {}, 0)</script>";
-    const started = performance.now();
-    const result = await inspectPublicLandingPage(
-      url,
-      { deadlineAt: started + 500 },
-      {
-        launch: async (denyProxyUrl) => {
-          browser = await launchIsolatedChromium(denyProxyUrl, 3_000);
-          return browser;
+    const denyProxy = await startDenyProxy();
+    try {
+      // Browser startup is intentionally outside the short runtime deadline. This case checks
+      // that a loaded page which never settles is cut off, not whether a cold Chromium process
+      // can start in under 500 ms on a busy test host.
+      browser = await launchIsolatedChromium(denyProxy.url, 3_000);
+      const started = performance.now();
+      const result = await inspectPublicLandingPage(
+        url,
+        { deadlineAt: started + 500 },
+        {
+          launch: async () => browser!,
+          initialDocument: {
+            status: 200,
+            body: Buffer.from(html),
+            bytesRead: Buffer.byteLength(html),
+            wireBytesRead: 0,
+            bodyTruncated: false,
+            contentType: "text/html",
+            finalUrl: url,
+          },
         },
-        initialDocument: {
-          status: 200,
-          body: Buffer.from(html),
-          bytesRead: Buffer.byteLength(html),
-          wireBytesRead: 0,
-          bodyTruncated: false,
-          contentType: "text/html",
-          finalUrl: url,
-        },
-      },
-    );
+      );
 
-    expect(performance.now() - started).toBeLessThan(1_500);
-    expect(result.status).toBe("partial");
-    expect(result.requests).toEqual([
-      { host: "stalled.runtime-fixture.test", resourceType: "document" },
-    ]);
-    expect(browser?.isConnected()).toBe(false);
+      expect(performance.now() - started).toBeLessThan(1_500);
+      expect(result.status).toBe("partial");
+      expect(result.requests).toEqual([
+        { host: "stalled.runtime-fixture.test", resourceType: "document" },
+      ]);
+      expect(browser.isConnected()).toBe(false);
+    } finally {
+      if (browser?.isConnected()) await browser.close();
+      await denyProxy.close();
+    }
   }, 25_000);
 
   it("re-intercepts public redirects and blocks a public-to-private redirect before transport", async () => {
