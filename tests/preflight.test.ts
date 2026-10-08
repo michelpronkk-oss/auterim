@@ -810,4 +810,118 @@ describe("offline Preflight evidence evaluation", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("attributes a rejected App JWT during installation metadata lookup safely", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () => new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 }),
+      ),
+    );
+    try {
+      const provider = new GitHubAppRepositoryProvider({
+        appId: "12345",
+        privateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      });
+      await expect(provider.getInstallationAccount(2001)).rejects.toMatchObject({
+        stage: "installation_metadata",
+        category: "app_jwt_rejected",
+        upstreamStatus: 401,
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("identifies App JWT signing failure before any provider request", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const provider = new GitHubAppRepositoryProvider({
+        appId: "12345",
+        privateKey: "not-a-private-key",
+      });
+      await expect(provider.getInstallationAccount(2001)).rejects.toMatchObject({
+        stage: "app_jwt",
+        category: "signing_failed",
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("attributes installation token creation failures and keeps request permissions read-only", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const calls: Array<{ body: string; authorization: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+        const headers = new Headers(init?.headers);
+        calls.push({
+          body: String(init?.body ?? ""),
+          authorization: headers.get("authorization") ?? "",
+        });
+        return new Response("", { status: 403 });
+      }),
+    );
+    try {
+      const provider = new GitHubAppRepositoryProvider({
+        appId: "12345",
+        privateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      });
+      await expect(provider.listInstallationRepositories(2001)).rejects.toMatchObject({
+        stage: "installation_token",
+        category: "permission_denied",
+        upstreamStatus: 403,
+      });
+      expect(JSON.parse(calls[0]!.body)).toEqual({ permissions: { contents: "read" } });
+      expect(calls[0]!.body).not.toContain("pull_requests");
+      expect(calls[0]!.authorization).toMatch(/^Bearer eyJ/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("attributes repository enumeration failures without exposing installation tokens", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const token = "ghs_installation_token_fixture_do_not_expose";
+    let call = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        call += 1;
+        if (call === 1)
+          return new Response(
+            JSON.stringify({
+              token,
+              expires_at: new Date(Date.now() + 50 * 60_000).toISOString(),
+            }),
+            { status: 201 },
+          );
+        return new Response("", { status: 502 });
+      }),
+    );
+    try {
+      const provider = new GitHubAppRepositoryProvider({
+        appId: "12345",
+        privateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      });
+      let failure: unknown;
+      try {
+        await provider.listInstallationRepositories(2001);
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toMatchObject({
+        stage: "repository_list",
+        category: "provider_unavailable",
+        upstreamStatus: 502,
+      });
+      expect(String(failure)).not.toContain(token);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

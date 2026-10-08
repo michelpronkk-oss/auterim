@@ -1,11 +1,15 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { getEnvironment, isIntegrationConfigured } from "@/lib/env/schema";
-import { GitHubAppRepositoryProvider } from "@/lib/preflight/github-provider";
+import {
+  GitHubAppInstallationError,
+  GitHubAppRepositoryProvider,
+} from "@/lib/preflight/github-provider";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getWorkspaceRole, resolveWorkspaceEntitlementsForService } from "@/lib/billing/server";
 import { recordGrowthFirstPartyEvent } from "@/lib/growth-v2/feedback";
 
 export async function GET(request: Request) {
+  const correlationId = randomUUID();
   const url = new URL(request.url);
   const state = url.searchParams.get("state");
   const installationId = Number(url.searchParams.get("installation_id"));
@@ -58,16 +62,28 @@ export async function GET(request: Request) {
   let repositories: Awaited<
     ReturnType<GitHubAppRepositoryProvider["listInstallationRepositories"]>
   >;
+  const reportProviderFailure = (error: unknown, fallbackStage: string) => {
+    const diagnostic =
+      error instanceof GitHubAppInstallationError
+        ? {
+            stage: error.stage,
+            category: error.category,
+            upstreamStatus: error.upstreamStatus ?? null,
+          }
+        : { stage: fallbackStage, category: "unexpected_safe_failure", upstreamStatus: null };
+    console.warn(
+      "github_installation_callback_provider_failure",
+      JSON.stringify({ correlationId, ...diagnostic }),
+    );
+  };
+  const provider = new GitHubAppRepositoryProvider({
+    appId: environment.GITHUB_APP_ID,
+    privateKey: environment.GITHUB_APP_PRIVATE_KEY,
+  });
   try {
-    const provider = new GitHubAppRepositoryProvider({
-      appId: environment.GITHUB_APP_ID,
-      privateKey: environment.GITHUB_APP_PRIVATE_KEY,
-    });
-    [accountLogin, repositories] = await Promise.all([
-      provider.getInstallationAccount(installationId),
-      provider.listInstallationRepositories(installationId),
-    ]);
+    accountLogin = await provider.getInstallationAccount(installationId);
   } catch (error) {
+    reportProviderFailure(error, "installation_metadata");
     if (error instanceof Error && error.message === "github_repository_limit_exceeded") {
       return Response.json(
         { error: "github_installation_repository_limit_exceeded", maximumRepositories: 500 },
@@ -76,6 +92,30 @@ export async function GET(request: Request) {
     }
     return Response.json({ error: "github_installation_unavailable" }, { status: 503 });
   }
+  console.info(
+    "github_installation_callback_provider_stage",
+    JSON.stringify({ correlationId, stage: "installation_metadata_succeeded" }),
+  );
+  try {
+    repositories = await provider.listInstallationRepositories(installationId);
+  } catch (error) {
+    reportProviderFailure(error, "repository_list");
+    if (error instanceof Error && error.message === "github_repository_limit_exceeded") {
+      return Response.json(
+        { error: "github_installation_repository_limit_exceeded", maximumRepositories: 500 },
+        { status: 422 },
+      );
+    }
+    return Response.json({ error: "github_installation_unavailable" }, { status: 503 });
+  }
+  console.info(
+    "github_installation_callback_provider_stage",
+    JSON.stringify({
+      correlationId,
+      stage: "repository_list_succeeded",
+      repositoryCount: repositories.length,
+    }),
+  );
   if (accountLogin.toLowerCase() !== String(stateRow.github_login).toLowerCase())
     return Response.json({ error: "github_account_mismatch" }, { status: 403 });
 

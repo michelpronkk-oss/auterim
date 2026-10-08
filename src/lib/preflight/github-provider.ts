@@ -12,6 +12,95 @@ import type {
 
 type GitHubResponse<T> = { data: T; response: Response };
 
+export type GitHubAppInstallationFailureStage =
+  "app_jwt" | "installation_metadata" | "installation_token" | "repository_list";
+
+export type GitHubAppInstallationFailureCategory =
+  | "signing_failed"
+  | "app_jwt_rejected"
+  | "installation_token_rejected"
+  | "installation_not_found"
+  | "permission_denied"
+  | "rate_limited"
+  | "provider_unavailable"
+  | "invalid_response"
+  | "installation_unavailable"
+  | "http_error"
+  | "repository_limit_exceeded"
+  | "repository_list_truncated";
+
+/** Safe provider-stage metadata; never includes an upstream response body or credential. */
+export class GitHubAppInstallationError extends Error {
+  readonly stage: GitHubAppInstallationFailureStage;
+  readonly category: GitHubAppInstallationFailureCategory;
+  readonly upstreamStatus?: number;
+
+  constructor(input: {
+    stage: GitHubAppInstallationFailureStage;
+    category: GitHubAppInstallationFailureCategory;
+    upstreamStatus?: number;
+  }) {
+    const suffix = input.upstreamStatus ? `_${input.upstreamStatus}` : "";
+    const message =
+      input.category === "repository_limit_exceeded"
+        ? "github_repository_limit_exceeded"
+        : input.category === "repository_list_truncated"
+          ? "github_repository_list_truncated"
+          : `github_installation_${input.stage}_${input.category}${suffix}`;
+    super(message);
+    this.name = "GitHubAppInstallationError";
+    this.stage = input.stage;
+    this.category = input.category;
+    this.upstreamStatus = input.upstreamStatus;
+  }
+}
+
+function installationHttpCategory(
+  stage: GitHubAppInstallationFailureStage,
+  status: number,
+): GitHubAppInstallationFailureCategory {
+  if (status === 401)
+    return stage === "repository_list" ? "installation_token_rejected" : "app_jwt_rejected";
+  if (status === 403) return "permission_denied";
+  if (status === 404) return "installation_not_found";
+  if (status === 429) return "rate_limited";
+  if (status >= 500) return "provider_unavailable";
+  return "http_error";
+}
+
+function safeInstallationError(
+  stage: GitHubAppInstallationFailureStage,
+  error: unknown,
+): GitHubAppInstallationError {
+  if (error instanceof GitHubAppInstallationError) return error;
+  const message = error instanceof Error ? error.message : "";
+  const statusMatch = /^github_(?:installation|http)_(\d{3})$/.exec(message);
+  if (statusMatch) {
+    const upstreamStatus = Number(statusMatch[1]);
+    return new GitHubAppInstallationError({
+      stage,
+      category: installationHttpCategory(stage, upstreamStatus),
+      upstreamStatus,
+    });
+  }
+  if (message === "github_repository_limit_exceeded") {
+    return new GitHubAppInstallationError({
+      stage,
+      category: "repository_limit_exceeded",
+    });
+  }
+  if (message === "github_repository_list_truncated") {
+    return new GitHubAppInstallationError({
+      stage,
+      category: "repository_list_truncated",
+    });
+  }
+  if (message === "github_invalid_installation_token") {
+    return new GitHubAppInstallationError({ stage, category: "invalid_response" });
+  }
+  return new GitHubAppInstallationError({ stage, category: "provider_unavailable" });
+}
+
 function base64url(value: string | Buffer) {
   return Buffer.from(value).toString("base64url");
 }
@@ -149,6 +238,14 @@ export class GitHubAppRepositoryProvider implements RepositoryProvider {
     this.privateKey = input.privateKey.replaceAll("\\n", "\n");
   }
 
+  private installationAppJwt() {
+    try {
+      return createAppJwt(this.appId, this.privateKey);
+    } catch {
+      throw new GitHubAppInstallationError({ stage: "app_jwt", category: "signing_failed" });
+    }
+  }
+
   private async installationToken(repository: RepositoryTarget) {
     const tokenKey = `${repository.installationId}:${repository.externalId}`;
     const cached = this.tokens.get(tokenKey);
@@ -183,52 +280,105 @@ export class GitHubAppRepositoryProvider implements RepositoryProvider {
   }
 
   private async installationMetadata(installationId: number) {
-    const response = await fetch(`https://api.github.com/app/installations/${installationId}`, {
-      headers: {
-        accept: "application/vnd.github+json",
-        authorization: `Bearer ${createAppJwt(this.appId, this.privateKey)}`,
-        "x-github-api-version": "2022-11-28",
-        "user-agent": "Auterim-Preflight/1.0",
-      },
-      signal: AbortSignal.timeout(12_000),
-      cache: "no-store",
-    });
-    if (!response.ok) throw new Error(`github_installation_${response.status}`);
-    return (await response.json()) as {
-      id: number;
-      account?: { login?: string } | null;
-      suspended_at?: string | null;
-    };
+    let response: Response;
+    try {
+      response = await fetch(`https://api.github.com/app/installations/${installationId}`, {
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `Bearer ${this.installationAppJwt()}`,
+          "x-github-api-version": "2022-11-28",
+          "user-agent": "Auterim-Preflight/1.0",
+        },
+        signal: AbortSignal.timeout(12_000),
+        cache: "no-store",
+      });
+    } catch (error) {
+      throw safeInstallationError("installation_metadata", error);
+    }
+    if (!response.ok) {
+      throw new GitHubAppInstallationError({
+        stage: "installation_metadata",
+        category: installationHttpCategory("installation_metadata", response.status),
+        upstreamStatus: response.status,
+      });
+    }
+    try {
+      const installation = (await response.json()) as {
+        id: number;
+        account?: { login?: string } | null;
+        suspended_at?: string | null;
+      };
+      if (
+        !installation ||
+        installation.id !== installationId ||
+        (installation.account !== null &&
+          installation.account !== undefined &&
+          typeof installation.account.login !== "string")
+      ) {
+        throw new Error("invalid_installation_metadata");
+      }
+      return installation;
+    } catch {
+      throw new GitHubAppInstallationError({
+        stage: "installation_metadata",
+        category: "invalid_response",
+      });
+    }
   }
 
   async getInstallationAccount(installationId: number) {
     const installation = await this.installationMetadata(installationId);
     if (installation.suspended_at || !installation.account?.login)
-      throw new Error("github_installation_unavailable");
+      throw new GitHubAppInstallationError({
+        stage: "installation_metadata",
+        category: "installation_unavailable",
+      });
     return installation.account.login;
   }
 
   async listInstallationRepositories(installationId: number) {
-    const response = await fetch(
-      `https://api.github.com/app/installations/${installationId}/access_tokens`,
-      {
-        method: "POST",
-        headers: {
-          accept: "application/vnd.github+json",
-          authorization: `Bearer ${createAppJwt(this.appId, this.privateKey)}`,
-          "content-type": "application/json",
-          "x-github-api-version": "2022-11-28",
-          "user-agent": "Auterim-Preflight/1.0",
+    let response: Response;
+    try {
+      response = await fetch(
+        `https://api.github.com/app/installations/${installationId}/access_tokens`,
+        {
+          method: "POST",
+          headers: {
+            accept: "application/vnd.github+json",
+            authorization: `Bearer ${this.installationAppJwt()}`,
+            "content-type": "application/json",
+            "x-github-api-version": "2022-11-28",
+            "user-agent": "Auterim-Preflight/1.0",
+          },
+          body: JSON.stringify({ permissions: { contents: "read" } }),
+          signal: AbortSignal.timeout(12_000),
+          cache: "no-store",
         },
-        body: JSON.stringify({ permissions: { contents: "read" } }),
-        signal: AbortSignal.timeout(12_000),
-        cache: "no-store",
-      },
-    );
-    if (!response.ok) throw new Error(`github_installation_token_${response.status}`);
-    const token = (await response.json()) as { token: string; expires_at: string };
-    if (!token.token || !Number.isFinite(Date.parse(token.expires_at)))
-      throw new Error("github_invalid_installation_token");
+      );
+    } catch (error) {
+      throw safeInstallationError("installation_token", error);
+    }
+    if (!response.ok) {
+      throw new GitHubAppInstallationError({
+        stage: "installation_token",
+        category: installationHttpCategory("installation_token", response.status),
+        upstreamStatus: response.status,
+      });
+    }
+    let token: { token?: string; expires_at?: string };
+    try {
+      token = (await response.json()) as { token?: string; expires_at?: string };
+    } catch {
+      throw new GitHubAppInstallationError({
+        stage: "installation_token",
+        category: "invalid_response",
+      });
+    }
+    if (!token.token || !Number.isFinite(Date.parse(token.expires_at ?? "")))
+      throw new GitHubAppInstallationError({
+        stage: "installation_token",
+        category: "invalid_response",
+      });
     type InstallationRepository = {
       id: number;
       name: string;
@@ -241,16 +391,50 @@ export class GitHubAppRepositoryProvider implements RepositoryProvider {
     const repositories: InstallationRepository[] = [];
     let totalCount = 0;
     for (let page = 1; page <= 5; page++) {
-      const result = await githubJson<{
+      let result: GitHubResponse<{
         total_count: number;
         repositories: InstallationRepository[];
-      }>(`https://api.github.com/installation/repositories?per_page=100&page=${page}`, token.token);
+      }>;
+      try {
+        result = await githubJson<{
+          total_count: number;
+          repositories: InstallationRepository[];
+        }>(
+          `https://api.github.com/installation/repositories?per_page=100&page=${page}`,
+          token.token,
+        );
+      } catch (error) {
+        throw safeInstallationError("repository_list", error);
+      }
+      if (
+        !Number.isSafeInteger(result.data?.total_count) ||
+        result.data.total_count < 0 ||
+        !Array.isArray(result.data?.repositories) ||
+        result.data.repositories.some(
+          (repository) =>
+            !Number.isSafeInteger(repository?.id) ||
+            typeof repository?.owner?.login !== "string" ||
+            typeof repository?.name !== "string" ||
+            typeof repository?.default_branch !== "string" ||
+            typeof repository?.private !== "boolean" ||
+            typeof repository?.archived !== "boolean",
+        )
+      ) {
+        throw new GitHubAppInstallationError({
+          stage: "repository_list",
+          category: "invalid_response",
+        });
+      }
       if (page === 1) totalCount = result.data.total_count;
       if (totalCount > 500) throw new Error("github_repository_limit_exceeded");
       repositories.push(...result.data.repositories);
       if (repositories.length >= totalCount || result.data.repositories.length === 0) break;
     }
-    if (repositories.length < totalCount) throw new Error("github_repository_list_truncated");
+    if (repositories.length < totalCount)
+      throw new GitHubAppInstallationError({
+        stage: "repository_list",
+        category: "repository_list_truncated",
+      });
     return repositories;
   }
 
