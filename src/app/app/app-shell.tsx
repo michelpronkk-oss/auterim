@@ -245,7 +245,12 @@ export function AppShell({ children }: { children: ReactNode }) {
   }, [api, session, workspaceId, pathname]);
 
   useEffect(() => {
-    if (bootstrapState === "NEEDS_ONBOARDING" && pathname !== "/app/onboarding")
+    const isCliConnectRoute = pathname === "/app/cli/connect";
+    if (
+      bootstrapState === "NEEDS_ONBOARDING" &&
+      pathname !== "/app/onboarding" &&
+      !isCliConnectRoute
+    )
       router.replace("/app/onboarding");
     if (bootstrapState === "READY" && pathname === "/app/onboarding") router.replace("/app");
   }, [bootstrapState, pathname, router]);
@@ -326,9 +331,30 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       </main>
     );
-  if (bootstrapState === "NEEDS_ONBOARDING" && pathname !== "/app/onboarding")
+  if (bootstrapState === "NEEDS_ONBOARDING") {
+    if (pathname === "/app/onboarding") return <>{children}</>;
+    if (
+      pathname === "/app/cli/connect" &&
+      workspaceId &&
+      workspaces.some((workspace) => workspace.workspaceId === workspaceId)
+    )
+      return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
+    if (pathname === "/app/cli/connect")
+      return (
+        <main className="app-auth">
+          <div className="auth-card">
+            <span className="brand-mark">A</span>
+            <p className="eyebrow">AUTERIM CLI</p>
+            <h1>Workspace access required.</h1>
+            <p>Sign in with an account that belongs to a workspace to review this connection.</p>
+            <Link className="button-primary" href="/app/onboarding">
+              Continue setup
+            </Link>
+          </div>
+        </main>
+      );
     return <main className="app-loading">Opening your protection setup…</main>;
-  if (bootstrapState === "NEEDS_ONBOARDING") return <>{children}</>;
+  }
   const active = (href: string) =>
     href === "/app" ? pathname === href : pathname === href || pathname.startsWith(`${href}/`);
   return (

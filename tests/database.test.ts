@@ -365,6 +365,24 @@ const workspaceMemberManagementMigration = await readFile(
   ),
   "utf8",
 );
+const cliProductDiscoveryMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261120000000_m156_cli_product_discovery.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
+const cliDraftProductOnboardingMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261121000000_m156_cli_draft_product_onboarding.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase(
   applyCompanySurfaceMigration = true,
@@ -433,6 +451,8 @@ async function makeDatabase(
   if (applyProductRepositoryProtectionMigration) await db.exec(onboardingV2Migration);
   if (applyProductRepositoryProtectionMigration) await db.exec(workspaceMemberManagementMigration);
   await db.exec(onboardingFunnelEventsMigration);
+  await db.exec(cliProductDiscoveryMigration);
+  await db.exec(cliDraftProductOnboardingMigration);
   return db;
 }
 
@@ -822,6 +842,487 @@ describe("Auterim migration and monitoring transaction", () => {
     ).rejects.toBeTruthy();
     await membershipDb.exec("reset role");
     await membershipDb.close();
+  });
+
+  it("keeps M15.6 scan history Product-scoped, member-readable, and server-write-only", async () => {
+    const cliDb = await makeDatabase();
+    const userA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const userB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    await cliDb.query("insert into auth.users(id) values($1),($2)", [userA, userB]);
+    const expiredRateLimitBucket = "abcdef0123456789".repeat(4);
+    await cliDb.query(
+      `insert into public.public_rate_limit_buckets(policy,client_fingerprint,window_start,request_count)
+       values('cli_poll',$1,now()-interval '3 days',1)`,
+      [expiredRateLimitBucket],
+    );
+    await cliDb.query("select * from public.claim_public_rate_limit('cli_poll',$1,100,300,now())", [
+      "1".repeat(64),
+    ]);
+    expect(
+      (
+        await cliDb.query(
+          "select 1 from public.public_rate_limit_buckets where client_fingerprint=$1",
+          [expiredRateLimitBucket],
+        )
+      ).rows,
+    ).toHaveLength(0);
+    await cliDb.query("select set_config('request.jwt.claim.sub',$1,false)", [userA]);
+    await cliDb.exec("set role authenticated");
+    const workspaceA = (
+      await cliDb.query<{ id: string }>("select public.create_workspace('CLI Tenant A') as id")
+    ).rows[0]!.id;
+    await cliDb.exec("reset role");
+    await cliDb.query("select set_config('request.jwt.claim.sub',$1,false)", [userB]);
+    await cliDb.exec("set role authenticated");
+    const workspaceB = (
+      await cliDb.query<{ id: string }>("select public.create_workspace('CLI Tenant B') as id")
+    ).rows[0]!.id;
+    await cliDb.exec("reset role");
+    const companyId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const productId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    await cliDb.query(
+      "insert into public.companies(id,workspace_id,name,slug) values($1,$2,'Tenant A','tenant-a')",
+      [companyId, workspaceA],
+    );
+    await cliDb.query(
+      "insert into public.workspace_products(id,workspace_id,name,slug,status) values($1,$2,'Product A','product-a','draft')",
+      [productId, workspaceA],
+    );
+    const scanId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    await cliDb.query(
+      `insert into public.cli_scan_runs(workspace_id,company_id,product_id,scan_id,payload_digest,
+      schema_version,scanner_version,registry_version,status,project_name,observation_count)
+      values($1,$2,$3,$4,$5,'1.0.0','0.1.0','m15.6-provider-map-1','complete','sample',0)`,
+      [workspaceA, companyId, productId, scanId, "a".repeat(64)],
+    );
+
+    await cliDb.query("select set_config('request.jwt.claim.sub',$1,false)", [userA]);
+    await cliDb.exec("set role authenticated");
+    expect(
+      (await cliDb.query("select id from public.cli_scan_runs where product_id=$1", [productId]))
+        .rows,
+    ).toHaveLength(1);
+    await expect(
+      cliDb.query("delete from public.cli_scan_runs where product_id=$1", [productId]),
+    ).rejects.toThrow();
+    await expect(cliDb.query("select * from private.cli_connect_sessions")).rejects.toThrow();
+    await cliDb.exec("reset role");
+
+    await cliDb.query("select set_config('request.jwt.claim.sub',$1,false)", [userB]);
+    await cliDb.exec("set role authenticated");
+    expect(
+      (await cliDb.query("select id from public.cli_scan_runs where product_id=$1", [productId]))
+        .rows,
+    ).toHaveLength(0);
+    await cliDb.exec("reset role; set role anon");
+    await expect(cliDb.query("select * from public.cli_observations")).rejects.toThrow();
+    await cliDb.exec("reset role");
+
+    await expect(
+      cliDb.query(
+        `insert into public.cli_scan_runs(workspace_id,company_id,product_id,scan_id,payload_digest,
+      schema_version,scanner_version,registry_version,status,project_name,observation_count)
+      values($1,$2,$3,$4,$5,'1.0.0','0.1.0','m15.6-provider-map-1','complete','forged',0)`,
+        [workspaceB, companyId, productId, "ffffffff-ffff-4fff-8fff-ffffffffffff", "b".repeat(64)],
+      ),
+    ).rejects.toThrow();
+    const policy = await cliDb.query<{ row_security: boolean }>(
+      `select c.relrowsecurity as row_security from pg_class c where c.oid='public.cli_observations'::regclass`,
+    );
+    expect(policy.rows[0]?.row_security).toBe(true);
+
+    await cliDb.query(
+      "update public.workspace_products set status='protected',protected_at=now() where id=$1",
+      [productId],
+    );
+    await cliDb.query(
+      "insert into public.product_onboarding_progress(workspace_id,product_id,company_id) values($1,$2,$3)",
+      [workspaceA, productId, companyId],
+    );
+    const stripeId = (
+      await cliDb.query<{ id: string }>(
+        "select id from public.dependency_catalog where slug='stripe'",
+      )
+    ).rows[0]!.id;
+    const confirmedStripeId = (
+      await cliDb.query<{ id: string }>(
+        `insert into public.workspace_dependencies(workspace_id,protected_product_id,dependency_id,selected_by,origin,monitoring_enabled,protection_started_at)
+         values($1,$2,$3,$4,'manual',true,now()) returning id`,
+        [workspaceA, productId, stripeId, userA],
+      )
+    ).rows[0]!.id;
+    await cliDb.query("select set_config('request.jwt.claim.sub',$1,false)", [userA]);
+    await cliDb.exec("set role authenticated");
+    const coverage = await cliDb.query<{ provider_id: string; enabled_source_count: bigint }>(
+      "select * from public.get_cli_product_provider_coverage($1,$2,array[$3]::uuid[])",
+      [workspaceA, productId, stripeId],
+    );
+    expect(coverage.rows).toHaveLength(1);
+    expect(Number(coverage.rows[0]?.enabled_source_count)).toBeGreaterThanOrEqual(0);
+    await expect(
+      cliDb.query(
+        "select * from public.get_cli_product_provider_coverage($1,$2,array[$3]::uuid[])",
+        [workspaceB, productId, stripeId],
+      ),
+    ).rejects.toThrow();
+    await expect(
+      cliDb.query("select * from public.get_cli_product_provider_coverage($1,$2,$3::uuid[])", [
+        workspaceA,
+        productId,
+        Array.from({ length: 501 }, () => stripeId),
+      ]),
+    ).rejects.toThrow();
+    await cliDb.exec("reset role");
+    const sessionId = "11111111-1111-4111-8111-111111111111";
+    const userCodeHash = "1".repeat(64);
+    const pollHash = "2".repeat(64);
+    const credentialHash = "3".repeat(64);
+    await cliDb.query("select * from public.create_cli_connect_session($1,$2,$3,$4)", [
+      sessionId,
+      userCodeHash,
+      pollHash,
+      credentialHash,
+    ]);
+    await expect(
+      cliDb.query("select * from public.approve_cli_connect_session($1,$2,$3,$4,$5)", [
+        userCodeHash,
+        userB,
+        workspaceB,
+        companyId,
+        productId,
+      ]),
+    ).rejects.toThrow();
+    const approved = await cliDb.query<{ state: string }>(
+      "select state from public.approve_cli_connect_session($1,$2,$3,$4,$5)",
+      [userCodeHash, userA, workspaceA, companyId, productId],
+    );
+    expect(approved.rows[0]?.state).toBe("approved");
+    await expect(
+      cliDb.query("select * from public.redeem_cli_connect_session($1,$2)", [
+        sessionId,
+        "f".repeat(64),
+      ]),
+    ).rejects.toThrow();
+    const redeemed = await cliDb.query<{ state: string; credential_hash: string | null }>(
+      "select state,credential_hash from public.redeem_cli_connect_session($1,$2)",
+      [sessionId, pollHash],
+    );
+    expect(redeemed.rows[0]).toEqual({ state: "approved", credential_hash: credentialHash });
+    const replayed = await cliDb.query<{ state: string; credential_hash: string | null }>(
+      "select state,credential_hash from public.redeem_cli_connect_session($1,$2)",
+      [sessionId, pollHash],
+    );
+    expect(replayed.rows[0]).toEqual({ state: "redeemed", credential_hash: null });
+    const payload = {
+      schemaVersion: "1.0.0",
+      scannerVersion: "0.1.0",
+      registryVersion: "m15.6-provider-map-1",
+      scanId: "22222222-2222-4222-8222-222222222222",
+      status: "complete",
+      projectSummary: { rootName: "sample", git: {} },
+      stats: { totalBytesRead: 32, observations: 2, truncated: false },
+      observations: [
+        {
+          id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          evidenceFamily: "package_manifest",
+          normalizedIdentifier: "stripe",
+          reasonCode: "known_package_provider",
+          confidence: 0.9,
+          safeRelativePath: "package.json",
+          subproject: null,
+          metadata: {},
+        },
+        {
+          id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          evidenceFamily: "package_manifest",
+          normalizedIdentifier: "@example/private-sdk",
+          reasonCode: "unmapped_package",
+          confidence: 0.5,
+          safeRelativePath: "package.json",
+          subproject: null,
+          metadata: {},
+        },
+      ],
+    };
+    const draftProductId = "77777777-7777-4777-8777-777777777777";
+    await cliDb.query(
+      "insert into public.workspace_products(id,workspace_id,name,slug,status) values($1,$2,'Draft Product','draft-product','draft')",
+      [draftProductId, workspaceA],
+    );
+    await cliDb.query(
+      "insert into public.product_onboarding_progress(workspace_id,product_id,company_id,created_by) values($1,$2,$3,$4)",
+      [workspaceA, draftProductId, companyId, userA],
+    );
+    await cliDb.query(
+      "insert into public.workspace_onboarding(workspace_id,company_id,state) values($1,$2,'company_created') on conflict (workspace_id) do nothing",
+      [workspaceA, companyId],
+    );
+    const draftSessionId = "88888888-8888-4888-8888-888888888888";
+    const draftUserCodeHash = "d".repeat(64);
+    const draftPollHash = "e".repeat(64);
+    const draftCredentialHash = "f".repeat(64);
+    await cliDb.query("select * from public.create_cli_connect_session($1,$2,$3,$4)", [
+      draftSessionId,
+      draftUserCodeHash,
+      draftPollHash,
+      draftCredentialHash,
+    ]);
+    expect(
+      (
+        await cliDb.query(
+          `select 1 from public.workspace_products p
+           join public.product_onboarding_progress o on o.product_id=p.id and o.workspace_id=p.workspace_id
+           join public.workspace_members m on m.workspace_id=p.workspace_id
+           where p.id=$1 and p.status='draft' and o.company_id=$2 and m.user_id=$3 and m.role='owner'`,
+          [draftProductId, companyId, userA],
+        )
+      ).rows,
+    ).toHaveLength(1);
+    const draftApproval = await cliDb.query<{ state: string }>(
+      "select state from public.approve_cli_connect_session($1,$2,$3,$4,$5)",
+      [draftUserCodeHash, userA, workspaceA, companyId, draftProductId],
+    );
+    expect(draftApproval.rows[0]?.state).toBe("approved");
+    await cliDb.query("select * from public.redeem_cli_connect_session($1,$2)", [
+      draftSessionId,
+      draftPollHash,
+    ]);
+    const draftPayload = {
+      ...payload,
+      scanId: "99999999-9999-4999-8999-999999999998",
+      observations: [payload.observations[0]!],
+      stats: { ...payload.stats, observations: 1 },
+    };
+    const draftProviderMatch = JSON.stringify([
+      { observationId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", dependencyId: stripeId },
+    ]);
+    const draftIngestion = await cliDb.query<{ result: Record<string, unknown> }>(
+      "select public.ingest_cli_discovery($1,$2,$3::jsonb,$4::jsonb) as result",
+      [draftCredentialHash, "c".repeat(64), JSON.stringify(draftPayload), draftProviderMatch],
+    );
+    expect(draftIngestion.rows[0]?.result).toMatchObject({
+      scanId: draftPayload.scanId,
+      idempotent: false,
+      observations: 1,
+    });
+    expect(
+      (
+        await cliDb.query<{ status: string }>(
+          "select status from public.workspace_products where id=$1",
+          [draftProductId],
+        )
+      ).rows[0]?.status,
+    ).toBe("draft");
+    expect(
+      (
+        await cliDb.query(
+          "select state,activated_at from public.workspace_onboarding where workspace_id=$1",
+          [workspaceA],
+        )
+      ).rows[0],
+    ).toEqual({ state: "company_created", activated_at: null });
+    expect(
+      (
+        await cliDb.query(
+          "select id from public.workspace_dependencies where protected_product_id=$1",
+          [draftProductId],
+        )
+      ).rows,
+    ).toHaveLength(0);
+    expect(
+      (
+        await cliDb.query(
+          `select provider_state,provider_id,workspace_dependency_id
+             from public.cli_observations
+            where product_id=$1 and normalized_identifier='stripe'`,
+          [draftProductId],
+        )
+      ).rows,
+    ).toEqual([{ provider_state: "known", provider_id: stripeId, workspace_dependency_id: null }]);
+
+    const providerMatches = JSON.stringify([
+      { observationId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", dependencyId: stripeId },
+    ]);
+    const ingested = await cliDb.query<{ result: Record<string, unknown> }>(
+      "select public.ingest_cli_discovery($1,$2,$3::jsonb,$4::jsonb) as result",
+      [credentialHash, "a".repeat(64), JSON.stringify(payload), providerMatches],
+    );
+    expect(ingested.rows[0]?.result).toMatchObject({
+      scanId: payload.scanId,
+      idempotent: false,
+      observations: 2,
+    });
+    const retried = await cliDb.query<{ result: Record<string, unknown> }>(
+      "select public.ingest_cli_discovery($1,$2,$3::jsonb,$4::jsonb) as result",
+      [credentialHash, "a".repeat(64), JSON.stringify(payload), providerMatches],
+    );
+    expect(retried.rows[0]?.result).toMatchObject({ scanId: payload.scanId, idempotent: true });
+    await expect(
+      cliDb.query("select public.ingest_cli_discovery($1,$2,$3::jsonb,$4::jsonb)", [
+        credentialHash,
+        "b".repeat(64),
+        JSON.stringify(payload),
+        providerMatches,
+      ]),
+    ).rejects.toThrow();
+    expect(
+      (await cliDb.query("select id from public.cli_scan_runs where product_id=$1", [productId]))
+        .rows,
+    ).toHaveLength(2);
+
+    const storedCliObservations = await cliDb.query<{
+      normalized_identifier: string;
+      provider_state: string;
+      provider_id: string | null;
+      workspace_dependency_id: string | null;
+    }>(
+      "select normalized_identifier,provider_state,provider_id,workspace_dependency_id from public.cli_observations where product_id=$1 order by normalized_identifier",
+      [productId],
+    );
+    expect(storedCliObservations.rows).toEqual([
+      {
+        normalized_identifier: "@example/private-sdk",
+        provider_state: "unknown",
+        provider_id: null,
+        workspace_dependency_id: null,
+      },
+      {
+        normalized_identifier: "stripe",
+        provider_state: "known",
+        provider_id: stripeId,
+        workspace_dependency_id: confirmedStripeId,
+      },
+    ]);
+    expect(
+      (
+        await cliDb.query(
+          "select id from public.workspace_dependencies where protected_product_id=$1",
+          [productId],
+        )
+      ).rows,
+    ).toHaveLength(1);
+
+    const secondSessionId = "33333333-3333-4333-8333-333333333333";
+    const secondCodeHash = "4".repeat(64);
+    const secondPollHash = "5".repeat(64);
+    const secondCredentialHash = "6".repeat(64);
+    await cliDb.query("select * from public.create_cli_connect_session($1,$2,$3,$4)", [
+      secondSessionId,
+      secondCodeHash,
+      secondPollHash,
+      secondCredentialHash,
+    ]);
+    await cliDb.query("select * from public.approve_cli_connect_session($1,$2,$3,$4,$5)", [
+      secondCodeHash,
+      userA,
+      workspaceA,
+      companyId,
+      productId,
+    ]);
+    await cliDb.query("select * from public.redeem_cli_connect_session($1,$2)", [
+      secondSessionId,
+      secondPollHash,
+    ]);
+    const secondPayload = {
+      ...payload,
+      scanId: "44444444-4444-4444-8444-444444444444",
+      status: "partial",
+      observations: [payload.observations[0]!],
+      stats: { ...payload.stats, observations: 1, truncated: true },
+    };
+    await cliDb.query("select public.ingest_cli_discovery($1,$2,$3::jsonb,$4::jsonb)", [
+      secondCredentialHash,
+      "d".repeat(64),
+      JSON.stringify(secondPayload),
+      providerMatches,
+    ]);
+    expect(
+      (
+        await cliDb.query(
+          "select scan_id from public.cli_scan_runs where product_id=$1 order by received_at,id",
+          [productId],
+        )
+      ).rows,
+    ).toHaveLength(3);
+    expect(
+      (
+        await cliDb.query(
+          "select id from public.cli_observations where scan_run_id=(select id from public.cli_scan_runs where scan_id=$1)",
+          [payload.scanId],
+        )
+      ).rows,
+    ).toHaveLength(2);
+
+    const revokedSessionId = "55555555-5555-4555-8555-555555555555";
+    const revokedCodeHash = "7".repeat(64);
+    const revokedPollHash = "8".repeat(64);
+    const revokedCredentialHash = "9".repeat(64);
+    await cliDb.query("select * from public.create_cli_connect_session($1,$2,$3,$4)", [
+      revokedSessionId,
+      revokedCodeHash,
+      revokedPollHash,
+      revokedCredentialHash,
+    ]);
+    await cliDb.query("select * from public.approve_cli_connect_session($1,$2,$3,$4,$5)", [
+      revokedCodeHash,
+      userA,
+      workspaceA,
+      companyId,
+      productId,
+    ]);
+    await cliDb.query(
+      "update private.cli_connect_sessions set credential_expires_at=now()-interval '1 second' where id=$1",
+      [revokedSessionId],
+    );
+    const expiredCredential = await cliDb.query<{ state: string; credential_hash: string | null }>(
+      "select state,credential_hash from public.redeem_cli_connect_session($1,$2)",
+      [revokedSessionId, revokedPollHash],
+    );
+    expect(expiredCredential.rows[0]).toMatchObject({ state: "expired", credential_hash: null });
+    const memberRevokedSessionId = "66666666-6666-4666-8666-666666666666";
+    const memberRevokedCodeHash = "a".repeat(64);
+    const memberRevokedPollHash = "b".repeat(64);
+    const memberRevokedCredentialHash = "c".repeat(64);
+    await cliDb.query("select * from public.create_cli_connect_session($1,$2,$3,$4)", [
+      memberRevokedSessionId,
+      memberRevokedCodeHash,
+      memberRevokedPollHash,
+      memberRevokedCredentialHash,
+    ]);
+    await cliDb.query("select * from public.approve_cli_connect_session($1,$2,$3,$4,$5)", [
+      memberRevokedCodeHash,
+      userA,
+      workspaceA,
+      companyId,
+      productId,
+    ]);
+    await cliDb.query("select * from public.redeem_cli_connect_session($1,$2)", [
+      memberRevokedSessionId,
+      memberRevokedPollHash,
+    ]);
+    await cliDb.query("delete from public.workspace_members where workspace_id=$1 and user_id=$2", [
+      workspaceA,
+      userA,
+    ]);
+    await expect(
+      cliDb.query("select public.ingest_cli_discovery($1,$2,$3::jsonb,$4::jsonb)", [
+        memberRevokedCredentialHash,
+        "f".repeat(64),
+        JSON.stringify({ ...payload, scanId: "99999999-9999-4999-8999-999999999999" }),
+        "[]",
+      ]),
+    ).rejects.toThrow();
+    await cliDb.query("update public.workspaces set created_by=$1 where id=$2", [
+      userB,
+      workspaceA,
+    ]);
+    await cliDb.query(
+      "update public.workspace_dependencies set selected_by=$1 where workspace_id=$2",
+      [userB, workspaceA],
+    );
+    await expect(cliDb.query("delete from auth.users where id=$1", [userA])).resolves.toBeDefined();
+
+    await cliDb.close();
   });
 
   it("keeps connector credentials service-only and rejects cross-workspace connector mutations", async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertM15LocalAcceptanceEnabled,
   assertM15LocalSupabaseBinding,
+  assertM15LocalSupabaseUrlsMatch,
 } from "@/lib/m15/local-supabase-binding";
 import { parseM15LocalSupabaseCredentials } from "@/lib/m15/local-supabase-credentials";
 
@@ -11,9 +12,9 @@ describe("M15 local Supabase binding guard", () => {
       "http://127.0.0.1:65431",
       "http://localhost:65431",
       "http://[::1]:65431",
-      "http://127.0.0.1:57000",
-      "http://localhost:57000",
-      "http://[::1]:57000",
+      "http://127.0.0.1:64131",
+      "http://localhost:64131",
+      "http://[::1]:64131",
     ]) {
       expect(() =>
         assertM15LocalSupabaseBinding({ enabled: "1", nodeEnv: "development", url }),
@@ -23,8 +24,11 @@ describe("M15 local Supabase binding guard", () => {
 
   it.each([
     "https://lnljaacbptrubppoypaz.supabase.co",
-    "http://127.0.0.1:54321",
-    "http://127.0.0.1:57000/other",
+    "http://127.0.0.1",
+    "http://0.0.0.0:64131",
+    "https://127.0.0.1:64131",
+    "http://192.168.1.10:64131",
+    "http://127.0.0.1:64131/other",
     "http://127.0.0.1:65431/other",
     "http://127.0.0.1:65431?redirect=outside",
     "http://user:password@127.0.0.1:65431",
@@ -83,6 +87,18 @@ describe("M15 local Supabase binding guard", () => {
       url: "http://127.0.0.1:65431",
       secretKey: "local-test-secret-key-material",
     });
+  });
+
+  it("requires browser and server Supabase clients to use the same exact local target", () => {
+    expect(() =>
+      assertM15LocalSupabaseUrlsMatch("http://127.0.0.1:64131", "http://127.0.0.1:64131"),
+    ).not.toThrow();
+    expect(() =>
+      assertM15LocalSupabaseUrlsMatch(
+        "http://127.0.0.1:64131",
+        "https://lnljaacbptrubppoypaz.supabase.co",
+      ),
+    ).toThrow("m15_local_worker_supabase_target_mismatch");
   });
 
   it("fails closed for hosted targets, production, and missing credentials", () => {

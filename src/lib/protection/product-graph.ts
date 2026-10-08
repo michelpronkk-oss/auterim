@@ -12,6 +12,7 @@ import { getProductRepositoryProtection } from "@/lib/repositories/product-prote
 const MAX_DEPENDENCIES = 50;
 const MAX_SOURCES = 500;
 const MAX_EVIDENCE_ROWS = 500;
+const MAX_LOCAL_OBSERVATIONS = 500;
 
 type DependencyRow = {
   id: string;
@@ -72,6 +73,110 @@ type FindingRow = {
   verification: string;
   observed_at: string;
 };
+type CliScanRow = {
+  id: string;
+  scan_id: string;
+  status: string;
+  received_at: string;
+  observation_count: number;
+  project_name: string;
+  project_identity: Record<string, unknown>;
+};
+type CliObservationRow = {
+  id: string;
+  scan_run_id: string;
+  observation_id: string;
+  evidence_family: string;
+  normalized_identifier: string;
+  reason_code: string;
+  confidence: number;
+  provider_state: string;
+  safe_relative_path: string | null;
+  subproject: string | null;
+  safe_metadata: Record<string, unknown>;
+  provider_id: string | null;
+  workspace_dependency_id: string | null;
+  dependency_catalog: { name: string; slug: string } | Array<{ name: string; slug: string }> | null;
+};
+
+export function cliScanComparisonState(input: {
+  latest: { status: string; observationCount: number } | null;
+  latestRows: number;
+  previous: { status: string; observationCount: number } | null;
+  previousRows: number;
+}) {
+  if (!input.previous) return "no_previous_scan" as const;
+  if (
+    !input.latest ||
+    input.latest.status !== "complete" ||
+    input.previous.status !== "complete" ||
+    input.latest.observationCount > input.latestRows ||
+    input.previous.observationCount > input.previousRows
+  )
+    return "incomplete" as const;
+  return "complete" as const;
+}
+
+export function cliObservationChange(input: {
+  comparisonState: "no_previous_scan" | "complete" | "incomplete";
+  previousExists: boolean;
+  changed: boolean;
+}) {
+  if (input.comparisonState === "incomplete") return "comparison_incomplete" as const;
+  if (input.comparisonState === "no_previous_scan") return "first_observed" as const;
+  if (!input.previousExists) return "added" as const;
+  return input.changed ? ("changed" as const) : ("unchanged" as const);
+}
+
+export function cliCatalogCoverage(input: {
+  providerId: string | null;
+  sourceCounts: ReadonlyMap<string, number>;
+  truncated: boolean;
+}) {
+  if (!input.providerId)
+    return { authoritativeSourcesAvailable: null, state: "unknown_provider" as const };
+  const count = input.sourceCounts.get(input.providerId);
+  if (count === undefined && input.truncated)
+    return { authoritativeSourcesAvailable: null, state: "not_evaluated_due_to_bound" as const };
+  const available = count ?? 0;
+  return {
+    authoritativeSourcesAvailable: available,
+    state: available > 0 ? ("catalog_sources_available" as const) : ("no_catalog_sources" as const),
+  };
+}
+
+export function cliMonitoringState(input: {
+  dependencyId: string | null;
+  monitoringEnabled: boolean | undefined;
+  dependenciesTruncated: boolean;
+  enabledSources: number | null;
+}) {
+  if (!input.dependencyId) return "not_a_confirmed_dependency" as const;
+  if (input.monitoringEnabled === undefined)
+    return input.dependenciesTruncated
+      ? ("not_evaluated_due_to_dependency_bound" as const)
+      : ("confirmed_dependency_unavailable" as const);
+  if (!input.monitoringEnabled) return "monitoring_disabled" as const;
+  if (input.enabledSources === null) return "coverage_not_evaluated" as const;
+  return input.enabledSources > 0
+    ? ("monitoring_enabled_sources_available" as const)
+    : ("no_enabled_authoritative_sources" as const);
+}
+
+export function cliDependencyConfirmation(input: {
+  providerId: string | null;
+  persistedWorkspaceDependencyId: string | null;
+  dependencies: ReadonlyArray<{ id: string; dependency_id: string }>;
+}) {
+  if (!input.providerId)
+    return { confirmedDependencyId: null, state: "unknown_provider_review_only" as const };
+  const dependency =
+    input.dependencies.find((item) => item.id === input.persistedWorkspaceDependencyId) ??
+    input.dependencies.find((item) => item.dependency_id === input.providerId);
+  return dependency
+    ? { confirmedDependencyId: dependency.id, state: "confirmed_for_product" as const }
+    : { confirmedDependencyId: null, state: "needs_confirmation" as const };
+}
 
 export async function getProductProtectionGraph(
   client: SupabaseClient,
@@ -91,7 +196,7 @@ export async function getProductProtectionGraph(
   if (productError) throw new Error("product_protection_graph_unavailable");
   if (!product) return null;
 
-  const [dependencyResult, repositoryGraph] = await Promise.all([
+  const [dependencyResult, repositoryGraph, cliRunResult] = await Promise.all([
     client
       .from("workspace_dependencies")
       .select(
@@ -104,14 +209,83 @@ export async function getProductProtectionGraph(
       .order("id", { ascending: true })
       .limit(MAX_DEPENDENCIES + 1),
     getProductRepositoryProtection(client, input),
+    client
+      .from("cli_scan_runs")
+      .select("id,scan_id,status,received_at,observation_count,project_name,project_identity")
+      .eq("workspace_id", workspaceId)
+      .eq("product_id", productId)
+      .order("received_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(2),
   ]);
-  if (dependencyResult.error) throw new Error("product_protection_graph_unavailable");
+  if (dependencyResult.error || cliRunResult.error)
+    throw new Error("product_protection_graph_unavailable");
   if (!repositoryGraph) return null;
 
   const rawDependencies = (dependencyResult.data ?? []) as DependencyRow[];
   const dependenciesTruncated = rawDependencies.length > MAX_DEPENDENCIES;
   const dependencies = rawDependencies.slice(0, MAX_DEPENDENCIES);
   const dependencyIds = dependencies.map((dependency) => dependency.id);
+  const cliRuns = (cliRunResult.data ?? []) as CliScanRow[];
+  const latestCliRun = cliRuns[0] ?? null;
+  const previousCliRun = cliRuns[1] ?? null;
+  const readCliObservations = (runId: string | null) =>
+    runId
+      ? client
+          .from("cli_observations")
+          .select(
+            "id,scan_run_id,observation_id,evidence_family,normalized_identifier,reason_code,confidence,provider_state,safe_relative_path,subproject,safe_metadata,provider_id,workspace_dependency_id,dependency_catalog(name,slug)",
+          )
+          .eq("workspace_id", workspaceId)
+          .eq("product_id", productId)
+          .eq("scan_run_id", runId)
+          .order("evidence_family")
+          .order("normalized_identifier")
+          .limit(MAX_LOCAL_OBSERVATIONS)
+      : Promise.resolve({ data: [], error: null });
+  const [latestCliObservationResult, previousCliObservationResult] = await Promise.all([
+    readCliObservations(latestCliRun?.id ?? null),
+    readCliObservations(previousCliRun?.id ?? null),
+  ]);
+  if (latestCliObservationResult.error || previousCliObservationResult.error)
+    throw new Error("product_protection_graph_unavailable");
+  const cliObservations = (latestCliObservationResult.data ?? []) as CliObservationRow[];
+  const previousCliObservations = (previousCliObservationResult.data ?? []) as CliObservationRow[];
+  const latestCliObservationsTruncated =
+    (latestCliRun?.observation_count ?? 0) > cliObservations.length;
+  const previousCliObservationsTruncated =
+    (previousCliRun?.observation_count ?? 0) > previousCliObservations.length;
+  const cliComparisonState = cliScanComparisonState({
+    latest: latestCliRun
+      ? { status: latestCliRun.status, observationCount: latestCliRun.observation_count }
+      : null,
+    latestRows: cliObservations.length,
+    previous: previousCliRun
+      ? { status: previousCliRun.status, observationCount: previousCliRun.observation_count }
+      : null,
+    previousRows: previousCliObservations.length,
+  });
+  const allCliObservations = [...cliObservations, ...previousCliObservations];
+  const cliProviderIds = [
+    ...new Set(allCliObservations.flatMap((row) => (row.provider_id ? [row.provider_id] : []))),
+  ];
+  const boundedCliProviderIds = cliProviderIds.slice(0, 500).sort();
+  const cliCoverageResult = boundedCliProviderIds.length
+    ? await client.rpc("get_cli_product_provider_coverage", {
+        p_workspace_id: workspaceId,
+        p_product_id: productId,
+        p_provider_ids: boundedCliProviderIds,
+      })
+    : { data: [], error: null };
+  if (cliCoverageResult.error) throw new Error("product_protection_graph_unavailable");
+  const cliCoverageRows = (cliCoverageResult.data ?? []) as {
+    provider_id: string;
+    enabled_source_count: number | string;
+  }[];
+  const cliSourcesByProvider = new Map<string, number>(
+    cliCoverageRows.map((row) => [row.provider_id, Number(row.enabled_source_count)]),
+  );
+  const cliCoverageTruncated = cliProviderIds.length > boundedCliProviderIds.length;
   // Product coverage counts only dependencies whose monitoring is enabled. Keep
   // disabled dependencies in the graph for transparency, but do not report
   // their catalog sources as protected coverage.
@@ -483,6 +657,119 @@ export async function getProductProtectionGraph(
               ? "some_sources_have_snapshot"
               : "no_global_baseline_observed",
       truncated: dependenciesTruncated || sourcesTruncated,
+    },
+    localDiscovery: {
+      semantics: "detected_locally_unconfirmed",
+      latestScan: latestCliRun
+        ? {
+            scanId: latestCliRun.scan_id,
+            status: latestCliRun.status,
+            receivedAt: latestCliRun.received_at,
+            projectName: latestCliRun.project_name,
+            observationCount: latestCliRun.observation_count,
+            projectIdentity: latestCliRun.project_identity,
+          }
+        : null,
+      previousScan: cliRuns[1]
+        ? {
+            scanId: cliRuns[1].scan_id,
+            status: cliRuns[1].status,
+            receivedAt: cliRuns[1].received_at,
+          }
+        : null,
+      observations: cliObservations.map((row) => {
+        const catalog = Array.isArray(row.dependency_catalog)
+          ? row.dependency_catalog[0]
+          : row.dependency_catalog;
+        const confirmation = cliDependencyConfirmation({
+          providerId: row.provider_id,
+          persistedWorkspaceDependencyId: row.workspace_dependency_id,
+          dependencies,
+        });
+        const confirmedDependencyId = confirmation.confirmedDependencyId;
+        const previous = previousCliObservations.find(
+          (candidate) => candidate.observation_id === row.observation_id,
+        );
+        const changed =
+          previous &&
+          JSON.stringify({
+            reason: previous.reason_code,
+            confidence: previous.confidence,
+            providerId: previous.provider_id,
+            path: previous.safe_relative_path,
+            subproject: previous.subproject,
+            metadata: previous.safe_metadata,
+          }) !==
+            JSON.stringify({
+              reason: row.reason_code,
+              confidence: row.confidence,
+              providerId: row.provider_id,
+              path: row.safe_relative_path,
+              subproject: row.subproject,
+              metadata: row.safe_metadata,
+            });
+        return {
+          id: row.observation_id,
+          evidenceFamily: row.evidence_family,
+          identifier: row.normalized_identifier,
+          reason: row.reason_code,
+          confidence: Number(row.confidence),
+          identity: "observed_unconfirmed",
+          dependencyConfirmationState: confirmation.state,
+          changeSincePrevious: cliObservationChange({
+            comparisonState: cliComparisonState,
+            previousExists: Boolean(previous),
+            changed: Boolean(changed),
+          }),
+          provider: catalog
+            ? { id: row.provider_id, name: catalog.name, slug: catalog.slug }
+            : null,
+          confirmedDependencyId,
+          productMonitoringState: cliMonitoringState({
+            dependencyId: confirmedDependencyId,
+            monitoringEnabled: dependencies.find(
+              (dependency) => dependency.id === confirmedDependencyId,
+            )?.monitoring_enabled,
+            dependenciesTruncated,
+            enabledSources: row.provider_id
+              ? (cliSourcesByProvider.get(row.provider_id) ?? (cliCoverageTruncated ? null : 0))
+              : null,
+          }),
+          ...(() => {
+            const coverage = cliCatalogCoverage({
+              providerId: row.provider_id,
+              sourceCounts: cliSourcesByProvider,
+              truncated: cliCoverageTruncated,
+            });
+            return {
+              authoritativeSourcesAvailable: coverage.authoritativeSourcesAvailable,
+              catalogCoverageState: coverage.state,
+            };
+          })(),
+          safeRelativePath: row.safe_relative_path,
+          subproject: row.subproject,
+          metadata: row.safe_metadata,
+        };
+      }),
+      comparisonState: cliComparisonState,
+      previouslyObservedNotLatest: (cliComparisonState === "complete"
+        ? previousCliObservations
+        : []
+      )
+        .filter(
+          (previous) =>
+            !cliObservations.some((current) => current.observation_id === previous.observation_id),
+        )
+        .map((row) => ({
+          id: row.observation_id,
+          evidenceFamily: row.evidence_family,
+          identifier: row.normalized_identifier,
+          state: "not_observed_in_latest",
+          lastObservedAt: previousCliRun?.received_at ?? null,
+        })),
+      truncated: latestCliObservationsTruncated,
+      historyTruncated: previousCliObservationsTruncated,
+      providerCoverageTruncated: cliCoverageTruncated,
     },
     dependencies: dependencyNodes,
     repositories: repositoryGraph.mappedRepositories.map((repository) => ({

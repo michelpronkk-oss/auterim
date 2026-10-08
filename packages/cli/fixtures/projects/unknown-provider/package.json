@@ -1,0 +1,7 @@
+{
+  "name": "auterim-local-discovery-unknown-provider-fixture",
+  "private": true,
+  "dependencies": {
+    "@fictional-vendor/private-runtime-sdk": "^3.2.1"
+  }
+}

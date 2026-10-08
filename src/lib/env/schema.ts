@@ -27,6 +27,10 @@ export const environmentSchema = z
       emptyToUndefined,
       z.string().trim().min(32).optional(),
     ),
+    AUTERIM_CLI_CONNECT_HMAC_SECRET: z.preprocess(
+      emptyToUndefined,
+      z.string().trim().min(32).optional(),
+    ),
     TRIGGER_SECRET_KEY: optionalSecret,
     RESEND_API_KEY: optionalSecret,
     RESEND_FROM_EMAIL: resendFromAddress,
@@ -223,6 +227,7 @@ export function isIntegrationConfigured(
     | "sentryApp"
     | "searchConsole"
     | "connectorEncryption"
+    | "cliDiscovery"
     | "dodo",
   environment: AppEnvironment,
 ) {
@@ -283,6 +288,14 @@ export function isIntegrationConfigured(
     return Boolean(
       environment.CONNECTOR_CREDENTIAL_ENCRYPTION_KEYS &&
       environment.CONNECTOR_CREDENTIAL_ACTIVE_KEY_VERSION,
+    );
+
+  if (name === "cliDiscovery")
+    return Boolean(
+      environment.AUTERIM_CLI_CONNECT_HMAC_SECRET &&
+      environment.PUBLIC_RATE_LIMIT_HMAC_SECRET &&
+      environment.NEXT_PUBLIC_SUPABASE_URL &&
+      (environment.SUPABASE_SECRET_KEY || environment.SUPABASE_SERVICE_ROLE_KEY),
     );
 
   if (name === "dodo") {

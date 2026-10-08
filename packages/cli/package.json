@@ -1,0 +1,28 @@
+{
+  "name": "auterim",
+  "version": "0.1.0",
+  "description": "Analyze local software dependencies and connect derived evidence to Auterim.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/michelpronkk-oss/auterim.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://auterim.com",
+  "type": "module",
+  "files": [
+    "dist/**",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "bin": {
+    "auterim": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "connect:dry-run": "node ./dist/cli.js connect --dry-run",
+    "pack:dry-run": "npm pack --dry-run --ignore-scripts"
+  }
+}
