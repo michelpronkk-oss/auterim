@@ -22,6 +22,7 @@ import {
 } from "@/lib/preflight/remediation";
 import { prepareGroundedPatch } from "@/lib/preflight/patch-preparation";
 import { GitHubAppRepositoryProvider } from "@/lib/preflight/github-provider";
+import { isRepositoryProtectedForProduct } from "@/lib/preflight/preflight-service";
 
 const shaA = "a".repeat(40);
 const shaB = "b".repeat(40);
@@ -76,6 +77,46 @@ function fixtureProvider(
 }
 
 describe("offline Preflight evidence evaluation", () => {
+  it("prefers explicit product mapping and falls back only for legacy repositories", () => {
+    const productA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const productB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    expect(
+      isRepositoryProtectedForProduct({
+        selectedForProtection: false,
+        productId: productA,
+        mappings: [{ protected_product_id: productA, status: "active" }],
+      }),
+    ).toBe(true);
+    expect(
+      isRepositoryProtectedForProduct({
+        selectedForProtection: true,
+        productId: productA,
+        mappings: [{ protected_product_id: productA, status: "inactive" }],
+      }),
+    ).toBe(false);
+    expect(
+      isRepositoryProtectedForProduct({
+        selectedForProtection: true,
+        productId: productA,
+        mappings: [{ protected_product_id: productB, status: "active" }],
+      }),
+    ).toBe(false);
+    expect(
+      isRepositoryProtectedForProduct({
+        selectedForProtection: true,
+        productId: productA,
+        mappings: [],
+      }),
+    ).toBe(true);
+    expect(
+      isRepositoryProtectedForProduct({
+        selectedForProtection: false,
+        productId: productA,
+        mappings: [],
+      }),
+    ).toBe(false);
+  });
+
   it("1 verifies a deprecated model in active source and binds it to a commit, path, line, and fingerprint", async () => {
     const result = await inspectRepositories({
       change: baseChange,

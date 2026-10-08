@@ -20,6 +20,19 @@ type PreflightInput = {
   repositories: RepositoryTarget[];
 };
 
+export function isRepositoryProtectedForProduct(input: {
+  selectedForProtection: boolean;
+  productId: string;
+  mappings: Array<{ protected_product_id: string; status: string }>;
+}) {
+  if (input.mappings.length > 0) {
+    return input.mappings.some(
+      (mapping) => mapping.protected_product_id === input.productId && mapping.status === "active",
+    );
+  }
+  return input.selectedForProtection;
+}
+
 export interface PreflightRepository {
   loadEligibleInput(impactAssessmentId: string): Promise<PreflightInput | null>;
   getOrCreateRun(input: {
@@ -131,7 +144,7 @@ export class SupabasePreflightRepository implements PreflightRepository {
     throwSupabaseError(accessError);
     const repositoryIds = (access ?? []).map((row) => row.repository_id as string);
     if (repositoryIds.length === 0) return null;
-    const { data: repositories, error: repositoriesError } = await this.client
+    const { data: repositoryRows, error: repositoriesError } = await this.client
       .from("repositories")
       .select(
         "id,workspace_id,connection_id,external_id,owner,name,default_branch,status,selected_for_protection",
@@ -139,12 +152,34 @@ export class SupabasePreflightRepository implements PreflightRepository {
       .in("id", repositoryIds)
       .eq("workspace_id", assessment.workspace_id)
       .eq("status", "available")
-      .eq("selected_for_protection", true)
       .order("owner", { ascending: true })
       .order("name", { ascending: true })
       .order("id", { ascending: true })
       .limit(MAX_REPOSITORIES + 1);
     throwSupabaseError(repositoriesError);
+    const candidateRepositoryIds = (repositoryRows ?? []).map((row) => row.id as string);
+    const { data: productMappings, error: mappingError } = candidateRepositoryIds.length
+      ? await this.client
+          .from("workspace_product_repositories")
+          .select("repository_id,protected_product_id,status")
+          .eq("workspace_id", assessment.workspace_id)
+          .in("repository_id", candidateRepositoryIds)
+      : { data: [], error: null };
+    throwSupabaseError(mappingError);
+    const mappingsByRepository = new Map<string, typeof productMappings>();
+    for (const mapping of productMappings ?? []) {
+      const existing = mappingsByRepository.get(mapping.repository_id) ?? [];
+      existing.push(mapping);
+      mappingsByRepository.set(mapping.repository_id, existing);
+    }
+    const repositories = (repositoryRows ?? []).filter((repository) => {
+      const mappings = mappingsByRepository.get(repository.id) ?? [];
+      return isRepositoryProtectedForProduct({
+        selectedForProtection: repository.selected_for_protection,
+        productId: dependencyState.protected_product_id,
+        mappings,
+      });
+    });
     if (!repositories?.length) return null;
     const connectionIds = [...new Set(repositories.map((row) => row.connection_id as string))];
     const { data: connections, error: connectionsError } = await this.client

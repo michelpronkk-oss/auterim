@@ -268,8 +268,20 @@ const preflightWorkerRpcAclMigration = await readFile(
   ),
   "utf8",
 );
+const productRepositoryProtectionMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261113000000_m15_product_repository_protection.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
-async function makeDatabase(applyCompanySurfaceMigration = true) {
+async function makeDatabase(
+  applyCompanySurfaceMigration = true,
+  applyProductRepositoryProtectionMigration = true,
+) {
   const db = new PGlite();
   await db.exec(`
     create role anon;
@@ -317,6 +329,8 @@ async function makeDatabase(applyCompanySurfaceMigration = true) {
   await db.exec(dependencyLifecycleMigration);
   await db.exec(businessHandoffMigration);
   await db.exec(preflightWorkerRpcAclMigration);
+  if (applyProductRepositoryProtectionMigration)
+    await db.exec(productRepositoryProtectionMigration);
   return db;
 }
 
@@ -668,6 +682,10 @@ describe("Auterim migration and monitoring transaction", () => {
        values ($1,'pro','active',now(),now()+interval '30 days')`,
       [workspaceId],
     );
+    await m7db.query(
+      "update public.workspace_products set status='protected',protected_at=now() where workspace_id=$1 and is_default",
+      [workspaceId],
+    );
     const proRepositoryLimit = await m7db.query<{ limit: number }>(
       "select private.workspace_repository_limit($1) as limit",
       [workspaceId],
@@ -713,6 +731,24 @@ describe("Auterim migration and monitoring transaction", () => {
         )
       ).rows,
     ).toHaveLength(1);
+    expect(
+      (
+        await m7db.query<{ protected_product_id: string; status: string }>(
+          "select protected_product_id,status from public.workspace_product_repositories where repository_id=$1",
+          [repository.rows[0]!.id],
+        )
+      ).rows,
+    ).toEqual([
+      {
+        protected_product_id: (
+          await m7db.query<{ protected_product_id: string }>(
+            "select protected_product_id from public.workspace_dependencies where id=$1",
+            [workspaceDependency.rows[0]!.id],
+          )
+        ).rows[0]!.protected_product_id,
+        status: "active",
+      },
+    ]);
     await m7db.exec("reset role");
 
     await m7db.exec("set role service_role");
@@ -752,6 +788,611 @@ describe("Auterim migration and monitoring transaction", () => {
       m7db.query("select * from public.repository_installation_states"),
     ).rejects.toBeTruthy();
     await m7db.exec("reset role");
+  });
+
+  it("maps repositories to products with distinct workspace quota and tenant-safe RPCs", async () => {
+    const db = await makeDatabase();
+    const owner = "10101010-1010-4010-8010-101010101010";
+    const member = "20202020-2020-4020-8020-202020202020";
+    const outsider = "30303030-3030-4030-8030-303030303030";
+    await db.query("insert into auth.users(id) values($1),($2),($3)", [owner, member, outsider]);
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    await db.exec("set role authenticated");
+    const created = await db.query<{ id: string }>(
+      "select public.create_workspace('Product mapping tenant') as id",
+    );
+    const workspaceId = created.rows[0]!.id;
+    await db.exec("reset role; set role service_role");
+    await db.query(
+      `insert into public.workspace_subscriptions(workspace_id,plan,status,current_period_start,current_period_end)
+       values($1,'pro','active',now(),now()+interval '30 days')`,
+      [workspaceId],
+    );
+    const productA = (
+      await db.query<{ id: string }>(
+        "select id from public.workspace_products where workspace_id=$1 and is_default",
+        [workspaceId],
+      )
+    ).rows[0]!.id;
+    const productB = (
+      await db.query<{ id: string }>(
+        `insert into public.workspace_products(workspace_id,name,slug,status,created_by)
+       values($1,'Second product','second-product','draft',$2) returning id`,
+        [workspaceId, owner],
+      )
+    ).rows[0]!.id;
+    await db.query(
+      "update public.workspace_products set status='protected',protected_at=now() where id=any($1::uuid[])",
+      [[productA, productB]],
+    );
+    await db.query(
+      "insert into public.workspace_members(workspace_id,user_id,role) values($1,$2,'member')",
+      [workspaceId, member],
+    );
+    const connectionId = (
+      await db.query<{ id: string }>(
+        `insert into public.repository_connections(workspace_id,installation_id,account_login,connected_by)
+       values($1,9101,'qa-account',$2) returning id`,
+        [workspaceId, owner],
+      )
+    ).rows[0]!.id;
+    const repositoryIds: string[] = [];
+    for (let index = 0; index < 26; index += 1) {
+      repositoryIds.push(
+        (
+          await db.query<{ id: string }>(
+            `insert into public.repositories(workspace_id,connection_id,external_id,owner,name,default_branch)
+         values($1,$2,$3,'qa-account',$4,'main') returning id`,
+            [workspaceId, connectionId, 9102 + index, `repo-${index}`],
+          )
+        ).rows[0]!.id,
+      );
+    }
+    await db.exec("reset role");
+
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [outsider]);
+    await db.exec("set role authenticated");
+    const otherWorkspace = await db.query<{ id: string }>(
+      "select public.create_workspace('Other tenant') as id",
+    );
+    const otherWorkspaceId = otherWorkspace.rows[0]!.id;
+    await db.exec("reset role; set role service_role");
+    await db.query(
+      `insert into public.workspace_subscriptions(workspace_id,plan,status,current_period_start,current_period_end)
+       values($1,'core','active',now(),now()+interval '30 days')`,
+      [otherWorkspaceId],
+    );
+    const otherProductId = (
+      await db.query<{ id: string }>(
+        "select id from public.workspace_products where workspace_id=$1 and is_default",
+        [otherWorkspaceId],
+      )
+    ).rows[0]!.id;
+    await db.query(
+      "update public.workspace_products set status='protected',protected_at=now() where id=$1",
+      [otherProductId],
+    );
+    const otherConnectionId = (
+      await db.query<{ id: string }>(
+        `insert into public.repository_connections(workspace_id,installation_id,account_login,connected_by)
+       values($1,9201,'other-account',$2) returning id`,
+        [otherWorkspaceId, outsider],
+      )
+    ).rows[0]!.id;
+    const otherRepositoryId = (
+      await db.query<{ id: string }>(
+        `insert into public.repositories(workspace_id,connection_id,external_id,owner,name,default_branch)
+       values($1,$2,9202,'other-account','other-repo','main') returning id`,
+        [otherWorkspaceId, otherConnectionId],
+      )
+    ).rows[0]!.id;
+    await db.exec("reset role");
+
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    await db.exec("set role authenticated");
+    expect(
+      (await db.query("select id from public.repositories where id=$1", [repositoryIds[0]])).rows,
+    ).toHaveLength(1);
+    expect(
+      (
+        await db.query(
+          "select id from public.workspace_product_repositories where workspace_id=$1",
+          [workspaceId],
+        )
+      ).rows,
+    ).toHaveLength(0);
+    expect(
+      (
+        await db.query<{ selected_for_protection: boolean }>(
+          "select selected_for_protection from public.repositories where id=$1",
+          [repositoryIds[0]],
+        )
+      ).rows[0]!.selected_for_protection,
+    ).toBe(false);
+    await expect(
+      db.query(
+        `insert into public.workspace_product_repositories(workspace_id,protected_product_id,repository_id,status,provenance)
+         values($1,$2,$3,'active','user_selected')`,
+        [workspaceId, productA, repositoryIds[0]],
+      ),
+    ).rejects.toBeTruthy();
+
+    const mapped = await db.query<{ value: { protectedRepositoryUsage: number } }>(
+      "select public.map_repository_to_product($1,$2) as value",
+      [productA, repositoryIds[0]],
+    );
+    expect(mapped.rows[0]!.value.protectedRepositoryUsage).toBe(1);
+    const repeated = await db.query<{ value: { protectedRepositoryUsage: number } }>(
+      "select public.map_repository_to_product($1,$2) as value",
+      [productA, repositoryIds[0]],
+    );
+    expect(repeated.rows[0]!.value.protectedRepositoryUsage).toBe(1);
+    expect(
+      (
+        await db.query(
+          "select id from public.workspace_product_repositories where protected_product_id=$1 and repository_id=$2",
+          [productA, repositoryIds[0]],
+        )
+      ).rows,
+    ).toHaveLength(1);
+    await db.query("select public.map_repository_to_product($1,$2)", [productB, repositoryIds[0]]);
+    expect(
+      (
+        await db.query<{ count: number }>(
+          "select count(distinct repository_id) as count from public.workspace_product_repositories where workspace_id=$1 and status='active'",
+          [workspaceId],
+        )
+      ).rows[0]!.count,
+    ).toBe(1);
+    await db.exec("reset role; set role service_role");
+    await db.query("update public.repositories set selected_for_protection=false where id=$1", [
+      repositoryIds[0],
+    ]);
+    await db.exec("reset role; set role authenticated");
+    expect(
+      (
+        await db.query<{ selected_for_protection: boolean }>(
+          "select selected_for_protection from public.repositories where id=$1",
+          [repositoryIds[0]],
+        )
+      ).rows[0]!.selected_for_protection,
+    ).toBe(true);
+
+    const unmapOne = await db.query<{ value: { protectedRepositoryUsage: number } }>(
+      "select public.unmap_repository_from_product($1,$2) as value",
+      [productA, repositoryIds[0]],
+    );
+    expect(unmapOne.rows[0]!.value.protectedRepositoryUsage).toBe(1);
+    expect(
+      (
+        await db.query<{ status: string }>(
+          "select status from public.workspace_product_repositories where protected_product_id=$1 and repository_id=$2",
+          [productA, repositoryIds[0]],
+        )
+      ).rows[0]!.status,
+    ).toBe("inactive");
+    expect(
+      (
+        await db.query<{ selected_for_protection: boolean }>(
+          "select selected_for_protection from public.repositories where id=$1",
+          [repositoryIds[0]],
+        )
+      ).rows[0]!.selected_for_protection,
+    ).toBe(true);
+    const unmapFinal = await db.query<{ value: { protectedRepositoryUsage: number } }>(
+      "select public.unmap_repository_from_product($1,$2) as value",
+      [productB, repositoryIds[0]],
+    );
+    expect(unmapFinal.rows[0]!.value.protectedRepositoryUsage).toBe(0);
+    expect(
+      (
+        await db.query<{ selected_for_protection: boolean }>(
+          "select selected_for_protection from public.repositories where id=$1",
+          [repositoryIds[0]],
+        )
+      ).rows[0]!.selected_for_protection,
+    ).toBe(false);
+
+    for (let index = 0; index < 5; index += 1)
+      await db.query("select public.map_repository_to_product($1,$2)", [
+        productA,
+        repositoryIds[index],
+      ]);
+    await expect(
+      db.query("select public.map_repository_to_product($1,$2)", [productA, repositoryIds[5]]),
+    ).rejects.toThrow(/repository_quota_exceeded/);
+    await db.exec("reset role; set role service_role");
+    await db.query(
+      "update public.workspace_subscriptions set plan='business' where workspace_id=$1",
+      [workspaceId],
+    );
+    await db.exec("reset role; set role authenticated");
+    for (let index = 5; index < 25; index += 1)
+      await db.query("select public.map_repository_to_product($1,$2)", [
+        productA,
+        repositoryIds[index],
+      ]);
+    await db.exec("reset role; set role service_role");
+    expect(
+      (
+        await db.query<{ usage: number }>(
+          "select private.workspace_protected_repository_usage($1) as usage",
+          [workspaceId],
+        )
+      ).rows[0]!.usage,
+    ).toBe(25);
+    await db.exec("reset role; set role authenticated");
+    await expect(
+      db.query("select public.map_repository_to_product($1,$2)", [productA, repositoryIds[25]]),
+    ).rejects.toThrow(/repository_quota_exceeded/);
+    await expect(
+      db.query("select public.map_repository_to_product($1,$2)", [
+        otherProductId,
+        repositoryIds[0],
+      ]),
+    ).rejects.toThrow(/repository_not_found/);
+    await expect(
+      db.query("select public.map_repository_to_product($1,$2)", [productA, otherRepositoryId]),
+    ).rejects.toThrow(/repository_not_found/);
+    const secondProductAtLimit = await db.query<{
+      map_repository_to_product: { protectedRepositoryUsage: number };
+    }>("select public.map_repository_to_product($1,$2)", [productB, repositoryIds[0]]);
+    expect(secondProductAtLimit.rows[0]!.map_repository_to_product.protectedRepositoryUsage).toBe(
+      25,
+    );
+    await expect(
+      db.query("select public.map_repository_to_product($1,$2)", [productA, repositoryIds[25]]),
+    ).rejects.toThrow(/repository_quota_exceeded/);
+    await db.exec("reset role; set role service_role");
+    await db.query("update public.repositories set status='access_revoked' where id=$1", [
+      repositoryIds[25],
+    ]);
+    await db.exec("reset role");
+    await expect(
+      db.query("select public.map_repository_to_product($1,$2)", [productA, repositoryIds[25]]),
+    ).rejects.toThrow(/repository_unavailable/);
+
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [member]);
+    await expect(
+      db.query("select public.map_repository_to_product($1,$2)", [productA, repositoryIds[25]]),
+    ).rejects.toThrow(/forbidden/);
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [outsider]);
+    await expect(
+      db.query("select public.map_repository_to_product($1,$2)", [
+        otherProductId,
+        otherRepositoryId,
+      ]),
+    ).rejects.toThrow(/repository_plan_required/);
+    await db.exec("reset role; set role authenticated");
+    expect(
+      (
+        await db.query(
+          "select id from public.workspace_product_repositories where workspace_id=$1",
+          [workspaceId],
+        )
+      ).rows,
+    ).toHaveLength(0);
+    expect(
+      (await db.query("select * from public.workspace_product_repositories")).rows,
+    ).toHaveLength(0);
+    await db.exec("reset role");
+    await db.close();
+  });
+
+  it("releases archived product repository quota without deleting history", async () => {
+    const db = await makeDatabase();
+    const owner = "54545454-5454-4454-8454-545454545454";
+    await db.query("insert into auth.users(id) values($1)", [owner]);
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    await db.exec("set role authenticated");
+    const created = await db.query<{ id: string }>(
+      "select public.create_workspace('Archive quota tenant') as id",
+    );
+    const workspaceId = created.rows[0]!.id;
+    await db.exec("reset role; set role service_role");
+    await db.query(
+      `insert into public.workspace_subscriptions(workspace_id,plan,status,current_period_start,current_period_end)
+       values($1,'pro','active',now(),now()+interval '30 days')`,
+      [workspaceId],
+    );
+    const productA = (
+      await db.query<{ id: string }>(
+        "select id from public.workspace_products where workspace_id=$1 and is_default",
+        [workspaceId],
+      )
+    ).rows[0]!.id;
+    const productB = (
+      await db.query<{ id: string }>(
+        `insert into public.workspace_products(workspace_id,name,slug,status,created_by)
+         values($1,'Archive candidate','archive-candidate','draft',$2) returning id`,
+        [workspaceId, owner],
+      )
+    ).rows[0]!.id;
+    const draftProduct = (
+      await db.query<{ id: string }>(
+        `insert into public.workspace_products(workspace_id,name,slug,status,created_by)
+         values($1,'Inactive draft','inactive-draft','draft',$2) returning id`,
+        [workspaceId, owner],
+      )
+    ).rows[0]!.id;
+    await db.query(
+      "update public.workspace_products set status='protected',protected_at=now() where id=any($1::uuid[])",
+      [[productA, productB]],
+    );
+    const connectionId = (
+      await db.query<{ id: string }>(
+        `insert into public.repository_connections(workspace_id,installation_id,account_login,connected_by)
+         values($1,9401,'archive-qa',$2) returning id`,
+        [workspaceId, owner],
+      )
+    ).rows[0]!.id;
+    const repositoryIds = (
+      await db.query<{ id: string }>(
+        `insert into public.repositories(workspace_id,connection_id,external_id,owner,name,default_branch)
+         values($1,$2,9402,'archive-qa','shared','main'),($1,$2,9403,'archive-qa','archive-only','main') returning id`,
+        [workspaceId, connectionId],
+      )
+    ).rows.map((repository) => repository.id);
+    await db.exec("reset role; set role authenticated");
+
+    await expect(
+      db.query("select public.map_repository_to_product($1,$2)", [draftProduct, repositoryIds[0]]),
+    ).rejects.toThrow(/product_not_available/);
+    await db.query("select public.map_repository_to_product($1,$2)", [productA, repositoryIds[0]]);
+    await db.query("select public.map_repository_to_product($1,$2)", [productB, repositoryIds[0]]);
+    await db.query("select public.map_repository_to_product($1,$2)", [productB, repositoryIds[1]]);
+    await db.exec("reset role; set role service_role");
+    expect(
+      (
+        await db.query<{ usage: number }>(
+          "select private.workspace_protected_repository_usage($1) as usage",
+          [workspaceId],
+        )
+      ).rows[0]!.usage,
+    ).toBe(2);
+    await db.exec("reset role; set role authenticated");
+
+    const archived = await db.query<{ archive_workspace_product: { status: string } }>(
+      "select public.archive_workspace_product($1,$2)",
+      [workspaceId, productB],
+    );
+    expect(archived.rows[0]!.archive_workspace_product.status).toBe("archived");
+    expect(
+      (
+        await db.query<{ status: string }>(
+          "select status from public.workspace_product_repositories where protected_product_id=$1 order by repository_id",
+          [productB],
+        )
+      ).rows,
+    ).toEqual([{ status: "inactive" }, { status: "inactive" }]);
+    expect(
+      (
+        await db.query<{ selected_for_protection: boolean }>(
+          "select selected_for_protection from public.repositories where id=any($1::uuid[]) order by name",
+          [repositoryIds],
+        )
+      ).rows,
+    ).toEqual([{ selected_for_protection: false }, { selected_for_protection: true }]);
+    await db.exec("reset role; set role service_role");
+    expect(
+      (
+        await db.query<{ usage: number }>(
+          "select private.workspace_protected_repository_usage($1) as usage",
+          [workspaceId],
+        )
+      ).rows[0]!.usage,
+    ).toBe(1);
+    await db.exec("reset role; set role authenticated");
+    await expect(
+      db.query("select public.map_repository_to_product($1,$2)", [productB, repositoryIds[1]]),
+    ).rejects.toThrow(/product_not_available/);
+
+    await db.exec("reset role; set role service_role");
+    const productC = (
+      await db.query<{ id: string }>(
+        `insert into public.workspace_products(workspace_id,name,slug,status,protected_at,created_by)
+         values($1,'Replacement','replacement','protected',now(),$2) returning id`,
+        [workspaceId, owner],
+      )
+    ).rows[0]!.id;
+    await db.exec("reset role; set role authenticated");
+    await db.query("select public.map_repository_to_product($1,$2)", [productC, repositoryIds[1]]);
+    expect(
+      (
+        await db.query<{ count: number }>(
+          "select count(*)::integer as count from public.workspace_product_repositories where protected_product_id=$1 and repository_id=$2",
+          [productB, repositoryIds[1]],
+        )
+      ).rows[0]!.count,
+    ).toBe(1);
+    expect(
+      (
+        await db.query<{ status: string }>(
+          "select status from public.workspace_product_repositories where protected_product_id=$1 and repository_id=$2",
+          [productB, repositoryIds[1]],
+        )
+      ).rows[0]!.status,
+    ).toBe("inactive");
+    await db.exec("reset role; set role service_role");
+    expect(
+      (
+        await db.query<{ usage: number }>(
+          "select private.workspace_protected_repository_usage($1) as usage",
+          [workspaceId],
+        )
+      ).rows[0]!.usage,
+    ).toBe(2);
+    await db.exec("reset role; set role authenticated");
+    await db.exec("reset role; set role service_role");
+    await db.query(
+      "update public.workspace_subscriptions set status='past_due' where workspace_id=$1",
+      [workspaceId],
+    );
+    const repositoryC = (
+      await db.query<{ id: string }>(
+        `insert into public.repositories(workspace_id,connection_id,external_id,owner,name,default_branch)
+         values($1,$2,9404,'archive-qa','past-due','main') returning id`,
+        [workspaceId, connectionId],
+      )
+    ).rows[0]!.id;
+    await db.exec("reset role; set role authenticated");
+    await expect(
+      db.query("select public.map_repository_to_product($1,$2)", [productA, repositoryC]),
+    ).rejects.toThrow(/repository_plan_required/);
+    await db.query("select public.unmap_repository_from_product($1,$2)", [
+      productA,
+      repositoryIds[0],
+    ]);
+    await db.close();
+  });
+
+  it("backfills only uniquely evidenced product repository intent", async () => {
+    const db = await makeDatabase(true, false);
+    const owner = "41414141-4141-4141-8141-414141414141";
+    await db.query("insert into auth.users(id) values($1)", [owner]);
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    await db.exec("set role authenticated");
+    const workspace = await db.query<{ id: string }>(
+      "select public.create_workspace('Backfill tenant') as id",
+    );
+    const workspaceId = workspace.rows[0]!.id;
+    await db.exec("reset role; set role service_role");
+    const productIds = (
+      await db.query<{ id: string }>(
+        "select id from public.workspace_products where workspace_id=$1 order by is_default desc",
+        [workspaceId],
+      )
+    ).rows.map((product) => product.id);
+    const secondProduct = (
+      await db.query<{ id: string }>(
+        `insert into public.workspace_products(workspace_id,name,slug,status,created_by)
+       values($1,'Second product','second-product','draft',$2) returning id`,
+        [workspaceId, owner],
+      )
+    ).rows[0]!.id;
+    await db.query(
+      "update public.workspace_products set status='protected',protected_at=now() where id=$1",
+      [productIds[0]],
+    );
+    const providers = await db.query<{ id: string; slug: string }>(
+      "select id,slug from public.dependency_catalog where slug in ('openai','stripe')",
+    );
+    const providerId = new Map(providers.rows.map((provider) => [provider.slug, provider.id]));
+    const dependencyA = (
+      await db.query<{ id: string }>(
+        `insert into public.workspace_dependencies(workspace_id,dependency_id,selected_by,protected_product_id)
+       values($1,$2,$3,$4) returning id`,
+        [workspaceId, providerId.get("openai"), owner, productIds[0]],
+      )
+    ).rows[0]!.id;
+    const dependencyB = (
+      await db.query<{ id: string }>(
+        `insert into public.workspace_dependencies(workspace_id,dependency_id,selected_by,protected_product_id)
+       values($1,$2,$3,$4) returning id`,
+        [workspaceId, providerId.get("stripe"), owner, secondProduct],
+      )
+    ).rows[0]!.id;
+    const connection = (
+      await db.query<{ id: string }>(
+        `insert into public.repository_connections(workspace_id,installation_id,account_login,connected_by)
+       values($1,9301,'backfill-account',$2) returning id`,
+        [workspaceId, owner],
+      )
+    ).rows[0]!.id;
+    const repositoryA = (
+      await db.query<{ id: string }>(
+        `insert into public.repositories(workspace_id,connection_id,external_id,owner,name,default_branch,selected_for_protection)
+       values($1,$2,9302,'backfill-account','deterministic','main',true) returning id`,
+        [workspaceId, connection],
+      )
+    ).rows[0]!.id;
+    const repositoryB = (
+      await db.query<{ id: string }>(
+        `insert into public.repositories(workspace_id,connection_id,external_id,owner,name,default_branch,selected_for_protection)
+       values($1,$2,9303,'backfill-account','ambiguous','main',true) returning id`,
+        [workspaceId, connection],
+      )
+    ).rows[0]!.id;
+    const repositoryC = (
+      await db.query<{ id: string }>(
+        `insert into public.repositories(workspace_id,connection_id,external_id,owner,name,default_branch,selected_for_protection)
+       values($1,$2,9304,'backfill-account','unlinked','main',true) returning id`,
+        [workspaceId, connection],
+      )
+    ).rows[0]!.id;
+    const repositoryD = (
+      await db.query<{ id: string }>(
+        `insert into public.repositories(workspace_id,connection_id,external_id,owner,name,default_branch,selected_for_protection)
+       values($1,$2,9305,'backfill-account','draft-product','main',true) returning id`,
+        [workspaceId, connection],
+      )
+    ).rows[0]!.id;
+    await db.query(
+      "insert into public.workspace_repository_access(workspace_id,workspace_dependency_id,repository_id) values($1,$2,$3),($1,$4,$5),($1,$6,$5),($1,$7,$8)",
+      [
+        workspaceId,
+        dependencyA,
+        repositoryA,
+        dependencyA,
+        repositoryB,
+        dependencyB,
+        dependencyB,
+        repositoryD,
+      ],
+    );
+    await db.exec("reset role");
+    await db.exec(productRepositoryProtectionMigration);
+
+    const backfilled = await db.query<{
+      repository_id: string;
+      protected_product_id: string;
+      provenance: string;
+      status: string;
+    }>(
+      "select repository_id,protected_product_id,provenance,status from public.workspace_product_repositories order by repository_id",
+    );
+    expect(backfilled.rows).toHaveLength(2);
+    expect(backfilled.rows).toEqual(
+      expect.arrayContaining([
+        {
+          repository_id: repositoryA,
+          protected_product_id: productIds[0],
+          provenance: "legacy_deterministic",
+          status: "active",
+        },
+        {
+          repository_id: repositoryD,
+          protected_product_id: secondProduct,
+          provenance: "legacy_deterministic",
+          status: "inactive",
+        },
+      ]),
+    );
+    expect(
+      (
+        await db.query(
+          "select repository_id from public.workspace_repository_access where repository_id=$1",
+          [repositoryA],
+        )
+      ).rows,
+    ).toHaveLength(1);
+    expect(
+      (
+        await db.query(
+          "select id from public.repositories where id in ($1,$2,$3,$4) and selected_for_protection",
+          [repositoryA, repositoryB, repositoryC, repositoryD],
+        )
+      ).rows,
+    ).toHaveLength(3);
+    expect(
+      (
+        await db.query<{ usage: number }>(
+          "select private.workspace_protected_repository_usage($1) as usage",
+          [workspaceId],
+        )
+      ).rows[0]!.usage,
+    ).toBe(3);
+    await db.close();
   });
 
   it("returns dependency baseline metadata to workspace members without granting snapshot reads", async () => {

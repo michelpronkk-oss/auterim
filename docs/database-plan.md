@@ -14,6 +14,8 @@ Global scope: `dependency_catalog`, `source_catalog`, `scan_runs`, `source_snaps
 
 M7 adds tenant-scoped `repository_connections`, `repositories`, `workspace_repository_access`, `preflight_runs`, `preflight_findings`, `remediation_proposals`, `protection_value_events`, and a durable `preflight_dispatch_queue`. One-time installation states and GitHub webhook delivery IDs are server-only. Composite foreign keys preserve workspace identity across impact/run/finding/proposal/event relationships. Findings store commit/path/line/fingerprint metadata; repository source files are not stored wholesale. M9 adds `notifications` and a service-only `notification_deliveries` outbox, extends the existing `workspace_notification_preferences`, and adds authenticated protection summary/coverage plus notification read RPCs. No second analytics event or notification-preference system is introduced.
 
+M15.5 Phase A.1 adds `workspace_product_repositories` as explicit product protection intent while preserving `workspace_repository_access` as the dependency evidence edge. See [Protected Product ↔ Repository Foundation](product-repository-protection.md) for quota, legacy bridge, archive, and Preflight semantics.
+
 Tenant tables have workspace membership policies. Authenticated users may select enabled catalog rows. Onboarding writes occur through authenticated RPCs with explicit `auth.uid()` membership checks; onboarding tables have no direct authenticated write grants. The baseline queue is not readable or writable by tenant roles. Global monitoring evidence has no authenticated grants; the service role is the only application role allowed to manage it. Snapshots and changes are immutable by trigger as well as privilege boundary.
 
 ## Integrity and concurrency
