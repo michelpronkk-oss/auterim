@@ -8,7 +8,6 @@
     "directory": "packages/cli"
   },
   "homepage": "https://auterim.com",
-  "private": true,
   "type": "module",
   "files": [
     "dist/**",

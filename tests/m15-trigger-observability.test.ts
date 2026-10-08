@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -22,9 +22,9 @@ import {
 const reportDirectories: string[] = [];
 
 async function reportPath() {
-  const directory = await mkdtemp(
-    path.join(process.cwd(), "node_modules", ".cache", "m15-roundtrip-test-"),
-  );
+  const cacheDirectory = path.join(process.cwd(), "node_modules", ".cache");
+  await mkdir(cacheDirectory, { recursive: true });
+  const directory = await mkdtemp(path.join(cacheDirectory, "m15-roundtrip-test-"));
   reportDirectories.push(directory);
   return path.join(directory, "trigger-roundtrip.jsonl");
 }
