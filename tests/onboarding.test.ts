@@ -25,6 +25,15 @@ const migrations = await Promise.all(
     readFile(fileURLToPath(new URL(`../supabase/migrations/${name}`, import.meta.url)), "utf8"),
   ),
 );
+const baselineReliabilityMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261110000000_baseline_dispatch_recovery_openai_pricing_source.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function database() {
   const db = new PGlite();
@@ -41,6 +50,7 @@ async function database() {
     grant execute on function auth.uid() to anon, authenticated;
   `);
   for (const migration of migrations) await db.exec(migration);
+  await db.exec(baselineReliabilityMigration);
   return db;
 }
 

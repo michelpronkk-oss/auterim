@@ -40,7 +40,7 @@ Milestone 10 adds a customer-independent Growth Engine over public provider sour
 
 The `scan-source` Trigger.dev task loads one enabled catalog source with a server-only Supabase client, fetches and normalizes it, then submits the result to a database RPC. The RPC locks the source row, checks the latest snapshot inside the same transaction, and writes a baseline, unchanged run, not-modified run, or one changed snapshot and change. Stable Trigger run/attempt identifiers make retries replay-safe. A stale concurrent result is diffed against the locked latest snapshot before it can be saved.
 
-One daily UTC dispatcher checks due sources and enqueues at most 100 in a run. It creates no per-source schedules. Run history remains in Postgres for inspection.
+One daily UTC dispatcher reconciles at most 100 global baseline queue claims, then checks and enqueues at most 100 other due sources. Baseline queue claiming is service-only and independent of onboarding re-entry; lease recovery, retry delay, and attempt limits are persisted in the global queue. It creates no per-source schedules. Run history remains in Postgres for inspection.
 
 ## Fetch and payload limits
 

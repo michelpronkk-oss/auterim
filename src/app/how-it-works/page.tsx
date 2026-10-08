@@ -52,7 +52,7 @@ const foundTone = {
 const sources: Array<[name: string, url: string, checked: string]> = [
   ["Changelog", "platform.openai.com/docs/changelog", "2m ago"],
   ["Docs", "platform.openai.com/docs/api-reference", "4m ago"],
-  ["Pricing", "openai.com/api/pricing", "6m ago"],
+  ["Pricing", "developers.openai.com/api/docs/pricing", "6m ago"],
   ["Deprecations", "platform.openai.com/docs/deprecations", "9m ago"],
   ["Policies", "openai.com/policies", "12m ago"],
 ];

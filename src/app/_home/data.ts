@@ -11,7 +11,7 @@ export const catalog: Record<string, CatalogEntry> = {
   OpenAI: [
     "AI",
     [
-      ["Pricing", "P", "openai.com/api/pricing"],
+      ["Pricing", "P", "developers.openai.com/api/docs/pricing"],
       ["Changelog", "C", "platform.openai.com/docs/changelog"],
       ["API documentation", "A", "platform.openai.com/docs/api-reference"],
       ["Deprecations", "D", "platform.openai.com/docs/deprecations"],
