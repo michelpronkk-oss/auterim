@@ -1,6 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { getDashboardHealthPresentation } from "@/lib/protection/dashboard-health";
-import { shouldShowWorkspaceSelector } from "@/lib/app/workspace-bootstrap";
+import {
+  notifyWorkspaceUpdated,
+  shouldShowWorkspaceSelector,
+  WORKSPACE_UPDATED_EVENT,
+} from "@/lib/app/workspace-bootstrap";
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe("dashboard dependency health language", () => {
   it("describes quiet monitoring evidence without claiming provider uptime", () => {
@@ -27,17 +33,22 @@ describe("dashboard dependency health language", () => {
 
 describe("workspace selector visibility", () => {
   it("keeps workspace switching available after activation", () => {
-    expect(shouldShowWorkspaceSelector({ workspaceCount: 2, selectedWorkspaceActive: true })).toBe(
-      true,
-    );
+    expect(shouldShowWorkspaceSelector({ workspaceCount: 2 })).toBe(true);
   });
 
-  it("hides the selector during initial onboarding and for a single workspace", () => {
-    expect(shouldShowWorkspaceSelector({ workspaceCount: 2, selectedWorkspaceActive: false })).toBe(
-      false,
-    );
-    expect(shouldShowWorkspaceSelector({ workspaceCount: 1, selectedWorkspaceActive: true })).toBe(
-      false,
-    );
+  it("keeps switching available during onboarding when multiple workspaces are authorized", () => {
+    expect(shouldShowWorkspaceSelector({ workspaceCount: 2 })).toBe(true);
+    expect(shouldShowWorkspaceSelector({ workspaceCount: 1 })).toBe(false);
+  });
+
+  it("notifies the app shell after an account-panel workspace switch", () => {
+    const target = new EventTarget();
+    const refreshShell = vi.fn();
+    target.addEventListener(WORKSPACE_UPDATED_EVENT, refreshShell);
+    vi.stubGlobal("window", target);
+
+    notifyWorkspaceUpdated();
+
+    expect(refreshShell).toHaveBeenCalledOnce();
   });
 });

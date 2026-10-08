@@ -1,6 +1,12 @@
 export type WorkspaceBootstrapState =
   "LOADING" | "READY" | "NEEDS_ONBOARDING" | "AUTH_REQUIRED" | "ERROR";
 
+export const WORKSPACE_UPDATED_EVENT = "auterim:workspace-updated";
+
+export function notifyWorkspaceUpdated() {
+  window.dispatchEvent(new Event(WORKSPACE_UPDATED_EVENT));
+}
+
 export function resolveWorkspaceBootstrapState(input: {
   authenticated: boolean;
   workspaceCount?: number;
@@ -15,9 +21,6 @@ export function resolveWorkspaceBootstrapState(input: {
   return input.selectedWorkspaceActive ? "READY" : "NEEDS_ONBOARDING";
 }
 
-export function shouldShowWorkspaceSelector(input: {
-  workspaceCount: number;
-  selectedWorkspaceActive: boolean;
-}) {
-  return input.selectedWorkspaceActive && input.workspaceCount > 1;
+export function shouldShowWorkspaceSelector(input: { workspaceCount: number }) {
+  return input.workspaceCount > 1;
 }

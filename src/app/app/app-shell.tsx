@@ -17,7 +17,13 @@ import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import {
   resolveWorkspaceBootstrapState,
   type WorkspaceBootstrapState,
+  WORKSPACE_UPDATED_EVENT,
 } from "@/lib/app/workspace-bootstrap";
+import {
+  normalizeWorkspaceOptions,
+  resolveSelectedWorkspaceId,
+  type WorkspaceOption,
+} from "@/lib/app/workspace-options";
 
 const BOOTSTRAP_TIMEOUT_MS = 12_000;
 
@@ -42,12 +48,11 @@ function withTimeout<T>(promise: Promise<T>, message: string): Promise<T> {
   });
 }
 
-type Workspace = { workspaceId: string; name: string; role: string; active: boolean };
 type AppContextValue = {
   session: Session;
   workspaceId: string;
-  workspace: Workspace;
-  workspaces: Workspace[];
+  workspace: WorkspaceOption;
+  workspaces: WorkspaceOption[];
   selectWorkspace: (id: string) => void;
   api: <T = unknown>(path: string, init?: RequestInit) => Promise<T>;
   refresh: () => Promise<void>;
@@ -71,7 +76,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [session, setSession] = useState<Session | null>(null);
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceOption[]>([]);
   const [workspaceId, setWorkspaceId] = useState("");
   const [unread, setUnread] = useState(0);
   const [bootstrapState, setBootstrapState] = useState<WorkspaceBootstrapState>("LOADING");
@@ -118,25 +123,25 @@ export function AppShell({ children }: { children: ReactNode }) {
     }
     setBootstrapState("LOADING");
     try {
-      const list = await api<{ workspaces?: Array<{ workspace_id: string; role: string }> }>(
-        "/api/account/status",
-      );
-      const entries = await Promise.all(
+      const list = await api<{
+        workspaces?: Array<{ workspace_id: string; workspace_name: string; role: string }>;
+      }>("/api/account/status");
+      const rawEntries = await Promise.all(
         (list.workspaces ?? []).map(async (item) => {
           const account = await api<{
             onboarding?: {
-              company?: { name?: string };
               activation?: { activatedAt?: string } | null;
             };
           }>(`/api/account/status?workspaceId=${encodeURIComponent(item.workspace_id)}`);
           return {
             workspaceId: item.workspace_id,
-            name: account.onboarding?.company?.name || "Workspace",
+            name: item.workspace_name,
             role: item.role,
             active: Boolean(account.onboarding?.activation?.activatedAt),
           };
         }),
       );
+      const entries = normalizeWorkspaceOptions(rawEntries);
       if (
         requestId !== bootstrapRequestId.current ||
         sessionRef.current?.user.id !== session.user.id ||
@@ -145,9 +150,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         return;
       setWorkspaces(entries);
       const saved = window.localStorage.getItem("auterim-workspace-id");
-      const selected = entries.some((item) => item.workspaceId === saved)
-        ? saved!
-        : (entries.find((item) => item.active)?.workspaceId ?? entries[0]?.workspaceId ?? "");
+      const selected = resolveSelectedWorkspaceId(entries, saved);
       setWorkspaceId(selected);
       if (selected) window.localStorage.setItem("auterim-workspace-id", selected);
       else window.localStorage.removeItem("auterim-workspace-id");
@@ -221,8 +224,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   }, [session, refresh]);
   useEffect(() => {
     const handleWorkspaceUpdate = () => void refresh();
-    window.addEventListener("auterim:workspace-updated", handleWorkspaceUpdate);
-    return () => window.removeEventListener("auterim:workspace-updated", handleWorkspaceUpdate);
+    window.addEventListener(WORKSPACE_UPDATED_EVENT, handleWorkspaceUpdate);
+    return () => window.removeEventListener(WORKSPACE_UPDATED_EVENT, handleWorkspaceUpdate);
   }, [refresh]);
   useEffect(() => {
     if (!session || !workspaceId) return;
@@ -345,7 +348,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             >
               {workspaces.map((item) => (
                 <option key={item.workspaceId} value={item.workspaceId}>
-                  {item.name}
+                  {item.selectorLabel}
                 </option>
               ))}
             </select>
@@ -402,7 +405,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               >
                 {workspaces.map((item) => (
                   <option key={item.workspaceId} value={item.workspaceId}>
-                    {item.name}
+                    {item.selectorLabel}
                   </option>
                 ))}
               </select>

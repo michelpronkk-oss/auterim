@@ -19,7 +19,41 @@ export async function GET(request: Request) {
         { error: "account_state_unavailable" },
         { status: 503, headers: PRIVATE_NO_STORE },
       );
-    return Response.json({ workspaces: data ?? [] }, { headers: PRIVATE_NO_STORE });
+    const memberships = data ?? [];
+    if (memberships.length === 0)
+      return Response.json({ workspaces: [] }, { headers: PRIVATE_NO_STORE });
+
+    const { data: workspaceRows, error: workspaceError } = await auth.client
+      .from("workspaces")
+      .select("id,name")
+      .in(
+        "id",
+        memberships.map((membership) => membership.workspace_id),
+      );
+    if (workspaceError)
+      return Response.json(
+        { error: "account_state_unavailable" },
+        { status: 503, headers: PRIVATE_NO_STORE },
+      );
+
+    const workspaceNames = new Map(
+      (workspaceRows ?? []).map((workspace) => [workspace.id, workspace.name]),
+    );
+    if (memberships.some((membership) => !workspaceNames.has(membership.workspace_id)))
+      return Response.json(
+        { error: "account_state_unavailable" },
+        { status: 503, headers: PRIVATE_NO_STORE },
+      );
+
+    return Response.json(
+      {
+        workspaces: memberships.map((membership) => ({
+          ...membership,
+          workspace_name: workspaceNames.get(membership.workspace_id),
+        })),
+      },
+      { headers: PRIVATE_NO_STORE },
+    );
   }
   const parsed = z.string().uuid().safeParse(requestedId);
   if (!parsed.success) return Response.json({ error: "invalid_workspace_id" }, { status: 400 });

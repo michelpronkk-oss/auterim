@@ -7,7 +7,12 @@ import type { FormEvent } from "react";
 import { z } from "zod";
 import type { Session } from "@supabase/supabase-js";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
-import { shouldShowWorkspaceSelector } from "@/lib/app/workspace-bootstrap";
+import { notifyWorkspaceUpdated, shouldShowWorkspaceSelector } from "@/lib/app/workspace-bootstrap";
+import {
+  normalizeWorkspaceOptions,
+  resolveSelectedWorkspaceId,
+  type WorkspaceOption,
+} from "@/lib/app/workspace-options";
 import {
   PLAN_CATALOG,
   type PlanSlug,
@@ -502,7 +507,7 @@ function FirstWorkspaceOnboarding({
         body: JSON.stringify({ workspaceId }),
       });
       await refresh(session.access_token, workspaceId);
-      window.dispatchEvent(new Event("auterim:workspace-updated"));
+      notifyWorkspaceUpdated();
       router.push("/app");
     }, "Protection is active.");
   }
@@ -1094,9 +1099,7 @@ export function AccountPanel({
 }) {
   const [session, setSession] = useState<Session | null>(null);
   const [workspaceId, setWorkspaceId] = useState("");
-  const [workspaces, setWorkspaces] = useState<
-    Array<{ workspace_id: string; role: string; name: string }>
-  >([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceOption[]>([]);
   const [account, setAccount] = useState<AccountData | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -1136,9 +1139,15 @@ export function AccountPanel({
       if (!isCurrent()) return;
       if (!listResponse.ok) throw new Error("Could not load your workspaces.");
       const membershipOptions = z
-        .array(z.object({ workspace_id: z.string().uuid(), role: z.string() }))
+        .array(
+          z.object({
+            workspace_id: z.string().uuid(),
+            workspace_name: z.string(),
+            role: z.string(),
+          }),
+        )
         .parse(listBody.workspaces ?? []);
-      const options = await Promise.all(
+      const rawOptions = await Promise.all(
         membershipOptions.map(async (item) => {
           try {
             const workspaceResponse = await fetchAccountWithTimeout(
@@ -1146,15 +1155,24 @@ export function AccountPanel({
               { headers },
             );
             const workspaceBody = await workspaceResponse.json();
+            const workspace = accountSchema.parse(workspaceBody);
             return {
-              ...item,
-              name: accountSchema.parse(workspaceBody).onboarding.company.name,
+              workspaceId: item.workspace_id,
+              role: item.role,
+              name: item.workspace_name,
+              active: Boolean(workspace.onboarding.activation?.activatedAt),
             };
           } catch {
-            return { ...item, name: "Workspace" };
+            return {
+              workspaceId: item.workspace_id,
+              role: item.role,
+              name: item.workspace_name,
+              active: false,
+            };
           }
         }),
       );
+      const options = normalizeWorkspaceOptions(rawOptions);
       if (!isCurrent()) return;
       if (!options.length) {
         setWorkspaces([]);
@@ -1164,9 +1182,7 @@ export function AccountPanel({
         return;
       }
       const stored = selected ?? window.localStorage.getItem("auterim-workspace-id");
-      const target = options.some((item) => item.workspace_id === stored)
-        ? stored!
-        : options[0]!.workspace_id;
+      const target = resolveSelectedWorkspaceId(options, stored);
       const response = await fetchAccountWithTimeout(
         `/api/account/status?workspaceId=${encodeURIComponent(target)}`,
         { headers },
@@ -1190,6 +1206,7 @@ export function AccountPanel({
       window.localStorage.setItem("auterim-workspace-id", target);
       window.localStorage.removeItem("auterim-onboarding-idempotency-key");
       setLoadError(false);
+      if (selected) notifyWorkspaceUpdated();
     } catch (error) {
       if (!isCurrent()) return;
       throw error;
@@ -1397,7 +1414,6 @@ export function AccountPanel({
           )}
         {shouldShowWorkspaceSelector({
           workspaceCount: workspaces.length,
-          selectedWorkspaceActive: Boolean(account?.onboarding.activation),
         }) && (
           <label className="workspace-select">
             Workspace
@@ -1406,8 +1422,8 @@ export function AccountPanel({
               onChange={(event) => void load(session.access_token, event.target.value)}
             >
               {workspaces.map((item) => (
-                <option key={item.workspace_id} value={item.workspace_id}>
-                  {item.name} · {item.role}
+                <option key={item.workspaceId} value={item.workspaceId}>
+                  {item.selectorLabel} · {item.role}
                 </option>
               ))}
             </select>
