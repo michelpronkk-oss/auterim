@@ -1,31 +1,35 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { getEnvironment, isIntegrationConfigured } from "@/lib/env/schema";
-import {
-  GitHubAppInstallationError,
-  GitHubAppRepositoryProvider,
-} from "@/lib/preflight/github-provider";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getWorkspaceRole, resolveWorkspaceEntitlementsForService } from "@/lib/billing/server";
-import { recordGrowthFirstPartyEvent } from "@/lib/growth-v2/feedback";
+
+function settingsRedirect(status: string) {
+  const target = new URL("/app/settings", getEnvironment().NEXT_PUBLIC_APP_URL);
+  target.searchParams.set("github", status);
+  return Response.redirect(target);
+}
 
 export async function GET(request: Request) {
-  const correlationId = randomUUID();
   const url = new URL(request.url);
   const state = url.searchParams.get("state");
-  const installationId = Number(url.searchParams.get("installation_id"));
+  const rawInstallationId = url.searchParams.get("installation_id");
+  const installationId =
+    rawInstallationId && /^[1-9][0-9]{0,15}$/.test(rawInstallationId)
+      ? Number(rawInstallationId)
+      : Number.NaN;
   const setupAction = url.searchParams.get("setup_action");
   if (
     !state ||
-    state.length > 128 ||
+    !/^[A-Za-z0-9_-]{43}$/.test(state) ||
     !Number.isSafeInteger(installationId) ||
     installationId <= 0 ||
     !["install", "update"].includes(setupAction ?? "")
   ) {
-    return Response.json({ error: "invalid_installation_callback" }, { status: 400 });
+    return settingsRedirect("invalid_state");
   }
   const environment = getEnvironment();
-  if (!isIntegrationConfigured("githubApp", environment))
-    return Response.json({ error: "github_app_not_configured" }, { status: 503 });
+  if (!isIntegrationConfigured("githubApp", environment)) return settingsRedirect("unavailable");
+
   const service = createSupabaseServerClient();
   const stateHash = createHash("sha256").update(state).digest("hex");
   const { data: stateRow, error: stateError } = await service
@@ -35,150 +39,33 @@ export async function GET(request: Request) {
     .is("consumed_at", null)
     .gt("expires_at", new Date().toISOString())
     .maybeSingle();
-  if (stateError)
-    return Response.json({ error: "installation_state_unavailable" }, { status: 503 });
-  if (!stateRow) return Response.json({ error: "installation_state_expired" }, { status: 400 });
+  if (stateError) return settingsRedirect("temporarily_unavailable");
+  if (!stateRow) return settingsRedirect("state_expired");
   if (!stateRow.github_login || !stateRow.oauth_completed_at)
-    return Response.json({ error: "github_identity_required" }, { status: 403 });
+    return settingsRedirect("installation_authorization_required");
+
   const { data: membership, error: membershipError } = await service
     .from("workspace_members")
     .select("workspace_id")
     .eq("workspace_id", stateRow.workspace_id)
     .eq("user_id", stateRow.actor_user_id)
     .maybeSingle();
-  if (membershipError || !membership)
-    return Response.json({ error: "workspace_access_revoked" }, { status: 403 });
+  if (membershipError || !membership) return settingsRedirect("workspace_access_revoked");
   const role = await getWorkspaceRole(service, stateRow.workspace_id, stateRow.actor_user_id);
-  if (role !== "owner" && role !== "admin")
-    return Response.json({ error: "workspace_access_revoked" }, { status: 403 });
+  if (role !== "owner" && role !== "admin") return settingsRedirect("workspace_access_revoked");
   try {
     const entitlements = await resolveWorkspaceEntitlementsForService(stateRow.workspace_id);
-    if (!entitlements.capabilities.repositoryConnections)
-      return Response.json({ error: "pro_plan_required" }, { status: 402 });
+    if (!entitlements.capabilities.repositoryConnections) return settingsRedirect("pro_required");
   } catch {
-    return Response.json({ error: "billing_state_unavailable" }, { status: 503 });
+    return settingsRedirect("temporarily_unavailable");
   }
-  let accountLogin: string;
-  let repositories: Awaited<
-    ReturnType<GitHubAppRepositoryProvider["listInstallationRepositories"]>
-  >;
-  const reportProviderFailure = (error: unknown, fallbackStage: string) => {
-    const diagnostic =
-      error instanceof GitHubAppInstallationError
-        ? {
-            stage: error.stage,
-            category: error.category,
-            upstreamStatus: error.upstreamStatus ?? null,
-          }
-        : { stage: fallbackStage, category: "unexpected_safe_failure", upstreamStatus: null };
-    console.warn(
-      "github_installation_callback_provider_failure",
-      JSON.stringify({ correlationId, ...diagnostic }),
-    );
-  };
-  const provider = new GitHubAppRepositoryProvider({
-    appId: environment.GITHUB_APP_ID,
-    privateKey: environment.GITHUB_APP_PRIVATE_KEY,
-  });
-  try {
-    accountLogin = await provider.getInstallationAccount(installationId);
-  } catch (error) {
-    reportProviderFailure(error, "installation_metadata");
-    if (error instanceof Error && error.message === "github_repository_limit_exceeded") {
-      return Response.json(
-        { error: "github_installation_repository_limit_exceeded", maximumRepositories: 500 },
-        { status: 422 },
-      );
-    }
-    return Response.json({ error: "github_installation_unavailable" }, { status: 503 });
-  }
-  console.info(
-    "github_installation_callback_provider_stage",
-    JSON.stringify({ correlationId, stage: "installation_metadata_succeeded" }),
-  );
-  try {
-    repositories = await provider.listInstallationRepositories(installationId);
-  } catch (error) {
-    reportProviderFailure(error, "repository_list");
-    if (error instanceof Error && error.message === "github_repository_limit_exceeded") {
-      return Response.json(
-        { error: "github_installation_repository_limit_exceeded", maximumRepositories: 500 },
-        { status: 422 },
-      );
-    }
-    return Response.json({ error: "github_installation_unavailable" }, { status: 503 });
-  }
-  console.info(
-    "github_installation_callback_provider_stage",
-    JSON.stringify({
-      correlationId,
-      stage: "repository_list_succeeded",
-      repositoryCount: repositories.length,
-    }),
-  );
-  if (accountLogin.toLowerCase() !== String(stateRow.github_login).toLowerCase())
-    return Response.json({ error: "github_account_mismatch" }, { status: 403 });
 
-  const { data: connection, error: connectionError } = await service
-    .from("repository_connections")
-    .upsert(
-      {
-        workspace_id: stateRow.workspace_id,
-        provider: "github",
-        installation_id: installationId,
-        account_login: accountLogin,
-        status: "connected",
-        connected_by: stateRow.actor_user_id,
-        connected_at: new Date().toISOString(),
-        revoked_at: null,
-      },
-      { onConflict: "workspace_id,provider,installation_id" },
-    )
-    .select("id")
-    .single();
-  if (connectionError || !connection)
-    return Response.json({ error: "repository_connection_failed" }, { status: 503 });
-  if (repositories.length > 0) {
-    const { error } = await service.from("repositories").upsert(
-      repositories.map((repository) => ({
-        workspace_id: stateRow.workspace_id,
-        connection_id: connection.id,
-        external_id: repository.id,
-        owner: repository.owner.login,
-        name: repository.name,
-        default_branch: repository.default_branch,
-        private: repository.private,
-        archived: repository.archived,
-        status: repository.archived ? "archived" : "available",
-        last_synced_at: new Date().toISOString(),
-      })),
-      { onConflict: "workspace_id,external_id" },
-    );
-    if (error) return Response.json({ error: "repository_sync_failed" }, { status: 503 });
-  }
-  const { data: consumed, error: consumeError } = await service
-    .from("repository_installation_states")
-    .update({ consumed_at: new Date().toISOString() })
-    .eq("state_hash", stateHash)
-    .is("consumed_at", null)
-    .eq("github_login", stateRow.github_login)
-    .gt("expires_at", new Date().toISOString())
-    .select("state_hash")
-    .maybeSingle();
-  if (consumeError)
-    return Response.json({ error: "installation_state_unavailable" }, { status: 503 });
-  if (!consumed) return Response.json({ error: "installation_state_replayed" }, { status: 409 });
-  try {
-    await recordGrowthFirstPartyEvent({
-      eventType: "github_connected",
-      stableKey: `${stateRow.workspace_id}:${installationId}`,
-    });
-  } catch {
-    // Product connection success is independent of funnel reporting availability.
-  }
-  return Response.json({
-    connected: true,
-    account: accountLogin,
-    repositoriesImported: repositories.length,
-  });
+  // installation_id from this callback is only a candidate. A second short
+  // user OAuth round trip proves that this GitHub user can access it before
+  // App credentials are used or any connection/catalog data is persisted.
+  const authorization = new URL("https://github.com/login/oauth/authorize");
+  authorization.searchParams.set("client_id", environment.GITHUB_APP_CLIENT_ID!);
+  authorization.searchParams.set("scope", "read:user");
+  authorization.searchParams.set("state", `${state}.i${installationId}`);
+  return Response.redirect(authorization);
 }

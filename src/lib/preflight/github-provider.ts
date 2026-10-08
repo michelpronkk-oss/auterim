@@ -13,7 +13,12 @@ import type {
 type GitHubResponse<T> = { data: T; response: Response };
 
 export type GitHubAppInstallationFailureStage =
-  "app_jwt" | "installation_metadata" | "installation_token" | "repository_list";
+  | "app_jwt"
+  | "user_installations"
+  | "user_installation_authorization"
+  | "installation_metadata"
+  | "installation_token"
+  | "repository_list";
 
 export type GitHubAppInstallationFailureCategory =
   | "signing_failed"
@@ -224,7 +229,155 @@ export async function exchangeGitHubAppOAuthCode(input: {
   if (!userResponse.ok) throw new Error("github_oauth_identity_failed");
   const user = (await userResponse.json()) as { login?: string };
   if (!user.login || user.login.length > 255) throw new Error("github_oauth_identity_failed");
-  return user.login;
+  return { login: user.login, accessToken: token.access_token };
+}
+
+export type GitHubUserInstallation = {
+  id: number;
+  appId: number;
+  accountLogin: string;
+  targetType: "User" | "Organization";
+  repositorySelection: "all" | "selected";
+  permissions: Record<string, string>;
+  suspendedAt: string | null;
+};
+
+type GitHubUserInstallationResponse = {
+  total_count: number;
+  installations: Array<{
+    id: number;
+    app_id: number;
+    account?: { login?: string } | null;
+    target_type: "User" | "Organization";
+    repository_selection: "all" | "selected";
+    permissions?: Record<string, string>;
+    suspended_at?: string | null;
+  }>;
+};
+
+/**
+ * Lists only the current GitHub App's installations visible to this ephemeral
+ * user access token. The token must remain in server memory and must never be
+ * persisted, logged, or returned to a browser.
+ */
+export async function listUserAccessibleGitHubAppInstallations(input: {
+  accessToken: string;
+  appId: string;
+}): Promise<GitHubUserInstallation[]> {
+  const numericAppId = Number(input.appId);
+  if (!Number.isSafeInteger(numericAppId) || numericAppId <= 0)
+    throw new Error("github_app_identity_invalid");
+  const installations: GitHubUserInstallation[] = [];
+  let totalCount: number | undefined;
+  for (let page = 1; page <= 10; page++) {
+    let result: GitHubResponse<GitHubUserInstallationResponse>;
+    try {
+      result = await githubJson<GitHubUserInstallationResponse>(
+        `https://api.github.com/user/installations?per_page=100&page=${page}`,
+        input.accessToken,
+      );
+    } catch {
+      throw new Error("github_user_installations_unavailable");
+    }
+    const data = result.data;
+    if (
+      !Number.isSafeInteger(data?.total_count) ||
+      data.total_count < 0 ||
+      !Array.isArray(data.installations) ||
+      data.installations.some(
+        (installation) =>
+          !Number.isSafeInteger(installation?.id) ||
+          !Number.isSafeInteger(installation?.app_id) ||
+          typeof installation?.account?.login !== "string" ||
+          !["User", "Organization"].includes(installation.target_type) ||
+          !["all", "selected"].includes(installation.repository_selection) ||
+          !installation.permissions ||
+          typeof installation.permissions !== "object",
+      )
+    ) {
+      throw new Error("github_user_installations_invalid_response");
+    }
+    totalCount ??= data.total_count;
+    if (data.total_count !== totalCount)
+      throw new Error("github_user_installations_invalid_response");
+    installations.push(
+      ...data.installations
+        .filter((installation) => installation.app_id === numericAppId)
+        .map((installation) => ({
+          id: installation.id,
+          appId: installation.app_id,
+          accountLogin: installation.account!.login!,
+          targetType: installation.target_type,
+          repositorySelection: installation.repository_selection,
+          permissions: installation.permissions!,
+          suspendedAt: installation.suspended_at ?? null,
+        })),
+    );
+    if (page * 100 >= totalCount) return installations;
+  }
+  if ((totalCount ?? 0) > 1_000) throw new Error("github_user_installations_limit_exceeded");
+  return installations;
+}
+
+export type GitHubUserAccessibleRepository = {
+  id: number;
+  name: string;
+  full_name: string;
+  owner: { login: string };
+  default_branch: string;
+  private: boolean;
+  archived: boolean;
+};
+
+/** Bounded user-side proof that the OAuth user can enumerate this installation. */
+export async function listUserAccessibleInstallationRepositories(input: {
+  accessToken: string;
+  installationId: number;
+}): Promise<GitHubUserAccessibleRepository[]> {
+  if (!Number.isSafeInteger(input.installationId) || input.installationId <= 0)
+    throw new Error("github_installation_not_authorized");
+  const repositories: GitHubUserAccessibleRepository[] = [];
+  let totalCount: number | undefined;
+  for (let page = 1; page <= 5; page++) {
+    let result: GitHubResponse<{
+      total_count: number;
+      repositories: GitHubUserAccessibleRepository[];
+    }>;
+    try {
+      result = await githubJson(
+        `https://api.github.com/user/installations/${input.installationId}/repositories?per_page=100&page=${page}`,
+        input.accessToken,
+      );
+    } catch {
+      throw new Error("github_user_repository_access_unavailable");
+    }
+    const data = result.data;
+    if (
+      !Number.isSafeInteger(data?.total_count) ||
+      data.total_count < 0 ||
+      !Array.isArray(data.repositories) ||
+      data.repositories.some(
+        (repository) =>
+          !Number.isSafeInteger(repository?.id) ||
+          typeof repository?.name !== "string" ||
+          typeof repository?.full_name !== "string" ||
+          typeof repository?.owner?.login !== "string" ||
+          typeof repository?.default_branch !== "string" ||
+          typeof repository?.private !== "boolean" ||
+          typeof repository?.archived !== "boolean",
+      )
+    ) {
+      throw new Error("github_user_repository_access_invalid_response");
+    }
+    totalCount ??= data.total_count;
+    if (data.total_count !== totalCount)
+      throw new Error("github_user_repository_access_invalid_response");
+    repositories.push(...data.repositories);
+    if (repositories.length > 500) throw new Error("github_user_repository_limit_exceeded");
+    if (page * 100 >= totalCount) return repositories;
+  }
+  if ((totalCount ?? 0) > 500) throw new Error("github_user_repository_limit_exceeded");
+  return repositories;
 }
 
 export class GitHubAppRepositoryProvider implements RepositoryProvider {
@@ -305,12 +458,23 @@ export class GitHubAppRepositoryProvider implements RepositoryProvider {
     try {
       const installation = (await response.json()) as {
         id: number;
+        app_id?: number;
         account?: { login?: string } | null;
+        target_type?: "User" | "Organization";
+        repository_selection?: "all" | "selected";
+        permissions?: Record<string, string>;
         suspended_at?: string | null;
       };
       if (
         !installation ||
         installation.id !== installationId ||
+        installation.app_id !== Number(this.appId) ||
+        !["User", "Organization"].includes(installation.target_type ?? "") ||
+        !["all", "selected"].includes(installation.repository_selection ?? "") ||
+        !installation.permissions ||
+        installation.permissions.contents !== "read" ||
+        installation.permissions.metadata !== "read" ||
+        Object.values(installation.permissions).some((permission) => permission !== "read") ||
         (installation.account !== null &&
           installation.account !== undefined &&
           typeof installation.account.login !== "string")
@@ -334,6 +498,24 @@ export class GitHubAppRepositoryProvider implements RepositoryProvider {
         category: "installation_unavailable",
       });
     return installation.account.login;
+  }
+
+  async verifyInstallation(installationId: number): Promise<GitHubUserInstallation> {
+    const installation = await this.installationMetadata(installationId);
+    if (installation.suspended_at || !installation.account?.login)
+      throw new GitHubAppInstallationError({
+        stage: "installation_metadata",
+        category: "installation_unavailable",
+      });
+    return {
+      id: installation.id,
+      appId: Number(this.appId),
+      accountLogin: installation.account.login,
+      targetType: installation.target_type!,
+      repositorySelection: installation.repository_selection!,
+      permissions: installation.permissions!,
+      suspendedAt: installation.suspended_at ?? null,
+    };
   }
 
   async listInstallationRepositories(installationId: number) {

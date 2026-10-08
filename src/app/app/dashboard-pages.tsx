@@ -262,6 +262,52 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
   const [githubConnecting, setGithubConnecting] = useState(false);
   const githubConnectPending = useRef(false);
   const [filters, setFilters] = useState("all");
+  const reloadConnectors = connectors.reload;
+  const reloadAccountStatus = accountStatus.reload;
+
+  useEffect(() => {
+    if (kind !== "settings") return;
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get("github");
+    const messages: Record<string, string> = {
+      connected: "GitHub is connected. Accessible repositories are ready to review.",
+      installation_selection_required:
+        "Auterim can’t safely choose between multiple GitHub installations. No installation was connected.",
+      installation_identity_mismatch:
+        "The GitHub account changed during installation. Start the connection again with the same account.",
+      installation_not_authorized:
+        "GitHub did not confirm access to that installation. Start the connection again.",
+      installation_suspended:
+        "This GitHub installation is suspended. Resolve it in GitHub and reconnect.",
+      permissions_unavailable:
+        "GitHub permissions do not match Auterim’s read-only access requirements.",
+      authorization_unavailable:
+        "GitHub authorization could not be verified. Try connecting again.",
+      connection_failed: "GitHub could not be connected. Try again.",
+      temporarily_unavailable: "GitHub connection is temporarily unavailable. Try again shortly.",
+      state_expired: "The GitHub connection request expired. Start again from Settings.",
+      state_replayed: "That GitHub connection request was already used. Start again from Settings.",
+      workspace_access_revoked:
+        "Workspace access changed during GitHub authorization. Refresh Settings.",
+      pro_required: "GitHub repository verification is available on Pro.",
+      invalid_state: "The GitHub connection could not be verified. Start again from Settings.",
+      unavailable: "GitHub connection is temporarily unavailable.",
+      installation_authorization_required:
+        "GitHub installation access needs to be verified. Start again from Settings.",
+    };
+    if (!status || !(status in messages)) return;
+    queueMicrotask(() => {
+      setNotice(messages[status]!);
+      if (status === "connected") void Promise.all([reloadConnectors(), reloadAccountStatus()]);
+    });
+    params.delete("github");
+    const remainingQuery = params.toString();
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${remainingQuery ? `?${remainingQuery}` : ""}${window.location.hash}`,
+    );
+  }, [kind, reloadAccountStatus, reloadConnectors]);
 
   useEffect(() => {
     if (kind !== "settings" || !workspaceId) return;
