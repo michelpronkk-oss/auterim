@@ -36,21 +36,38 @@ export async function getWorkspaceRole(
 }
 
 async function usageSnapshot(client: SupabaseClient, workspaceId: string, periodStart: string) {
-  const [products, dependencies, repositories, preflightRuns, remediationRuns] = await Promise.all([
+  const [
+    products,
+    activeProducts,
+    dependencies,
+    repositories,
+    repositoryMappings,
+    preflightRuns,
+    remediationRuns,
+  ] = await Promise.all([
     client
       .from("workspace_products")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId)
       .neq("status", "archived"),
     client
+      .from("workspace_products")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("status", "protected"),
+    client
       .from("workspace_dependencies")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId),
     client
       .from("repositories")
-      .select("id", { count: "exact", head: true })
+      .select("id")
       .eq("workspace_id", workspaceId)
       .eq("selected_for_protection", true),
+    client
+      .from("workspace_product_repositories")
+      .select("repository_id,protected_product_id,status")
+      .eq("workspace_id", workspaceId),
     client
       .from("preflight_runs")
       .select("id", { count: "exact", head: true })
@@ -65,18 +82,35 @@ async function usageSnapshot(client: SupabaseClient, workspaceId: string, period
   if (
     [
       products.error,
+      activeProducts.error,
       dependencies.error,
       repositories.error,
+      repositoryMappings.error,
       preflightRuns.error,
       remediationRuns.error,
     ].some(Boolean)
   ) {
     throw new Error("billing_usage_unavailable");
   }
+  const mappingHistoryRepositoryIds = new Set(
+    (repositoryMappings.data ?? []).map((mapping) => mapping.repository_id),
+  );
+  const protectedProductIds = new Set((activeProducts.data ?? []).map((product) => product.id));
+  const protectedRepositoryIds = new Set(
+    (repositoryMappings.data ?? [])
+      .filter(
+        (mapping) =>
+          mapping.status === "active" && protectedProductIds.has(mapping.protected_product_id),
+      )
+      .map((mapping) => mapping.repository_id),
+  );
+  for (const repository of repositories.data ?? []) {
+    if (!mappingHistoryRepositoryIds.has(repository.id)) protectedRepositoryIds.add(repository.id);
+  }
   return {
     protectedProducts: products.count ?? 0,
     protectedDependencies: dependencies.count ?? 0,
-    repositories: repositories.count ?? 0,
+    repositories: protectedRepositoryIds.size,
     preflightRuns: preflightRuns.count ?? 0,
     remediationRuns: remediationRuns.count ?? 0,
   };
