@@ -55,6 +55,8 @@ All onboarding APIs require a non-anonymous authenticated Supabase user and use 
 
 Idempotency is enforced by database uniqueness, row locks, upserts, stable workspace/dependency identities, one activation row/timestamp, one baseline row per global source, dispatch leases, and Trigger.dev idempotency keys. Candidate evidence remains separate from user decisions and tenant protection state.
 
+The current onboarding APIs are a compatibility bridge to each workspace's existing default Product. Product-aware consumers must use explicit Product IDs and the canonical Product dependency, repository, and Protection Graph contracts. See [Product protection compatibility](product-compatibility.md) for the ownership rules and legacy-to-canonical mapping.
+
 ## Endpoints
 
 | Method  | Path                                             | Purpose                                                       |

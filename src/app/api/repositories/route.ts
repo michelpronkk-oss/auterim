@@ -43,13 +43,72 @@ export async function GET(request: Request) {
         .in("repository_id", repositoryIds)
     : { data: [], error: null };
   if (accessError) return Response.json({ error: "repositories_unavailable" }, { status: 503 });
-  return Response.json({
-    connections: connections ?? [],
-    repositories: (repositories ?? []).map((repository) => ({
-      ...repository,
-      protectedDependencyIds: (access ?? [])
-        .filter((item) => item.repository_id === repository.id)
-        .map((item) => item.workspace_dependency_id),
-    })),
-  });
+  const dependencyIds = [...new Set((access ?? []).map((item) => item.workspace_dependency_id))];
+  const [dependenciesResult, mappingResult] = await Promise.all([
+    dependencyIds.length
+      ? auth.client
+          .from("workspace_dependencies")
+          .select("id,protected_product_id")
+          .eq("workspace_id", workspaceId)
+          .in("id", dependencyIds)
+      : Promise.resolve({ data: [], error: null }),
+    repositoryIds.length
+      ? auth.client
+          .from("workspace_product_repositories")
+          .select("repository_id,protected_product_id,status")
+          .eq("workspace_id", workspaceId)
+          .in("repository_id", repositoryIds)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+  if (dependenciesResult.error || mappingResult.error)
+    return Response.json({ error: "repositories_unavailable" }, { status: 503 });
+  const productByDependency = new Map(
+    (dependenciesResult.data ?? []).map((dependency) => [
+      dependency.id,
+      dependency.protected_product_id,
+    ]),
+  );
+  const productIdsByRepository = new Map<string, Set<string>>();
+  for (const edge of access ?? []) {
+    const productId = productByDependency.get(edge.workspace_dependency_id);
+    if (!productId) continue;
+    const productIds = productIdsByRepository.get(edge.repository_id) ?? new Set();
+    productIds.add(productId);
+    productIdsByRepository.set(edge.repository_id, productIds);
+  }
+  const mappingsByRepository = new Map<string, typeof mappingResult.data>();
+  for (const mapping of mappingResult.data ?? []) {
+    const mappings = mappingsByRepository.get(mapping.repository_id) ?? [];
+    mappings.push(mapping);
+    mappingsByRepository.set(mapping.repository_id, mappings);
+  }
+  return Response.json(
+    {
+      connections: connections ?? [],
+      repositories: (repositories ?? []).map((repository) => {
+        const productIds = [...(productIdsByRepository.get(repository.id) ?? [])];
+        const mappings = mappingsByRepository.get(repository.id) ?? [];
+        const legacyAttribution = mappings.length
+          ? "explicit_mapping_history"
+          : !repository.selected_for_protection
+            ? "not_selected"
+            : productIds.length === 1
+              ? "unique_product"
+              : productIds.length > 1
+                ? "mapping_required"
+                : "unattributed";
+        return {
+          ...repository,
+          legacyAttribution,
+          activeProductIds: mappings
+            .filter((mapping) => mapping.status === "active")
+            .map((mapping) => mapping.protected_product_id),
+          protectedDependencyIds: (access ?? [])
+            .filter((item) => item.repository_id === repository.id)
+            .map((item) => item.workspace_dependency_id),
+        };
+      }),
+    },
+    { headers: { "Cache-Control": "private, no-store" } },
+  );
 }

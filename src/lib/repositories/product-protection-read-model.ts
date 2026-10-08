@@ -1,6 +1,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { latestPreflightRuns } from "@/lib/protection/read-model-helpers";
+import { hasUniqueProductAttribution } from "@/lib/repositories/product-repository-protection";
 
 const REPOSITORY_PAGE_LIMIT = 200;
 
@@ -57,17 +58,29 @@ export async function getProductRepositoryProtection(
           .eq("workspace_id", workspaceId)
           .in("id", [...new Set(boundedRepositories.map((repository) => repository.connection_id))])
       : Promise.resolve({ data: [], error: null }),
-    dependencyIds.length && repositoryIds.length
+    repositoryIds.length
       ? client
           .from("workspace_repository_access")
           .select("workspace_dependency_id,repository_id")
           .eq("workspace_id", workspaceId)
-          .in("workspace_dependency_id", dependencyIds)
           .in("repository_id", repositoryIds)
       : Promise.resolve({ data: [], error: null }),
   ]);
   if (mappingResult.error || connectionsResult.error || accessResult.error)
     throw new Error("product_repository_graph_unavailable");
+
+  const attributedDependencyIds = [
+    ...new Set((accessResult.data ?? []).map((access) => access.workspace_dependency_id)),
+  ];
+  const { data: attributedDependencies, error: attributedDependenciesError } =
+    attributedDependencyIds.length
+      ? await client
+          .from("workspace_dependencies")
+          .select("id,protected_product_id")
+          .eq("workspace_id", workspaceId)
+          .in("id", attributedDependencyIds)
+      : { data: [], error: null };
+  if (attributedDependenciesError) throw new Error("product_repository_graph_unavailable");
 
   const mappings = mappingResult.data ?? [];
   const mappingHistoryRepositoryIds = new Set(mappings.map((mapping) => mapping.repository_id));
@@ -82,15 +95,27 @@ export async function getProductRepositoryProtection(
       )
       .map((mapping) => [mapping.repository_id, mapping]),
   );
-  const legacyDependencyRepositoryIds = new Set(
-    (accessResult.data ?? []).map((access) => access.repository_id),
+  const dependencyProductById = new Map(
+    (attributedDependencies ?? []).map((dependency) => [
+      dependency.id,
+      dependency.protected_product_id,
+    ]),
   );
+  const dependencyProductIdsByRepository = new Map<string, Set<string>>();
+  for (const access of accessResult.data ?? []) {
+    const dependencyProductId = dependencyProductById.get(access.workspace_dependency_id);
+    if (!dependencyProductId) continue;
+    const productIds = dependencyProductIdsByRepository.get(access.repository_id) ?? new Set();
+    productIds.add(dependencyProductId);
+    dependencyProductIdsByRepository.set(access.repository_id, productIds);
+  }
   const mappedRepositoryIds = new Set(activeProductMappings.keys());
   for (const repository of boundedRepositories) {
+    const attributedProductIds = dependencyProductIdsByRepository.get(repository.id) ?? new Set();
     if (
       repository.selected_for_protection &&
       !mappingHistoryRepositoryIds.has(repository.id) &&
-      legacyDependencyRepositoryIds.has(repository.id)
+      hasUniqueProductAttribution([...attributedProductIds], productId)
     ) {
       mappedRepositoryIds.add(repository.id);
     }
@@ -99,9 +124,10 @@ export async function getProductRepositoryProtection(
   const connectionHealth = new Map(
     (connectionsResult.data ?? []).map((connection) => [connection.id, connection.status]),
   );
-  const mappedDependencyIds = (accessResult.data ?? []).map(
-    (access) => access.workspace_dependency_id,
-  );
+  const currentProductDependencyIds = new Set(dependencyIds);
+  const mappedDependencyIds = (accessResult.data ?? [])
+    .filter((access) => currentProductDependencyIds.has(access.workspace_dependency_id))
+    .map((access) => access.workspace_dependency_id);
   const impactResult = mappedDependencyIds.length
     ? await client
         .from("impact_assessments")
@@ -176,10 +202,17 @@ export async function getProductRepositoryProtection(
     const connectionStatus = connectionHealth.get(repository.connection_id) ?? "unknown";
     const isAvailable = repository.status === "available" && connectionStatus === "connected";
     const mapping = activeProductMappings.get(repository.id);
+    const attributedProductIds = dependencyProductIdsByRepository.get(repository.id) ?? new Set();
     const legacyMapping =
       !mapping &&
       !mappingHistoryRepositoryIds.has(repository.id) &&
-      legacyDependencyRepositoryIds.has(repository.id);
+      repository.selected_for_protection &&
+      hasUniqueProductAttribution([...attributedProductIds], productId);
+    const mappingRequired =
+      !mapping &&
+      !mappingHistoryRepositoryIds.has(repository.id) &&
+      repository.selected_for_protection &&
+      attributedProductIds.size > 1;
     return {
       id: repository.id,
       owner: repository.owner,
@@ -187,7 +220,9 @@ export async function getProductRepositoryProtection(
       defaultBranch: repository.default_branch,
       isPrivate: repository.private,
       status: repository.status,
-      mappingStatus: mapping?.status ?? (legacyMapping ? "legacy" : "unmapped"),
+      mappingStatus:
+        mapping?.status ??
+        (legacyMapping ? "legacy" : mappingRequired ? "mapping_required" : "unmapped"),
       mappingProvenance: mapping?.provenance ?? (legacyMapping ? "legacy_dependency_access" : null),
       connectionHealth:
         connectionStatus === "connected"

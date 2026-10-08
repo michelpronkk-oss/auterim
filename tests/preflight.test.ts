@@ -85,6 +85,7 @@ describe("offline Preflight evidence evaluation", () => {
         selectedForProtection: false,
         productId: productA,
         mappings: [{ protected_product_id: productA, status: "active" }],
+        dependencyProductIds: [productA],
       }),
     ).toBe(true);
     expect(
@@ -92,6 +93,7 @@ describe("offline Preflight evidence evaluation", () => {
         selectedForProtection: true,
         productId: productA,
         mappings: [{ protected_product_id: productA, status: "inactive" }],
+        dependencyProductIds: [productA],
       }),
     ).toBe(false);
     expect(
@@ -99,6 +101,7 @@ describe("offline Preflight evidence evaluation", () => {
         selectedForProtection: true,
         productId: productA,
         mappings: [{ protected_product_id: productB, status: "active" }],
+        dependencyProductIds: [productA],
       }),
     ).toBe(false);
     expect(
@@ -106,6 +109,31 @@ describe("offline Preflight evidence evaluation", () => {
         selectedForProtection: true,
         productId: productA,
         mappings: [],
+        dependencyProductIds: [productA],
+      }),
+    ).toBe(true);
+    expect(
+      isRepositoryProtectedForProduct({
+        selectedForProtection: true,
+        productId: productA,
+        mappings: [],
+        dependencyProductIds: [productA, productB],
+      }),
+    ).toBe(false);
+    expect(
+      isRepositoryProtectedForProduct({
+        selectedForProtection: true,
+        productId: productA,
+        mappings: [],
+        dependencyProductIds: [],
+      }),
+    ).toBe(false);
+    expect(
+      isRepositoryProtectedForProduct({
+        selectedForProtection: true,
+        productId: productA,
+        mappings: [{ protected_product_id: productA, status: "active" }],
+        dependencyProductIds: [productA, productB],
       }),
     ).toBe(true);
     expect(
@@ -113,6 +141,7 @@ describe("offline Preflight evidence evaluation", () => {
         selectedForProtection: false,
         productId: productA,
         mappings: [],
+        dependencyProductIds: [productA],
       }),
     ).toBe(false);
   });

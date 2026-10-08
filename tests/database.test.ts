@@ -314,6 +314,15 @@ const productScopedWorkerGuardsMigration = await readFile(
   ),
   "utf8",
 );
+const deterministicLegacyRepositoryAttributionMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261115000000_m15_deterministic_legacy_repository_attribution.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase(
   applyCompanySurfaceMigration = true,
@@ -374,6 +383,8 @@ async function makeDatabase(
   if (applyProductRepositoryProtectionMigration)
     await db.exec(productRepositoryProtectionMigration);
   if (applyProductRepositoryProtectionMigration) await db.exec(productScopedWorkerGuardsMigration);
+  if (applyProductRepositoryProtectionMigration)
+    await db.exec(deterministicLegacyRepositoryAttributionMigration);
   return db;
 }
 
@@ -976,7 +987,7 @@ describe("Auterim migration and monitoring transaction", () => {
           [workspaceId, productA, repositoryIds[1]],
         )
       ).rows[0]!.eligible,
-    ).toBe(true);
+    ).toBe(false);
     await db.query("update public.repositories set selected_for_protection=false where id=$1", [
       repositoryIds[1],
     ]);
@@ -1156,6 +1167,159 @@ describe("Auterim migration and monitoring transaction", () => {
     await db.close();
   });
 
+  it("requires unique Product evidence for history-free legacy repository protection and quota", async () => {
+    const db = await makeDatabase();
+    const owner = "41414141-4141-4141-8141-414141414141";
+    await db.query("insert into auth.users(id) values($1)", [owner]);
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    await db.exec("set role authenticated");
+    const workspaceId = (
+      await db.query<{ id: string }>("select public.create_workspace('Legacy attribution') as id")
+    ).rows[0]!.id;
+    await db.exec("reset role; set role service_role");
+    const productA = (
+      await db.query<{ id: string }>(
+        "select id from public.workspace_products where workspace_id=$1 and is_default",
+        [workspaceId],
+      )
+    ).rows[0]!.id;
+    const productB = (
+      await db.query<{ id: string }>(
+        `insert into public.workspace_products(workspace_id,name,slug,status,created_by)
+         values($1,'Second product','second-product','protected',$2) returning id`,
+        [workspaceId, owner],
+      )
+    ).rows[0]!.id;
+    await db.query(
+      "update public.workspace_products set status='protected',protected_at=now() where id=$1",
+      [productA],
+    );
+    await db.query(
+      `insert into public.workspace_subscriptions(workspace_id,plan,status,current_period_start,current_period_end)
+       values($1,'pro','active',now(),now()+interval '30 days')`,
+      [workspaceId],
+    );
+    const providerIds = new Map(
+      (
+        await db.query<{ id: string; slug: string }>(
+          "select id,slug from public.dependency_catalog where slug in ('openai','stripe')",
+        )
+      ).rows.map((provider) => [provider.slug, provider.id]),
+    );
+    const dependencyA = (
+      await db.query<{ id: string }>(
+        `insert into public.workspace_dependencies(workspace_id,dependency_id,selected_by,protected_product_id)
+         values($1,$2,$3,$4) returning id`,
+        [workspaceId, providerIds.get("openai"), owner, productA],
+      )
+    ).rows[0]!.id;
+    const dependencyB = (
+      await db.query<{ id: string }>(
+        `insert into public.workspace_dependencies(workspace_id,dependency_id,selected_by,protected_product_id)
+         values($1,$2,$3,$4) returning id`,
+        [workspaceId, providerIds.get("stripe"), owner, productB],
+      )
+    ).rows[0]!.id;
+    const connectionId = (
+      await db.query<{ id: string }>(
+        `insert into public.repository_connections(workspace_id,installation_id,account_login,connected_by)
+         values($1,9401,'legacy-account',$2) returning id`,
+        [workspaceId, owner],
+      )
+    ).rows[0]!.id;
+    const repositories = await db.query<{ id: string }>(
+      `insert into public.repositories(workspace_id,connection_id,external_id,owner,name,default_branch,selected_for_protection)
+       values($1,$2,9402,'legacy-account','ambiguous','main',true),
+             ($1,$2,9403,'legacy-account','single-product','main',true),
+             ($1,$2,9404,'legacy-account','unattributed','main',true)
+       returning id`,
+      [workspaceId, connectionId],
+    );
+    const [ambiguousRepositoryId, singleProductRepositoryId, unlinkedRepositoryId] =
+      repositories.rows.map((repository) => repository.id);
+    await db.query(
+      `insert into public.workspace_repository_access(workspace_id,workspace_dependency_id,repository_id)
+       values($1,$2,$3),($1,$4,$3),($1,$2,$5)`,
+      [workspaceId, dependencyA, ambiguousRepositoryId, dependencyB, singleProductRepositoryId],
+    );
+    const current = async (productId: string, repositoryId: string) =>
+      db.query<{ current: boolean }>(
+        "select private.m15_product_repository_is_current($1,$2,$3) as current",
+        [workspaceId, productId, repositoryId],
+      );
+    expect((await current(productA, ambiguousRepositoryId)).rows[0]!.current).toBe(false);
+    expect((await current(productB, ambiguousRepositoryId)).rows[0]!.current).toBe(false);
+    expect((await current(productA, singleProductRepositoryId)).rows[0]!.current).toBe(true);
+    expect((await current(productB, singleProductRepositoryId)).rows[0]!.current).toBe(false);
+    expect((await current(productA, unlinkedRepositoryId)).rows[0]!.current).toBe(false);
+    expect(
+      (
+        await db.query<{ usage: number }>(
+          "select private.workspace_protected_repository_usage($1) as usage",
+          [workspaceId],
+        )
+      ).rows[0]!.usage,
+    ).toBe(1);
+
+    await db.query(
+      `insert into public.workspace_product_repositories(workspace_id,protected_product_id,repository_id,status,provenance)
+       values($1,$2,$3,'active','user_selected')`,
+      [workspaceId, productA, ambiguousRepositoryId],
+    );
+    await db.query("update public.repositories set selected_for_protection=false where id=$1", [
+      ambiguousRepositoryId,
+    ]);
+    expect((await current(productA, ambiguousRepositoryId)).rows[0]!.current).toBe(true);
+    expect((await current(productB, ambiguousRepositoryId)).rows[0]!.current).toBe(false);
+    await db.query(
+      `insert into public.workspace_product_repositories(workspace_id,protected_product_id,repository_id,status,provenance)
+       values($1,$2,$3,'inactive','user_selected')`,
+      [workspaceId, productB, singleProductRepositoryId],
+    );
+    expect((await current(productA, singleProductRepositoryId)).rows[0]!.current).toBe(false);
+    expect((await current(productB, singleProductRepositoryId)).rows[0]!.current).toBe(false);
+    expect(
+      (
+        await db.query<{ usage: number }>(
+          "select private.workspace_protected_repository_usage($1) as usage",
+          [workspaceId],
+        )
+      ).rows[0]!.usage,
+    ).toBe(1);
+    await db.exec("reset role; set role authenticated");
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    await expect(
+      db.query("select public.set_repository_protection($1,true,array[$2::uuid,$3::uuid])", [
+        ambiguousRepositoryId,
+        dependencyA,
+        dependencyB,
+      ]),
+    ).rejects.toThrow(/product_scoped_repository_mapping_required/);
+
+    const legacyDefaultProductSelection = await db.query<{
+      value: { productCount: number; selectedForProtection: boolean };
+    }>("select public.set_repository_protection($1,true,array[$2::uuid]) as value", [
+      singleProductRepositoryId,
+      dependencyA,
+    ]);
+    expect(legacyDefaultProductSelection.rows[0]!.value).toMatchObject({
+      productCount: 1,
+      selectedForProtection: true,
+    });
+    await db.exec("reset role; set role service_role");
+    expect((await current(productA, singleProductRepositoryId)).rows[0]!.current).toBe(true);
+    expect((await current(productB, singleProductRepositoryId)).rows[0]!.current).toBe(false);
+    expect(
+      (
+        await db.query<{ current: boolean }>(
+          "select private.m15_product_repository_is_current($1,$2,$3) as current",
+          ["ffffffff-ffff-4fff-8fff-ffffffffffff", productA, singleProductRepositoryId],
+        )
+      ).rows[0]!.current,
+    ).toBe(false);
+    await db.close();
+  });
+
   it("releases archived product repository quota without deleting history", async () => {
     const db = await makeDatabase();
     const owner = "54545454-5454-4454-8454-545454545454";
@@ -1323,7 +1487,7 @@ describe("Auterim migration and monitoring transaction", () => {
     await db.close();
   });
 
-  it("rejects Product A Preflight and remediation persistence after its repository is unmapped", async () => {
+  it("rejects Product A workers for an ambiguous legacy-selected repository", async () => {
     const db = await makeDatabase();
     const owner = "51515151-5151-4151-8151-515151515151";
     await db.query("insert into auth.users(id) values($1)", [owner]);
@@ -1365,6 +1529,16 @@ describe("Auterim migration and monitoring transaction", () => {
         [workspaceId, provider, owner, productA],
       )
     ).rows[0]!.id;
+    const secondProvider = (
+      await db.query<{ id: string }>("select id from public.dependency_catalog where slug='stripe'")
+    ).rows[0]!.id;
+    const secondDependencyId = (
+      await db.query<{ id: string }>(
+        `insert into public.workspace_dependencies(workspace_id,dependency_id,selected_by,protected_product_id)
+         values($1,$2,$3,$4) returning id`,
+        [workspaceId, secondProvider, owner, productB],
+      )
+    ).rows[0]!.id;
     const connectionId = (
       await db.query<{ id: string }>(
         `insert into public.repository_connections(workspace_id,installation_id,account_login,connected_by)
@@ -1374,15 +1548,15 @@ describe("Auterim migration and monitoring transaction", () => {
     ).rows[0]!.id;
     const repositoryId = (
       await db.query<{ id: string }>(
-        `insert into public.repositories(workspace_id,connection_id,external_id,owner,name,default_branch)
-         values($1,$2,95102,'worker-guard-fixture','shared-repo','main') returning id`,
+        `insert into public.repositories(workspace_id,connection_id,external_id,owner,name,default_branch,selected_for_protection)
+         values($1,$2,95102,'worker-guard-fixture','shared-repo','main',true) returning id`,
         [workspaceId, connectionId],
       )
     ).rows[0]!.id;
     await db.query(
       `insert into public.workspace_repository_access(workspace_id,workspace_dependency_id,repository_id)
-       values($1,$2,$3)`,
-      [workspaceId, dependencyId, repositoryId],
+       values($1,$2,$3),($1,$4,$3)`,
+      [workspaceId, dependencyId, repositoryId, secondDependencyId],
     );
 
     const sourceId = (
@@ -1495,10 +1669,6 @@ describe("Auterim migration and monitoring transaction", () => {
       )
     ).rows[0]!.id;
 
-    await db.exec("reset role; set role authenticated");
-    await db.query("select public.map_repository_to_product($1,$2)", [productA, repositoryId]);
-    await db.query("select public.map_repository_to_product($1,$2)", [productB, repositoryId]);
-    await db.query("select public.unmap_repository_from_product($1,$2)", [productA, repositoryId]);
     await db.exec("reset role; set role service_role");
 
     expect(

@@ -64,6 +64,7 @@ describe("products API", () => {
     );
 
     expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(await response.json()).toMatchObject({
       products: [
         { id: productId, surfaces: [{ surface_type: "docs", url: "https://docs.example/" }] },

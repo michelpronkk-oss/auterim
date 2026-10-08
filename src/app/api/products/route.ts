@@ -22,6 +22,12 @@ const createSchema = z
   })
   .strict();
 
+function privateJson(body: unknown, init?: ResponseInit) {
+  const headers = new Headers(init?.headers);
+  headers.set("Cache-Control", "private, no-store");
+  return Response.json(body, { ...init, headers });
+}
+
 function createError(error: { code?: string; message?: string }) {
   const message = error.message ?? "";
   if (message.includes("product_quota_exceeded"))
@@ -43,12 +49,11 @@ export async function GET(request: Request) {
     .string()
     .uuid()
     .safeParse(new URL(request.url).searchParams.get("workspaceId"));
-  if (!workspaceId.success)
-    return Response.json({ error: "invalid_workspace_id" }, { status: 400 });
+  if (!workspaceId.success) return privateJson({ error: "invalid_workspace_id" }, { status: 400 });
   const role = await getWorkspaceRole(auth.client, workspaceId.data, auth.user.id).catch(
     () => null,
   );
-  if (!role) return Response.json({ error: "forbidden" }, { status: 403 });
+  if (!role) return privateJson({ error: "forbidden" }, { status: 403 });
 
   const [{ data: products, error: productsError }, { data: surfaces, error: surfacesError }] =
     await Promise.all([
@@ -64,8 +69,8 @@ export async function GET(request: Request) {
         .order("created_at", { ascending: true }),
     ]);
   if (productsError || surfacesError)
-    return Response.json({ error: "products_unavailable" }, { status: 503 });
-  return Response.json({
+    return privateJson({ error: "products_unavailable" }, { status: 503 });
+  return privateJson({
     products: (products ?? []).map((product) => ({
       ...product,
       surfaces: (surfaces ?? []).filter((surface) => surface.product_id === product.id),
@@ -80,17 +85,17 @@ export async function POST(request: Request) {
   try {
     input = createSchema.parse(await parseJsonBody(request));
   } catch {
-    return Response.json({ error: "invalid_product_input" }, { status: 400 });
+    return privateJson({ error: "invalid_product_input" }, { status: 400 });
   }
   const role = await getWorkspaceRole(auth.client, input.workspaceId, auth.user.id).catch(
     () => null,
   );
   if (role !== "owner" && role !== "admin")
-    return Response.json({ error: "owner_or_admin_required" }, { status: 403 });
+    return privateJson({ error: "owner_or_admin_required" }, { status: 403 });
 
   const idempotencyKey = request.headers.get("idempotency-key")?.trim();
   if (!idempotencyKey || idempotencyKey.length < 8 || idempotencyKey.length > 128)
-    return Response.json({ error: "idempotency_key_required" }, { status: 400 });
+    return privateJson({ error: "idempotency_key_required" }, { status: 400 });
 
   const { data, error } = await auth.client.rpc("create_workspace_product_idempotent", {
     p_workspace_id: input.workspaceId,
@@ -101,10 +106,10 @@ export async function POST(request: Request) {
   });
   if (error) {
     if (error.message?.includes("product_idempotency_key_reused"))
-      return Response.json({ error: "idempotency_key_reused" }, { status: 409 });
+      return privateJson({ error: "idempotency_key_reused" }, { status: 409 });
     if (error.message?.includes("invalid_product_idempotency_key"))
-      return Response.json({ error: "idempotency_key_required" }, { status: 400 });
+      return privateJson({ error: "idempotency_key_required" }, { status: 400 });
     return createError(error);
   }
-  return Response.json(data, { status: 201 });
+  return privateJson(data, { status: 201 });
 }

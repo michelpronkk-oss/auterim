@@ -72,7 +72,18 @@ const persistedResult = {
   daysRemaining: null,
 };
 
-function setup(options?: { duplicate?: boolean; replacement?: boolean; synthetic?: boolean }) {
+function setup(options?: {
+  duplicate?: boolean;
+  replacement?: boolean;
+  synthetic?: boolean;
+  selectedForProtection?: boolean;
+  repositoryMappings?: Array<{
+    repository_id: string;
+    protected_product_id: string;
+    status: string;
+  }>;
+  attributedProductIds?: string[];
+}) {
   const inserted: Record<string, unknown> = {
     id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
     proposal_kind: "patch",
@@ -95,13 +106,22 @@ function setup(options?: { duplicate?: boolean; replacement?: boolean; synthetic
       status: "assessed",
       relevant: true,
     },
-    workspace_dependencies: {
-      id: dependencyId,
-      workspace_id: workspaceId,
-      dependency_id: catalogDependencyId,
-      protected_product_id: productId,
-      monitoring_enabled: true,
-    },
+    workspace_dependencies: [
+      {
+        id: dependencyId,
+        workspace_id: workspaceId,
+        dependency_id: catalogDependencyId,
+        protected_product_id: productId,
+        monitoring_enabled: true,
+      },
+      ...(options?.attributedProductIds ?? [])
+        .filter((attributedProductId) => attributedProductId !== productId)
+        .map((attributedProductId, index) => ({
+          id: `dddddddd-dddd-4ddd-8ddd-${String(index + 1).padStart(12, "0")}`,
+          workspace_id: workspaceId,
+          protected_product_id: attributedProductId,
+        })),
+    ],
     workspace_products: { id: productId, status: "protected" },
     source_change_classifications: {
       id: classificationId,
@@ -138,9 +158,18 @@ function setup(options?: { duplicate?: boolean; replacement?: boolean; synthetic
       name: "app",
       default_branch: "main",
       status: "available",
-      selected_for_protection: true,
+      selected_for_protection: options?.selectedForProtection ?? true,
     },
-    workspace_repository_access: { repository_id: repositoryId },
+    workspace_product_repositories: options?.repositoryMappings ?? [],
+    workspace_repository_access: [
+      { repository_id: repositoryId, workspace_dependency_id: dependencyId },
+      ...(options?.attributedProductIds ?? [])
+        .filter((attributedProductId) => attributedProductId !== productId)
+        .map((_attributedProductId, index) => ({
+          repository_id: repositoryId,
+          workspace_dependency_id: `dddddddd-dddd-4ddd-8ddd-${String(index + 1).padStart(12, "0")}`,
+        })),
+    ],
     repository_connections: { id: connectionId, installation_id: 12, status: "connected" },
     product_remediation_policies: {
       enabled: true,
@@ -161,10 +190,14 @@ function setup(options?: { duplicate?: boolean; replacement?: boolean; synthetic
           filters.set(table, current);
           return query;
         }),
+        in: vi.fn(() => query),
         order: vi.fn(() => query),
         or: vi.fn(() => query),
         limit: vi.fn(() => query),
-        maybeSingle: vi.fn(async () => ({ data: rows[table] ?? null, error: null })),
+        maybeSingle: vi.fn(async () => ({
+          data: Array.isArray(rows[table]) ? rows[table][0] : (rows[table] ?? null),
+          error: null,
+        })),
         single: vi.fn(async () => ({
           data: rows[table] ?? { ...inserted, patch_validation_status: "queued" },
           error: null,
@@ -256,6 +289,55 @@ describe("persisted remediation preparation", () => {
       created_by: null,
     });
     expect(payloads).toHaveLength(0);
+  });
+
+  it("uses an active Product mapping when the legacy protection mirror is false", async () => {
+    const { provider } = setup({
+      selectedForProtection: false,
+      attributedProductIds: [productId, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+      repositoryMappings: [
+        {
+          repository_id: repositoryId,
+          protected_product_id: productId,
+          status: "active",
+        },
+      ],
+    });
+
+    const result = await preparePersistedRemediation({ preflightRunId: runId, provider });
+
+    expect(result).toMatchObject({ proposalKind: "patch", outcome: "patch_prepared" });
+    expect(provider.getFile).toHaveBeenCalled();
+  });
+
+  it("rejects a legacy-selected repository mapped only to another Product", async () => {
+    const { provider } = setup({
+      selectedForProtection: true,
+      repositoryMappings: [
+        {
+          repository_id: repositoryId,
+          protected_product_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          status: "active",
+        },
+      ],
+    });
+
+    await expect(preparePersistedRemediation({ preflightRunId: runId, provider })).rejects.toThrow(
+      "product_repository_unavailable",
+    );
+    expect(provider.getFile).not.toHaveBeenCalled();
+  });
+
+  it("rejects legacy-selected repositories with dependency evidence for multiple Products", async () => {
+    const { provider } = setup({
+      selectedForProtection: true,
+      attributedProductIds: [productId, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+    });
+
+    await expect(preparePersistedRemediation({ preflightRunId: runId, provider })).rejects.toThrow(
+      "product_repository_unavailable",
+    );
+    expect(provider.getFile).not.toHaveBeenCalled();
   });
 
   it("builds grounded guidance when no production-eligible replacement exists", async () => {

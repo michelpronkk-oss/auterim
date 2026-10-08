@@ -41,7 +41,10 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     p_product_id: productId.data,
   });
   if (error) return onboardingError(error);
-  return Response.json({ dependencies: data });
+  return Response.json(
+    { dependencies: data },
+    { headers: { "Cache-Control": "private, no-store" } },
+  );
 }
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {

@@ -230,7 +230,6 @@ export async function preparePersistedRemediation(input: {
     .eq("id", repositoryId)
     .eq("workspace_id", workspaceId)
     .eq("status", "available")
-    .eq("selected_for_protection", true)
     .maybeSingle();
   throwDb(repositoryError);
   const repository = repositoryData as Record<string, unknown> | null;
@@ -246,24 +245,43 @@ export async function preparePersistedRemediation(input: {
     protected_product_id: string;
     status: string;
   }>;
+  const { data: accessEdges, error: accessEdgesError } = await client
+    .from("workspace_repository_access")
+    .select("repository_id,workspace_dependency_id")
+    .eq("workspace_id", workspaceId)
+    .eq("repository_id", repositoryId);
+  throwDb(accessEdgesError);
+  const attributedDependencyIds = [
+    ...new Set((accessEdges ?? []).map((edge) => edge.workspace_dependency_id as string)),
+  ];
+  const { data: attributedDependencies, error: attributedDependenciesError } =
+    attributedDependencyIds.length
+      ? await client
+          .from("workspace_dependencies")
+          .select("id,protected_product_id")
+          .eq("workspace_id", workspaceId)
+          .in("id", attributedDependencyIds)
+      : { data: [], error: null };
+  throwDb(attributedDependenciesError);
+  const dependencyProductIds = [
+    ...new Set(
+      (attributedDependencies ?? []).map((dependency) => dependency.protected_product_id as string),
+    ),
+  ];
   if (
     !isRepositoryProtectedForProduct({
       selectedForProtection: repository.selected_for_protection === true,
       productId,
       mappings,
+      dependencyProductIds,
     })
   ) {
     fail("product_repository_unavailable");
   }
   const connectionId = value<string>(repository, "connection_id");
-  const { data: accessData, error: accessError } = await client
-    .from("workspace_repository_access")
-    .select("repository_id")
-    .eq("workspace_id", workspaceId)
-    .eq("workspace_dependency_id", workspaceDependencyId)
-    .eq("repository_id", repositoryId)
-    .maybeSingle();
-  throwDb(accessError);
+  const accessData = (accessEdges ?? []).find(
+    (edge) => edge.workspace_dependency_id === workspaceDependencyId,
+  );
   if (!accessData || !connectionId) fail("dependency_repository_access_required");
   const { data: connectionData, error: connectionError } = await client
     .from("repository_connections")

@@ -92,7 +92,6 @@ async function repositorySnapshot(input: {
     .eq("id", metadata.id)
     .eq("workspace_id", input.workspaceId)
     .eq("status", "available")
-    .eq("selected_for_protection", true)
     .maybeSingle();
   if (repositoryError || !repository || !input.workspaceDependencyId)
     throw new Error("validation_repository_unavailable");
@@ -102,23 +101,45 @@ async function repositorySnapshot(input: {
     .eq("workspace_id", input.workspaceId)
     .eq("repository_id", metadata.id);
   if (mappingError) throw new Error("validation_repository_unavailable");
+  const { data: accessEdges, error: accessError } = await client
+    .from("workspace_repository_access")
+    .select("workspace_dependency_id")
+    .eq("workspace_id", input.workspaceId)
+    .eq("repository_id", metadata.id);
+  if (accessError) throw new Error("validation_repository_unavailable");
+  const attributedDependencyIds = [
+    ...new Set((accessEdges ?? []).map((edge) => edge.workspace_dependency_id as string)),
+  ];
+  const { data: attributedDependencies, error: attributedDependenciesError } =
+    attributedDependencyIds.length
+      ? await client
+          .from("workspace_dependencies")
+          .select("id,protected_product_id")
+          .eq("workspace_id", input.workspaceId)
+          .in("id", attributedDependencyIds)
+      : { data: [], error: null };
+  if (attributedDependenciesError) throw new Error("validation_repository_unavailable");
+  const dependencyProductIds = [
+    ...new Set(
+      (attributedDependencies ?? []).map((dependency) => dependency.protected_product_id as string),
+    ),
+  ];
   if (
     !isRepositoryProtectedForProduct({
       selectedForProtection: repository.selected_for_protection === true,
       productId: input.productId,
       mappings: productMappings ?? [],
+      dependencyProductIds,
     })
   ) {
     throw new Error("validation_product_repository_unavailable");
   }
-  const { data: access, error: accessError } = await client
-    .from("workspace_repository_access")
-    .select("repository_id")
-    .eq("workspace_id", input.workspaceId)
-    .eq("workspace_dependency_id", input.workspaceDependencyId)
-    .eq("repository_id", metadata.id)
-    .maybeSingle();
-  if (accessError || !access) throw new Error("validation_repository_access_required");
+  if (
+    !(accessEdges ?? []).some(
+      (edge) => edge.workspace_dependency_id === input.workspaceDependencyId,
+    )
+  )
+    throw new Error("validation_repository_access_required");
   const { data: connection, error: connectionError } = await client
     .from("repository_connections")
     .select("installation_id,status")
