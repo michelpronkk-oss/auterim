@@ -148,14 +148,56 @@ export class SupabasePreflightRepository implements PreflightRepository {
       .limit(MAX_REPOSITORIES + 1);
     throwSupabaseError(repositoriesError);
     const candidateRepositoryIds = (repositoryRows ?? []).map((row) => row.id as string);
-    const { data: productMappings, error: mappingError } = candidateRepositoryIds.length
-      ? await this.client
-          .from("workspace_product_repositories")
-          .select("repository_id,protected_product_id,status")
-          .eq("workspace_id", assessment.workspace_id)
-          .in("repository_id", candidateRepositoryIds)
-      : { data: [], error: null };
+    const [
+      { data: productMappings, error: mappingError },
+      { data: repositoryAccessEdges, error: accessEdgesError },
+    ] = candidateRepositoryIds.length
+      ? await Promise.all([
+          this.client
+            .from("workspace_product_repositories")
+            .select("repository_id,protected_product_id,status")
+            .eq("workspace_id", assessment.workspace_id)
+            .in("repository_id", candidateRepositoryIds),
+          this.client
+            .from("workspace_repository_access")
+            .select("repository_id,workspace_dependency_id")
+            .eq("workspace_id", assessment.workspace_id)
+            .in("repository_id", candidateRepositoryIds),
+        ])
+      : [
+          { data: [], error: null },
+          { data: [], error: null },
+        ];
     throwSupabaseError(mappingError);
+    throwSupabaseError(accessEdgesError);
+    const attributedDependencyIds = [
+      ...new Set(
+        (repositoryAccessEdges ?? []).map((edge) => edge.workspace_dependency_id as string),
+      ),
+    ];
+    const { data: attributedDependencies, error: attributedDependenciesError } =
+      attributedDependencyIds.length
+        ? await this.client
+            .from("workspace_dependencies")
+            .select("id,protected_product_id")
+            .eq("workspace_id", assessment.workspace_id)
+            .in("id", attributedDependencyIds)
+        : { data: [], error: null };
+    throwSupabaseError(attributedDependenciesError);
+    const productIdByDependency = new Map(
+      (attributedDependencies ?? []).map((dependency) => [
+        dependency.id as string,
+        dependency.protected_product_id as string,
+      ]),
+    );
+    const productIdsByRepository = new Map<string, Set<string>>();
+    for (const edge of repositoryAccessEdges ?? []) {
+      const productId = productIdByDependency.get(edge.workspace_dependency_id as string);
+      if (!productId) continue;
+      const productIds = productIdsByRepository.get(edge.repository_id as string) ?? new Set();
+      productIds.add(productId);
+      productIdsByRepository.set(edge.repository_id as string, productIds);
+    }
     const mappingsByRepository = new Map<string, typeof productMappings>();
     for (const mapping of productMappings ?? []) {
       const existing = mappingsByRepository.get(mapping.repository_id) ?? [];
@@ -168,6 +210,7 @@ export class SupabasePreflightRepository implements PreflightRepository {
         selectedForProtection: repository.selected_for_protection,
         productId: dependencyState.protected_product_id,
         mappings,
+        dependencyProductIds: [...(productIdsByRepository.get(repository.id) ?? [])],
       });
     });
     if (!repositories?.length) return null;

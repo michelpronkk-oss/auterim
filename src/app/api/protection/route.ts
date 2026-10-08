@@ -11,6 +11,12 @@ import {
 
 const periodDays = z.coerce.number().int().min(1).max(366).default(7);
 
+function privateJson(body: unknown, init?: ResponseInit) {
+  const headers = new Headers(init?.headers);
+  headers.set("Cache-Control", "private, no-store");
+  return Response.json(body, { ...init, headers });
+}
+
 export async function GET(request: Request) {
   const auth = await authenticateOnboardingRequest(request);
   if (!auth.ok) return auth.response;
@@ -21,13 +27,13 @@ export async function GET(request: Request) {
     .safeParse(search.get("view") ?? "today");
   const days = periodDays.safeParse(search.get("days") ?? 7);
   if (!workspaceId.success || !view.success || !days.success) {
-    return Response.json({ error: "invalid_protection_query" }, { status: 400 });
+    return privateJson({ error: "invalid_protection_query" }, { status: 400 });
   }
   try {
     const role = await getWorkspaceRole(auth.client, workspaceId.data, auth.user.id);
-    if (!role) return Response.json({ error: "forbidden" }, { status: 403 });
+    if (!role) return privateJson({ error: "forbidden" }, { status: 403 });
     if (view.data === "dependencies") {
-      return Response.json(
+      return privateJson(
         await getDependenciesOverview(auth.client, workspaceId.data, search.get("cursor")),
       );
     }
@@ -35,7 +41,7 @@ export async function GET(request: Request) {
       const relevantOnly = search.get("relevant") === "true";
       const verifiedOnly = search.get("verified") === "true";
       const unresolvedOnly = search.get("unresolved") === "true";
-      return Response.json(
+      return privateJson(
         await getChangesOverview(auth.client, workspaceId.data, {
           cursor: search.get("cursor"),
           relevantOnly,
@@ -49,7 +55,7 @@ export async function GET(request: Request) {
         auth.client,
         workspaceId.data,
       );
-      return Response.json(
+      return privateJson(
         await getActionsOverview(
           auth.client,
           workspaceId.data,
@@ -124,8 +130,8 @@ export async function GET(request: Request) {
       initialAssessment: initial,
       periodDays: days.data,
     };
-    return Response.json(view.data === "report" ? { report: result } : result);
+    return privateJson(view.data === "report" ? { report: result } : result);
   } catch {
-    return Response.json({ error: "protection_read_model_unavailable" }, { status: 503 });
+    return privateJson({ error: "protection_read_model_unavailable" }, { status: 503 });
   }
 }

@@ -51,7 +51,7 @@ export async function getDependenciesOverview(
   let query = client
     .from("workspace_dependencies")
     .select(
-      "id,dependency_id,origin,monitoring_enabled,created_at,dependency_catalog(name,slug,category),dependency_context(criticality,production_critical,used_for)",
+      "id,protected_product_id,dependency_id,origin,monitoring_enabled,created_at,dependency_catalog(name,slug,category),dependency_context(criticality,production_critical,used_for)",
       { count: "exact" },
     )
     .eq("workspace_id", workspaceId)
@@ -66,9 +66,17 @@ export async function getDependenciesOverview(
   if (error) throw new Error("dependencies_overview_unavailable");
   const allItems = data ?? [];
   const items = allItems.slice(0, PAGE_SIZE);
+  const productIds = [...new Set(items.map((item) => item.protected_product_id))];
   const dependencyIds = items.map((item) => item.dependency_id);
   const workspaceDependencyIds = items.map((item) => item.id);
-  const [sources, impacts, dependencyAccess] = await Promise.all([
+  const [products, sources, impacts, dependencyAccess] = await Promise.all([
+    productIds.length
+      ? client
+          .from("workspace_products")
+          .select("id,name,status")
+          .eq("workspace_id", workspaceId)
+          .in("id", productIds)
+      : Promise.resolve({ data: [], error: null }),
     dependencyIds.length
       ? client
           .from("source_catalog")
@@ -95,13 +103,13 @@ export async function getDependenciesOverview(
           .in("workspace_dependency_id", workspaceDependencyIds)
       : Promise.resolve({ data: [], error: null }),
   ]);
-  if (sources.error || impacts.error || dependencyAccess.error)
+  if (products.error || sources.error || impacts.error || dependencyAccess.error)
     throw new Error("dependencies_overview_unavailable");
   const accessibleRepositoryIds = (dependencyAccess.data ?? []).map((entry) => entry.repository_id);
   const repositories = accessibleRepositoryIds.length
     ? await client
         .from("repositories")
-        .select("id,status,selected_for_protection")
+        .select("id,status")
         .eq("workspace_id", workspaceId)
         .in("id", accessibleRepositoryIds)
     : { data: [], error: null };
@@ -125,6 +133,9 @@ export async function getDependenciesOverview(
   if (snapshots.error || queue.error || scanRuns.error)
     throw new Error("dependencies_overview_unavailable");
   const itemsWithState = items.map((dependency) => {
+    const product = (products.data ?? []).find(
+      (candidate) => candidate.id === dependency.protected_product_id,
+    );
     const covered = sourceRows.filter(
       (source) => source.dependency_id === dependency.dependency_id,
     );
@@ -169,6 +180,7 @@ export async function getDependenciesOverview(
       : dependency.dependency_catalog;
     return {
       id: dependency.id,
+      product: product ? { id: product.id, name: product.name, status: product.status } : null,
       dependencyId: dependency.dependency_id,
       provider,
       origin: dependency.origin,

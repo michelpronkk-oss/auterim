@@ -74,13 +74,16 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
       verificationCapabilityAvailable: entitlements.capabilities.automaticPreflight,
     });
     if (!graph) return Response.json({ error: "not_found" }, { status: 404 });
-    return Response.json({
-      ...graph,
-      protectionUsage: {
-        protectedRepositories: entitlements.usage.repositories,
-        repositoryLimit: entitlements.limits.repositories,
+    return Response.json(
+      {
+        ...graph,
+        protectionUsage: {
+          protectedRepositories: entitlements.usage.repositories,
+          repositoryLimit: entitlements.limits.repositories,
+        },
       },
-    });
+      { headers: { "Cache-Control": "private, no-store" } },
+    );
   } catch {
     return Response.json({ error: "product_repository_graph_unavailable" }, { status: 503 });
   }

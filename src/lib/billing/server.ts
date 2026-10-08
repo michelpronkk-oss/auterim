@@ -3,6 +3,7 @@ import DodoPayments from "dodopayments";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getEnvironment } from "@/lib/env/schema";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { hasUniqueProductAttribution } from "@/lib/repositories/product-repository-protection";
 import {
   planProductIds,
   resolveWorkspaceEntitlements as resolveFromSnapshot,
@@ -104,8 +105,52 @@ async function usageSnapshot(client: SupabaseClient, workspaceId: string, period
       )
       .map((mapping) => mapping.repository_id),
   );
-  for (const repository of repositories.data ?? []) {
-    if (!mappingHistoryRepositoryIds.has(repository.id)) protectedRepositoryIds.add(repository.id);
+  const legacyRepositoryIds = (repositories.data ?? [])
+    .map((repository) => repository.id)
+    .filter((repositoryId) => !mappingHistoryRepositoryIds.has(repositoryId));
+  const { data: legacyAccess, error: legacyAccessError } = legacyRepositoryIds.length
+    ? await client
+        .from("workspace_repository_access")
+        .select("repository_id,workspace_dependency_id")
+        .eq("workspace_id", workspaceId)
+        .in("repository_id", legacyRepositoryIds)
+    : { data: [], error: null };
+  if (legacyAccessError) throw new Error("billing_usage_unavailable");
+  const legacyDependencyIds = [
+    ...new Set((legacyAccess ?? []).map((edge) => edge.workspace_dependency_id)),
+  ];
+  const { data: legacyDependencies, error: legacyDependenciesError } = legacyDependencyIds.length
+    ? await client
+        .from("workspace_dependencies")
+        .select("id,protected_product_id")
+        .eq("workspace_id", workspaceId)
+        .in("id", legacyDependencyIds)
+    : { data: [], error: null };
+  if (legacyDependenciesError) throw new Error("billing_usage_unavailable");
+  const productByDependency = new Map(
+    (legacyDependencies ?? []).map((dependency) => [
+      dependency.id,
+      dependency.protected_product_id,
+    ]),
+  );
+  const productIdsByRepository = new Map<string, Set<string>>();
+  for (const edge of legacyAccess ?? []) {
+    const productId = productByDependency.get(edge.workspace_dependency_id);
+    if (!productId) continue;
+    const productIds = productIdsByRepository.get(edge.repository_id) ?? new Set();
+    productIds.add(productId);
+    productIdsByRepository.set(edge.repository_id, productIds);
+  }
+  for (const repositoryId of legacyRepositoryIds) {
+    const productIds = productIdsByRepository.get(repositoryId) ?? new Set();
+    const [productId] = productIds;
+    if (
+      productId &&
+      hasUniqueProductAttribution([...productIds], productId) &&
+      protectedProductIds.has(productId)
+    ) {
+      protectedRepositoryIds.add(repositoryId);
+    }
   }
   return {
     protectedProducts: products.count ?? 0,

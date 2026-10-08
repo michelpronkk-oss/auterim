@@ -19,6 +19,7 @@ import { GET } from "@/app/api/protection/dependencies/[id]/route";
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const dependencyId = "22222222-2222-4222-8222-222222222222";
 const sourceId = "33333333-3333-4333-8333-333333333333";
+const productId = "44444444-4444-4444-8444-444444444444";
 
 function queryResult(data: unknown) {
   const query = {
@@ -40,6 +41,7 @@ describe("protection dependency detail route", () => {
       workspace_members: { role: "owner" },
       workspace_dependencies: {
         id: dependencyId,
+        protected_product_id: productId,
         dependency_id: "provider-id",
         origin: "discovered",
         monitoring_enabled: true,
@@ -47,6 +49,7 @@ describe("protection dependency detail route", () => {
         dependency_catalog: { name: "OpenAI", slug: "openai", category: "ai" },
         dependency_context: null,
       },
+      workspace_products: { id: productId, name: "Example Product", status: "protected" },
       source_catalog: [{ id: sourceId, name: "API docs", source_type: "api_docs", enabled: true }],
       impact_assessments: [],
     };
@@ -73,8 +76,10 @@ describe("protection dependency detail route", () => {
     );
 
     expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(await response.json()).toMatchObject({
       item: {
+        product: { id: productId, name: "Example Product", status: "protected" },
         protectionState: "monitoring_evidence_available",
         sourcesWithBaseline: 1,
         sources: [{ latestBaselineAt: "2026-10-04T01:00:00.000Z" }],

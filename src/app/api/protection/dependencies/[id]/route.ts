@@ -53,14 +53,20 @@ export async function GET(request: Request, routeContext: { params: Promise<{ id
   const { data: dependency, error } = await auth.client
     .from("workspace_dependencies")
     .select(
-      "id,dependency_id,origin,monitoring_enabled,created_at,dependency_catalog(name,slug,category,description),dependency_context(criticality,production_critical,used_for,context_note)",
+      "id,protected_product_id,dependency_id,origin,monitoring_enabled,created_at,dependency_catalog(name,slug,category,description),dependency_context(criticality,production_critical,used_for,context_note)",
     )
     .eq("id", id)
     .eq("workspace_id", workspaceId.data)
     .maybeSingle();
   if (error) return Response.json({ error: "dependency_unavailable" }, { status: 503 });
   if (!dependency) return Response.json({ error: "not_found" }, { status: 404 });
-  const [sources, impacts] = await Promise.all([
+  const [productResult, sources, impacts] = await Promise.all([
+    auth.client
+      .from("workspace_products")
+      .select("id,name,status")
+      .eq("workspace_id", workspaceId.data)
+      .eq("id", dependency.protected_product_id)
+      .maybeSingle(),
     auth.client
       .from("source_catalog")
       .select("id,name,source_type,url,enabled")
@@ -79,8 +85,9 @@ export async function GET(request: Request, routeContext: { params: Promise<{ id
       .order("assessed_at", { ascending: false })
       .limit(20),
   ]);
-  if (sources.error || impacts.error)
+  if (productResult.error || sources.error || impacts.error)
     return Response.json({ error: "dependency_unavailable" }, { status: 503 });
+  if (!productResult.data) return Response.json({ error: "not_found" }, { status: 404 });
   const coveredSources = sources.data ?? [];
   const sourceIds = coveredSources.map((source) => source.id);
   const { data: snapshots, error: snapshotError } = sourceIds.length
@@ -100,37 +107,45 @@ export async function GET(request: Request, routeContext: { params: Promise<{ id
   const dependencyContext = (
     Array.isArray(contextValue) ? contextValue[0] : contextValue
   ) as Record<string, unknown> | null;
-  return Response.json({
-    item: {
-      id: dependency.id,
-      dependencyId: dependency.dependency_id,
-      provider: Array.isArray(dependency.dependency_catalog)
-        ? dependency.dependency_catalog[0]
-        : dependency.dependency_catalog,
-      origin: dependency.origin,
-      protected: dependency.monitoring_enabled,
-      criticality: dependencyContext?.criticality,
-      productionCritical: dependencyContext?.production_critical,
-      usedFor: dependencyContext?.used_for,
-      contextNote: dependencyContext?.context_note,
-      createdAt: dependency.created_at,
-      protectionState: !dependency.monitoring_enabled
-        ? "disabled"
-        : latestImpact?.relevant
-          ? "attention_required"
-          : snapshotsBySource.size
-            ? "monitoring_evidence_available"
-            : coveredSources.length
-              ? "baseline_pending"
-              : "coverage_pending",
-      latestImpact,
-      sources: coveredSources.map((source) => ({
-        ...source,
-        latestBaselineAt: snapshotsBySource.get(source.id) ?? null,
-      })),
-      sourceCount: coveredSources.length,
-      sourcesWithBaseline: snapshotsBySource.size,
-      recentAssessments: impacts.data ?? [],
+  return Response.json(
+    {
+      item: {
+        id: dependency.id,
+        product: {
+          id: productResult.data.id,
+          name: productResult.data.name,
+          status: productResult.data.status,
+        },
+        dependencyId: dependency.dependency_id,
+        provider: Array.isArray(dependency.dependency_catalog)
+          ? dependency.dependency_catalog[0]
+          : dependency.dependency_catalog,
+        origin: dependency.origin,
+        protected: dependency.monitoring_enabled,
+        criticality: dependencyContext?.criticality,
+        productionCritical: dependencyContext?.production_critical,
+        usedFor: dependencyContext?.used_for,
+        contextNote: dependencyContext?.context_note,
+        createdAt: dependency.created_at,
+        protectionState: !dependency.monitoring_enabled
+          ? "disabled"
+          : latestImpact?.relevant
+            ? "attention_required"
+            : snapshotsBySource.size
+              ? "monitoring_evidence_available"
+              : coveredSources.length
+                ? "baseline_pending"
+                : "coverage_pending",
+        latestImpact,
+        sources: coveredSources.map((source) => ({
+          ...source,
+          latestBaselineAt: snapshotsBySource.get(source.id) ?? null,
+        })),
+        sourceCount: coveredSources.length,
+        sourcesWithBaseline: snapshotsBySource.size,
+        recentAssessments: impacts.data ?? [],
+      },
     },
-  });
+    { headers: { "Cache-Control": "private, no-store" } },
+  );
 }
