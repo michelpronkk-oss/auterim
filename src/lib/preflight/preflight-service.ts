@@ -13,25 +13,15 @@ import {
   type RepositoryTarget,
 } from "@/lib/preflight/preflight";
 import { getEnvironment } from "@/lib/env/schema";
+import { isRepositoryProtectedForProduct } from "@/lib/repositories/product-repository-protection";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+
+export { isRepositoryProtectedForProduct } from "@/lib/repositories/product-repository-protection";
 
 type PreflightInput = {
   change: PreflightChange & { workspaceId: string };
   repositories: RepositoryTarget[];
 };
-
-export function isRepositoryProtectedForProduct(input: {
-  selectedForProtection: boolean;
-  productId: string;
-  mappings: Array<{ protected_product_id: string; status: string }>;
-}) {
-  if (input.mappings.length > 0) {
-    return input.mappings.some(
-      (mapping) => mapping.protected_product_id === input.productId && mapping.status === "active",
-    );
-  }
-  return input.selectedForProtection;
-}
 
 export interface PreflightRepository {
   loadEligibleInput(impactAssessmentId: string): Promise<PreflightInput | null>;

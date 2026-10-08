@@ -9,6 +9,7 @@ import { redactSecretShapedContent, type RepositoryTarget } from "@/lib/prefligh
 import { validatePatchInDocker } from "@/lib/preflight/docker-validation";
 import { getEnvironment } from "@/lib/env/schema";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { isRepositoryProtectedForProduct } from "@/lib/repositories/product-repository-protection";
 import {
   logM15LocalTaskOutcome,
   shouldInjectM15PostCommitRetry,
@@ -40,6 +41,7 @@ type Proposal = {
   patch_validation_status: string;
   base_commit_sha: string | null;
   workspace_dependency_id: string | null;
+  product_id: string;
   generation_metadata: Record<string, unknown>;
 };
 
@@ -66,6 +68,7 @@ function repositoryMetadata(value: unknown) {
 async function repositorySnapshot(input: {
   workspaceId: string;
   workspaceDependencyId: string | null;
+  productId: string;
   metadata: unknown;
   baseCommitSha: string;
   internalQaOnly: boolean;
@@ -93,6 +96,21 @@ async function repositorySnapshot(input: {
     .maybeSingle();
   if (repositoryError || !repository || !input.workspaceDependencyId)
     throw new Error("validation_repository_unavailable");
+  const { data: productMappings, error: mappingError } = await client
+    .from("workspace_product_repositories")
+    .select("repository_id,protected_product_id,status")
+    .eq("workspace_id", input.workspaceId)
+    .eq("repository_id", metadata.id);
+  if (mappingError) throw new Error("validation_repository_unavailable");
+  if (
+    !isRepositoryProtectedForProduct({
+      selectedForProtection: repository.selected_for_protection === true,
+      productId: input.productId,
+      mappings: productMappings ?? [],
+    })
+  ) {
+    throw new Error("validation_product_repository_unavailable");
+  }
   const { data: access, error: accessError } = await client
     .from("workspace_repository_access")
     .select("repository_id")
@@ -237,7 +255,7 @@ export const validateRemediationTask = schemaTask({
     const { data: proposalData, error: proposalError } = await client
       .from("remediation_proposals")
       .select(
-        "id,workspace_id,patch,patch_fingerprint,patch_validation_status,base_commit_sha,workspace_dependency_id,generation_metadata",
+        "id,workspace_id,patch,patch_fingerprint,patch_validation_status,base_commit_sha,workspace_dependency_id,product_id,generation_metadata",
       )
       .eq("id", payload.proposalId)
       .eq("workspace_id", payload.workspaceId)
@@ -278,6 +296,7 @@ export const validateRemediationTask = schemaTask({
       snapshot = await repositorySnapshot({
         workspaceId: payload.workspaceId,
         workspaceDependencyId: proposal.workspace_dependency_id,
+        productId: proposal.product_id,
         metadata: repository,
         baseCommitSha: proposal.base_commit_sha,
         internalQaOnly,

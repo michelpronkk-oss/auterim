@@ -8,6 +8,7 @@ import {
   type RepositoryTarget,
 } from "@/lib/preflight/preflight";
 import { SupabasePreflightRepository } from "@/lib/preflight/preflight-service";
+import { isRepositoryProtectedForProduct } from "@/lib/repositories/product-repository-protection";
 import { buildRemediationGuidance } from "@/lib/preflight/remediation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { isM15LocalAcceptanceRuntime } from "@/lib/m15/local-trigger-proof";
@@ -234,6 +235,26 @@ export async function preparePersistedRemediation(input: {
   throwDb(repositoryError);
   const repository = repositoryData as Record<string, unknown> | null;
   if (!repository) fail("repository_unavailable");
+  const { data: productMappings, error: mappingsError } = await client
+    .from("workspace_product_repositories")
+    .select("repository_id,protected_product_id,status")
+    .eq("workspace_id", workspaceId)
+    .eq("repository_id", repositoryId);
+  throwDb(mappingsError);
+  const mappings = (productMappings ?? []) as Array<{
+    repository_id: string;
+    protected_product_id: string;
+    status: string;
+  }>;
+  if (
+    !isRepositoryProtectedForProduct({
+      selectedForProtection: repository.selected_for_protection === true,
+      productId,
+      mappings,
+    })
+  ) {
+    fail("product_repository_unavailable");
+  }
   const connectionId = value<string>(repository, "connection_id");
   const { data: accessData, error: accessError } = await client
     .from("workspace_repository_access")

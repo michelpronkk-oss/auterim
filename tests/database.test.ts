@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
+import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
 import { beforeAll, describe, expect, it } from "vitest";
 import { SafeFetchError } from "@/lib/monitoring/fetcher";
 import { scanSource } from "@/lib/monitoring/scan";
@@ -268,6 +269,24 @@ const businessHandoffMigration = await readFile(
   ),
   "utf8",
 );
+const staleWorkerExecutionMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261025000000_m15_stale_worker_execution_guards.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
+const completionTimeStaleStateMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261108000000_m15_completion_time_stale_state_guards.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 const preflightWorkerRpcAclMigration = await readFile(
   fileURLToPath(
     new URL(
@@ -286,17 +305,28 @@ const productRepositoryProtectionMigration = await readFile(
   ),
   "utf8",
 );
+const productScopedWorkerGuardsMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261114000000_m15_product_scoped_worker_repository_guards.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase(
   applyCompanySurfaceMigration = true,
   applyProductRepositoryProtectionMigration = true,
 ) {
-  const db = new PGlite();
+  const db = new PGlite({ extensions: { pgcrypto } });
   await db.exec(`
     create role anon;
     create role authenticated;
     create role service_role bypassrls;
     create schema auth;
+    create schema extensions;
+    create extension pgcrypto with schema extensions;
     create table auth.users (id uuid primary key,email text,email_confirmed_at timestamptz);
     create function auth.uid() returns uuid language sql stable as $$
       select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
@@ -338,9 +368,12 @@ async function makeDatabase(
   await db.exec(phase4cCorrectnessMigration);
   await db.exec(dependencyLifecycleMigration);
   await db.exec(businessHandoffMigration);
+  await db.exec(staleWorkerExecutionMigration);
+  await db.exec(completionTimeStaleStateMigration);
   await db.exec(preflightWorkerRpcAclMigration);
   if (applyProductRepositoryProtectionMigration)
     await db.exec(productRepositoryProtectionMigration);
+  if (applyProductRepositoryProtectionMigration) await db.exec(productScopedWorkerGuardsMigration);
   return db;
 }
 
@@ -932,6 +965,22 @@ describe("Auterim migration and monitoring transaction", () => {
       [productA, repositoryIds[0]],
     );
     expect(mapped.rows[0]!.value.protectedRepositoryUsage).toBe(1);
+    await db.exec("reset role; set role service_role");
+    await db.query("update public.repositories set selected_for_protection=true where id=$1", [
+      repositoryIds[1],
+    ]);
+    expect(
+      (
+        await db.query<{ eligible: boolean }>(
+          "select private.m15_product_repository_is_current($1,$2,$3) as eligible",
+          [workspaceId, productA, repositoryIds[1]],
+        )
+      ).rows[0]!.eligible,
+    ).toBe(true);
+    await db.query("update public.repositories set selected_for_protection=false where id=$1", [
+      repositoryIds[1],
+    ]);
+    await db.exec("reset role; set role authenticated");
     const repeated = await db.query<{ value: { protectedRepositoryUsage: number } }>(
       "select public.map_repository_to_product($1,$2) as value",
       [productA, repositoryIds[0]],
@@ -973,6 +1022,24 @@ describe("Auterim migration and monitoring transaction", () => {
       [productA, repositoryIds[0]],
     );
     expect(unmapOne.rows[0]!.value.protectedRepositoryUsage).toBe(1);
+    await db.exec("reset role; set role service_role");
+    expect(
+      (
+        await db.query<{ eligible: boolean }>(
+          "select private.m15_product_repository_is_current($1,$2,$3) as eligible",
+          [workspaceId, productA, repositoryIds[0]],
+        )
+      ).rows[0]!.eligible,
+    ).toBe(false);
+    expect(
+      (
+        await db.query<{ eligible: boolean }>(
+          "select private.m15_product_repository_is_current($1,$2,$3) as eligible",
+          [workspaceId, productB, repositoryIds[0]],
+        )
+      ).rows[0]!.eligible,
+    ).toBe(true);
+    await db.exec("reset role; set role authenticated");
     expect(
       (
         await db.query<{ status: string }>(
@@ -1253,6 +1320,403 @@ describe("Auterim migration and monitoring transaction", () => {
       productA,
       repositoryIds[0],
     ]);
+    await db.close();
+  });
+
+  it("rejects Product A Preflight and remediation persistence after its repository is unmapped", async () => {
+    const db = await makeDatabase();
+    const owner = "51515151-5151-4151-8151-515151515151";
+    await db.query("insert into auth.users(id) values($1)", [owner]);
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    await db.exec("set role authenticated");
+    const workspaceId = (
+      await db.query<{ id: string }>("select public.create_workspace('Worker guard tenant') as id")
+    ).rows[0]!.id;
+    await db.exec("reset role; set role service_role");
+    await db.query(
+      `insert into public.workspace_subscriptions(workspace_id,plan,status,current_period_start,current_period_end)
+       values($1,'pro','active',now(),now()+interval '30 days')`,
+      [workspaceId],
+    );
+    const productA = (
+      await db.query<{ id: string }>(
+        "select id from public.workspace_products where workspace_id=$1 and is_default",
+        [workspaceId],
+      )
+    ).rows[0]!.id;
+    const productB = (
+      await db.query<{ id: string }>(
+        `insert into public.workspace_products(workspace_id,name,slug,status,created_by)
+         values($1,'Product B','product-b','protected',$2) returning id`,
+        [workspaceId, owner],
+      )
+    ).rows[0]!.id;
+    await db.query(
+      "update public.workspace_products set status='protected',protected_at=now() where id=$1",
+      [productA],
+    );
+    const provider = (
+      await db.query<{ id: string }>("select id from public.dependency_catalog where slug='openai'")
+    ).rows[0]!.id;
+    const dependencyId = (
+      await db.query<{ id: string }>(
+        `insert into public.workspace_dependencies(workspace_id,dependency_id,selected_by,protected_product_id)
+         values($1,$2,$3,$4) returning id`,
+        [workspaceId, provider, owner, productA],
+      )
+    ).rows[0]!.id;
+    const connectionId = (
+      await db.query<{ id: string }>(
+        `insert into public.repository_connections(workspace_id,installation_id,account_login,connected_by)
+         values($1,95101,'worker-guard-fixture',$2) returning id`,
+        [workspaceId, owner],
+      )
+    ).rows[0]!.id;
+    const repositoryId = (
+      await db.query<{ id: string }>(
+        `insert into public.repositories(workspace_id,connection_id,external_id,owner,name,default_branch)
+         values($1,$2,95102,'worker-guard-fixture','shared-repo','main') returning id`,
+        [workspaceId, connectionId],
+      )
+    ).rows[0]!.id;
+    await db.query(
+      `insert into public.workspace_repository_access(workspace_id,workspace_dependency_id,repository_id)
+       values($1,$2,$3)`,
+      [workspaceId, dependencyId, repositoryId],
+    );
+
+    const sourceId = (
+      await db.query<{ id: string }>(
+        `select source.id from public.source_catalog source
+         join public.dependency_catalog dependency on dependency.id=source.dependency_id
+         where dependency.slug='openai' and source.enabled order by source.id limit 1`,
+      )
+    ).rows[0]!.id;
+    const firstScanId = (
+      await db.query<{ id: string }>(
+        `insert into public.scan_runs(source_id,trigger_run_id,attempt_number,status,finished_at)
+         values($1,'worker-guard-before',1,'success',now()) returning id`,
+        [sourceId],
+      )
+    ).rows[0]!.id;
+    const firstSnapshotId = (
+      await db.query<{ id: string }>(
+        `insert into public.source_snapshots(source_id,scan_run_id,version,content_hash,normalized_content,normalized_bytes,content_bytes)
+         values($1,$2,95101,repeat('a',64),'before',6,6) returning id`,
+        [sourceId, firstScanId],
+      )
+    ).rows[0]!.id;
+    const secondScanId = (
+      await db.query<{ id: string }>(
+        `insert into public.scan_runs(source_id,trigger_run_id,attempt_number,status,finished_at)
+         values($1,'worker-guard-after',1,'changed',now()) returning id`,
+        [sourceId],
+      )
+    ).rows[0]!.id;
+    const secondSnapshotId = (
+      await db.query<{ id: string }>(
+        `insert into public.source_snapshots(source_id,scan_run_id,previous_snapshot_id,version,content_hash,normalized_content,normalized_bytes,content_bytes)
+         values($1,$2,$3,95102,repeat('b',64),'after!',6,6) returning id`,
+        [sourceId, secondScanId, firstSnapshotId],
+      )
+    ).rows[0]!.id;
+    const changeId = (
+      await db.query<{ id: string }>(
+        `insert into public.source_changes(source_id,scan_run_id,previous_snapshot_id,new_snapshot_id,diff_text,added_lines,removed_lines,previous_bytes,new_bytes)
+         values($1,$2,$3,$4,'fixture change',1,0,6,6) returning id`,
+        [sourceId, secondScanId, firstSnapshotId, secondSnapshotId],
+      )
+    ).rows[0]!.id;
+    const classificationId = (
+      await db.query<{ id: string }>(
+        `insert into public.source_change_classifications(
+           change_id,classifier_version,schema_version,prompt_version,evidence_fingerprint,provider,status,
+           material,category,affected_entities,severity_hint,confidence,summary,evidence,reasoning_summary,
+           decision_status,classified_at
+         ) values($1,'fixture-v1',1,'fixture-prompt-v1',repeat('c',32),'fixture','classified',true,
+           'api_change','[]'::jsonb,'high',0.9,'Fixture change','[]'::jsonb,'Fixture evidence',
+           'classified',now()) returning id`,
+        [changeId],
+      )
+    ).rows[0]!.id;
+    const assessmentId = (
+      await db.query<{ id: string }>(
+        `insert into public.impact_assessments(
+           workspace_id,workspace_dependency_id,source_change_classification_id,context_fingerprint,
+           impact_engine_version,schema_version,prompt_version,provider,status,attempt_count,relevant,
+           relevance,severity,affected_areas,impact_summary,why_it_matters,action_required,
+           recommended_action,confidence,missing_context,evidence_refs,assessed_at
+         ) values($1,$2,$3,repeat('d',64),'impact-v1',1,'impact-prompt-v1','fixture','assessed',1,
+           true,'high','high','[]'::jsonb,'Fixture impact','Fixture context',true,'Review the change',
+           0.9,'[]'::jsonb,'[]'::jsonb,now()) returning id`,
+        [workspaceId, dependencyId, classificationId],
+      )
+    ).rows[0]!.id;
+    const verifiedRunId = (
+      await db.query<{ id: string }>(
+        `insert into public.preflight_runs(
+           workspace_id,impact_assessment_id,status,verified_impact,confidence,preflight_version,
+           repository_set_fingerprint,change_fingerprint,started_at,completed_at,repositories_scanned
+         ) values($1,$2,'completed','verified',0.9,'fixture-v1',repeat('e',64),repeat('f',64),now(),now(),1)
+         returning id`,
+        [workspaceId, assessmentId],
+      )
+    ).rows[0]!.id;
+    await db.query(
+      `insert into public.preflight_findings(
+         workspace_id,preflight_run_id,repository_id,commit_sha,file_path,line_start,line_end,
+         finding_type,affected_entity,confidence,verification,explanation,evidence_fingerprint
+       ) values($1,$2,$3,repeat('a',40),'src/app.ts',1,1,'provider_import','OpenAI',0.9,
+         'verified','Fixture finding',repeat('b',64))`,
+      [workspaceId, verifiedRunId, repositoryId],
+    );
+    const queuedRunId = (
+      await db.query<{ id: string }>(
+        `insert into public.preflight_runs(workspace_id,impact_assessment_id,preflight_version,
+           repository_set_fingerprint,change_fingerprint)
+         values($1,$2,'fixture-v1',repeat('1',64),repeat('2',64)) returning id`,
+        [workspaceId, assessmentId],
+      )
+    ).rows[0]!.id;
+    const runningRunId = (
+      await db.query<{ id: string; run_claim_token: string }>(
+        `insert into public.preflight_runs(workspace_id,impact_assessment_id,status,preflight_version,
+           repository_set_fingerprint,change_fingerprint,started_at,run_claim_token,run_lease_until)
+         values($1,$2,'running','fixture-v1',repeat('3',64),repeat('4',64),now(),gen_random_uuid(),now()+interval '5 minutes')
+         returning id,run_claim_token`,
+        [workspaceId, assessmentId],
+      )
+    ).rows[0]!;
+    const prepQueueId = (
+      await db.query<{ id: string }>(
+        `insert into public.remediation_preparation_queue(workspace_id,preflight_run_id,impact_assessment_id,status,attempt_count)
+         values($1,$2,$3,'dispatched',1) returning id`,
+        [workspaceId, verifiedRunId, assessmentId],
+      )
+    ).rows[0]!.id;
+
+    await db.exec("reset role; set role authenticated");
+    await db.query("select public.map_repository_to_product($1,$2)", [productA, repositoryId]);
+    await db.query("select public.map_repository_to_product($1,$2)", [productB, repositoryId]);
+    await db.query("select public.unmap_repository_from_product($1,$2)", [productA, repositoryId]);
+    await db.exec("reset role; set role service_role");
+
+    expect(
+      (
+        await db.query<{ claim: string | null }>("select public.claim_preflight_run($1) as claim", [
+          queuedRunId,
+        ])
+      ).rows[0]!.claim,
+    ).toBeNull();
+    await expect(
+      db.query("select public.save_preflight_result($1,$2,array[$3::uuid],'{}'::jsonb)", [
+        runningRunId.id,
+        runningRunId.run_claim_token,
+        repositoryId,
+      ]),
+    ).rejects.toThrow(/preflight_repository_product_access_revoked/);
+    expect(
+      (
+        await db.query<{ status: string; verified_impact: string | null }>(
+          "select status,verified_impact from public.preflight_runs where id=$1",
+          [runningRunId.id],
+        )
+      ).rows[0],
+    ).toEqual({ status: "running", verified_impact: null });
+
+    expect(
+      (
+        await db.query<{ claim: string | null }>(
+          "select public.claim_remediation_preparation($1,1) as claim",
+          [prepQueueId],
+        )
+      ).rows[0]!.claim,
+    ).toBeNull();
+    expect(
+      (
+        await db.query<{ status: string; error_category: string }>(
+          "select status,error_category from public.remediation_preparation_queue where id=$1",
+          [prepQueueId],
+        )
+      ).rows[0],
+    ).toEqual({ status: "denied", error_category: "product_repository_unavailable" });
+
+    const claimToken = "61616161-6161-4161-8161-616161616161";
+    await db.query(
+      `update public.remediation_preparation_queue set status='running',claim_token=$2,
+       lease_until=now()+interval '5 minutes' where id=$1`,
+      [prepQueueId, claimToken],
+    );
+    const completion = await db.query<{ value: { status: string } }>(
+      `select public.complete_remediation_preparation($1,$2,'completed',
+       jsonb_build_object('product_id',$3::uuid,'generation_metadata',jsonb_build_object('repository',jsonb_build_object('id',$4::uuid))),null) as value`,
+      [prepQueueId, claimToken, productA, repositoryId],
+    );
+    expect(completion.rows[0]!.value.status).toBe("denied");
+    expect(
+      (
+        await db.query<{ count: number }>(
+          "select count(*)::int as count from public.remediation_proposals where workspace_id=$1",
+          [workspaceId],
+        )
+      ).rows[0]!.count,
+    ).toBe(0);
+
+    const proposalId = (
+      await db.query<{ id: string }>(
+        `insert into public.remediation_proposals(
+           workspace_id,preflight_run_id,proposal_kind,proposal_fingerprint,rationale,
+           validation_requirements,affected_files,patch,base_commit_sha,product_id,
+           workspace_dependency_id,source_change_id,source_change_classification_id,
+           patch_fingerprint,generation_metadata,patch_validation_status
+         ) values($1,$2,'patch',repeat('9',64),'Grounded fixture proposal','[]'::jsonb,
+           '["src/app.ts"]'::jsonb,'fixture patch',repeat('a',40),$3,$4,$5,$6,repeat('8',64),
+           jsonb_build_object('repository',jsonb_build_object('id',$7::uuid)), 'validating') returning id`,
+        [
+          workspaceId,
+          verifiedRunId,
+          productA,
+          dependencyId,
+          changeId,
+          classificationId,
+          repositoryId,
+        ],
+      )
+    ).rows[0]!.id;
+    const validationQueueId = (
+      await db.query<{ id: string }>(
+        `select id from public.remediation_validation_queue
+         where workspace_id=$1 and remediation_proposal_id=$2 and patch_fingerprint=repeat('8',64)`,
+        [workspaceId, proposalId],
+      )
+    ).rows[0]!.id;
+    await db.query(
+      `update public.remediation_validation_queue set status='running',attempt_count=1,
+       claim_token='71717171-7171-4171-8171-717171717171',lease_until=now()+interval '5 minutes'
+       where id=$1`,
+      [validationQueueId],
+    );
+    await db.query(
+      "update public.remediation_proposals set patch_validation_status='validating' where id=$1",
+      [proposalId],
+    );
+    await db.query(
+      `select public.complete_remediation_validation(
+         $1,'71717171-7171-4171-8171-717171717171','validated',null,'[]'::jsonb,'Fixture result',10
+       )`,
+      [validationQueueId],
+    );
+    expect(
+      (
+        await db.query<{ status: string }>(
+          "select status from public.remediation_validation_queue where id=$1",
+          [validationQueueId],
+        )
+      ).rows[0]!.status,
+    ).toBe("denied");
+    expect(
+      (
+        await db.query<{ outcome: string }>(
+          "select outcome from public.remediation_validation_attempts where queue_id=$1",
+          [validationQueueId],
+        )
+      ).rows[0]!.outcome,
+    ).toBe("denied");
+    expect(
+      (
+        await db.query<{ patch_validation_status: string }>(
+          "select patch_validation_status from public.remediation_proposals where id=$1",
+          [proposalId],
+        )
+      ).rows[0]!.patch_validation_status,
+    ).toBe("validation_failed");
+
+    const queuedProposalId = (
+      await db.query<{ id: string }>(
+        `insert into public.remediation_proposals(
+           workspace_id,preflight_run_id,proposal_kind,proposal_fingerprint,rationale,
+           validation_requirements,affected_files,patch,base_commit_sha,product_id,
+           workspace_dependency_id,source_change_id,source_change_classification_id,
+           patch_fingerprint,generation_metadata,patch_validation_status
+         ) values($1,$2,'patch',repeat('6',64),'Second fixture proposal','[]'::jsonb,
+           '["src/app.ts"]'::jsonb,'second fixture patch',repeat('a',40),$3,$4,$5,$6,repeat('7',64),
+           jsonb_build_object('repository',jsonb_build_object('id',$7::uuid)), 'queued') returning id`,
+        [
+          workspaceId,
+          verifiedRunId,
+          productA,
+          dependencyId,
+          changeId,
+          classificationId,
+          repositoryId,
+        ],
+      )
+    ).rows[0]!.id;
+    const queuedValidationId = (
+      await db.query<{ id: string }>(
+        `select id from public.remediation_validation_queue
+         where workspace_id=$1 and remediation_proposal_id=$2 and patch_fingerprint=repeat('7',64)`,
+        [workspaceId, queuedProposalId],
+      )
+    ).rows[0]!.id;
+    await db.query(
+      `update public.remediation_validation_queue set status='dispatched',attempt_count=1
+       where id=$1`,
+      [queuedValidationId],
+    );
+    expect(
+      (
+        await db.query<{ claim: string | null }>(
+          "select public.claim_remediation_validation($1,1) as claim",
+          [queuedValidationId],
+        )
+      ).rows[0]!.claim,
+    ).toBeNull();
+    expect(
+      (
+        await db.query<{ status: string }>(
+          "select status from public.remediation_validation_queue where id=$1",
+          [queuedValidationId],
+        )
+      ).rows[0]!.status,
+    ).toBe("denied");
+    expect(
+      (
+        await db.query<{ patch_validation_status: string }>(
+          "select patch_validation_status from public.remediation_proposals where id=$1",
+          [queuedProposalId],
+        )
+      ).rows[0]!.patch_validation_status,
+    ).toBe("validation_failed");
+
+    await db.exec("reset role; set role authenticated");
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    const observations = await db.query<{
+      source_id: string;
+      snapshot_id: string;
+      scan_status: string;
+    }>("select * from public.get_product_source_observation_states($1,array[$2::uuid])", [
+      workspaceId,
+      sourceId,
+    ]);
+    expect(observations.rows).toEqual([
+      expect.objectContaining({
+        source_id: sourceId,
+        snapshot_id: secondSnapshotId,
+        scan_status: "changed",
+      }),
+    ]);
+    const outsider = "81818181-8181-4181-8181-818181818181";
+    await db.exec("reset role");
+    await db.query("insert into auth.users(id) values($1)", [outsider]);
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [outsider]);
+    await db.exec("set role authenticated");
+    await expect(
+      db.query("select * from public.get_product_source_observation_states($1,array[$2::uuid])", [
+        workspaceId,
+        sourceId,
+      ]),
+    ).rejects.toThrow();
     await db.close();
   });
 
