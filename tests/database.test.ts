@@ -106,6 +106,15 @@ const growthBoundsMigration = await readFile(
   ),
   "utf8",
 );
+const growthClaimAmbiguityMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261112000000_growth_claim_attempts_ambiguity_fix.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 const connectorMigration = await readFile(
   fileURLToPath(
     new URL("../supabase/migrations/20261009000000_connector_platform_v1.sql", import.meta.url),
@@ -308,6 +317,7 @@ async function makeDatabase(
   await db.exec(protectionMigration);
   await db.exec(growthMigration);
   await db.exec(growthBoundsMigration);
+  await db.exec(growthClaimAmbiguityMigration);
   await db.exec(connectorMigration);
   await db.exec(growthFeedbackMigration);
   await db.exec(growthSearchConsoleScopeMigration);
@@ -2447,6 +2457,17 @@ describe("Auterim migration and monitoring transaction", () => {
       db.query("select * from public.claim_growth_evaluation_batch(1)"),
     ).rejects.toBeTruthy();
     await db.exec("reset role; set role service_role");
+    let remainingClaims: { queue_id: string }[] = [{ queue_id: "pending" }];
+    let claimCalls = 0;
+    while (remainingClaims.length > 0 && claimCalls < 10) {
+      const claim = await db.query<{ queue_id: string }>(
+        "select * from public.claim_growth_evaluation_batch(100)",
+      );
+      remainingClaims = claim.rows;
+      claimCalls += 1;
+    }
+    expect(remainingClaims).toHaveLength(0);
+    expect(claimCalls).toBeGreaterThan(1);
     await expect(
       db.query("select * from public.claim_growth_evaluation_batch(101)"),
     ).rejects.toBeTruthy();
