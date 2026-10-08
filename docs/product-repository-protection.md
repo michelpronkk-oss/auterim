@@ -21,7 +21,7 @@ Archiving a product atomically marks its active repository mappings inactive and
 
 During migration, uniquely evidenced selected repositories are backfilled only when their connection and repository are available and their dependency evidence resolves to exactly one product. Protected products receive active mappings; draft or archived products receive inactive history rows. Ambiguous, unlinked, revoked, or disconnected repositories are not guessed into a product mapping.
 
-For repositories without any mapping history, the temporary quota bridge continues to count `selected_for_protection`. Once mapping history exists, only active mappings on a protected product contribute protection usage; the legacy flag is maintained as a compatibility mirror and cannot independently add usage.
+For repositories without any mapping history, the temporary quota bridge counts `selected_for_protection` only when dependency-access evidence resolves to exactly one protected Product. Ambiguous or unlinked selected rows do not consume protected-repository quota. Once mapping history exists, only active mappings on a protected product contribute protection usage; the legacy flag is maintained as a compatibility mirror and cannot independently add usage. The legacy repository-selection mutation uses this same usage function when enforcing the quota.
 
 For mapped repositories, the compatibility flag represents active protection intent, not provider access health. A GitHub revocation can leave the flag true for an active mapping, but repository availability and connected-installation checks continue to block Preflight and validation until access is restored.
 

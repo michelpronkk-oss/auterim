@@ -323,6 +323,15 @@ const deterministicLegacyRepositoryAttributionMigration = await readFile(
   ),
   "utf8",
 );
+const legacyAttributionQuotaConsistencyMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261116000000_m15_legacy_attribution_quota_consistency.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase(
   applyCompanySurfaceMigration = true,
@@ -385,6 +394,8 @@ async function makeDatabase(
   if (applyProductRepositoryProtectionMigration) await db.exec(productScopedWorkerGuardsMigration);
   if (applyProductRepositoryProtectionMigration)
     await db.exec(deterministicLegacyRepositoryAttributionMigration);
+  if (applyProductRepositoryProtectionMigration)
+    await db.exec(legacyAttributionQuotaConsistencyMigration);
   return db;
 }
 
@@ -1317,6 +1328,61 @@ describe("Auterim migration and monitoring transaction", () => {
         )
       ).rows[0]!.current,
     ).toBe(false);
+
+    await db.exec("reset role; set role authenticated");
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    await db.query("select public.unmap_repository_from_product($1,$2)", [
+      productA,
+      ambiguousRepositoryId,
+    ]);
+    await db.exec("reset role; set role service_role");
+    const quotaRepositories = await db.query<{ id: string }>(
+      `insert into public.repositories(workspace_id,connection_id,external_id,owner,name,default_branch,selected_for_protection)
+       values($1,$2,9405,'legacy-account','mapped-quota-1','main',true),
+             ($1,$2,9406,'legacy-account','mapped-quota-2','main',true),
+             ($1,$2,9407,'legacy-account','mapped-quota-3','main',true)
+       returning id`,
+      [workspaceId, connectionId],
+    );
+    for (const repository of quotaRepositories.rows) {
+      await db.query(
+        `insert into public.workspace_product_repositories(
+           workspace_id,protected_product_id,repository_id,status,provenance
+         ) values($1,$2,$3,'active','user_selected')`,
+        [workspaceId, productA, repository.id],
+      );
+    }
+    const quotaTargetRepositoryId = (
+      await db.query<{ id: string }>(
+        `insert into public.repositories(workspace_id,connection_id,external_id,owner,name,default_branch)
+         values($1,$2,9408,'legacy-account','quota-target','main') returning id`,
+        [workspaceId, connectionId],
+      )
+    ).rows[0]!.id;
+    expect(
+      (
+        await db.query<{ usage: number }>(
+          "select private.workspace_protected_repository_usage($1) as usage",
+          [workspaceId],
+        )
+      ).rows[0]!.usage,
+    ).toBe(4);
+    await db.exec("reset role; set role authenticated");
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    const belowLimitSelection = await db.query<{ value: { productCount: number } }>(
+      "select public.set_repository_protection($1,true,array[$2::uuid]) as value",
+      [quotaTargetRepositoryId, dependencyA],
+    );
+    expect(belowLimitSelection.rows[0]!.value.productCount).toBe(1);
+    await db.exec("reset role; set role service_role");
+    expect(
+      (
+        await db.query<{ usage: number }>(
+          "select private.workspace_protected_repository_usage($1) as usage",
+          [workspaceId],
+        )
+      ).rows[0]!.usage,
+    ).toBe(5);
     await db.close();
   });
 
@@ -1858,6 +1924,85 @@ describe("Auterim migration and monitoring transaction", () => {
         )
       ).rows[0]!.patch_validation_status,
     ).toBe("validation_failed");
+
+    await db.query(
+      `insert into public.workspace_product_repositories(
+         workspace_id,protected_product_id,repository_id,status,provenance
+       ) values($1,$2,$3,'active','user_selected')`,
+      [workspaceId, productA, repositoryId],
+    );
+    await db.query("update public.repositories set selected_for_protection=false where id=$1", [
+      repositoryId,
+    ]);
+    const replacementEvidenceId = (
+      await db.query<{ id: string }>(
+        `insert into public.source_remediation_replacements(
+           source_change_id,source_change_classification_id,old_expression,new_expression,
+           evidence_source_url,evidence_fingerprint,synthetic,internal_qa,public_eligible
+         ) values($1,$2,'legacyCall()','modernCall()','https://provider.example/changelog',repeat('c',64),true,true,false)
+         returning id`,
+        [changeId, classificationId],
+      )
+    ).rows[0]!.id;
+    await db.query(
+      `insert into public.product_remediation_policies(
+         workspace_id,product_id,enabled,draft_pr_preparation_allowed,allowed_repository_ids,updated_by
+       ) values($1,$2,true,true,array[$3::uuid],$4)
+       on conflict(product_id) do update set enabled=true,draft_pr_preparation_allowed=true,
+         allowed_repository_ids=excluded.allowed_repository_ids,updated_by=excluded.updated_by`,
+      [workspaceId, productA, repositoryId, owner],
+    );
+    const explicitlyMappedProposalId = (
+      await db.query<{ id: string }>(
+        `insert into public.remediation_proposals(
+           workspace_id,preflight_run_id,proposal_kind,proposal_fingerprint,rationale,
+           validation_requirements,affected_files,patch,base_commit_sha,product_id,
+           workspace_dependency_id,source_change_id,source_change_classification_id,
+           patch_fingerprint,generation_metadata,patch_validation_status
+         ) values($1,$2,'patch',repeat('5',64),'Explicit mapping proposal','[]'::jsonb,
+           '["src/app.ts"]'::jsonb,'mapped fixture patch',repeat('a',40),$3,$4,$5,$6,repeat('6',64),
+           jsonb_build_object('repository',jsonb_build_object('id',$7::uuid),
+             'replacementEvidenceId',$8::text,'internalQaOnly',true), 'queued') returning id`,
+        [
+          workspaceId,
+          verifiedRunId,
+          productA,
+          dependencyId,
+          changeId,
+          classificationId,
+          repositoryId,
+          replacementEvidenceId,
+        ],
+      )
+    ).rows[0]!.id;
+    const explicitlyMappedQueueId = (
+      await db.query<{ id: string }>(
+        `select id from public.remediation_validation_queue
+         where workspace_id=$1 and remediation_proposal_id=$2 and patch_fingerprint=repeat('6',64)`,
+        [workspaceId, explicitlyMappedProposalId],
+      )
+    ).rows[0]!.id;
+    await db.query(
+      `update public.remediation_validation_queue set status='dispatched',attempt_count=1
+       where id=$1`,
+      [explicitlyMappedQueueId],
+    );
+    expect(
+      (
+        await db.query<{ claim: string | null }>(
+          "select public.claim_remediation_validation($1,1) as claim",
+          [explicitlyMappedQueueId],
+        )
+      ).rows[0]!.claim,
+    ).not.toBeNull();
+    expect(
+      (
+        await db.query<{ selected_for_protection: boolean }>(
+          "select selected_for_protection from public.repositories where id=$1",
+          [repositoryId],
+        )
+      ).rows[0]!.selected_for_protection,
+    ).toBe(true);
 
     await db.exec("reset role; set role authenticated");
     await db.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
