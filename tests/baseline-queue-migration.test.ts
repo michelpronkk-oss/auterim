@@ -24,6 +24,15 @@ const reliabilityMigration = await readFile(
   ),
   "utf8",
 );
+const completionRaceMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261111000000_baseline_dispatch_completion_race.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 const ownerId = "00000000-0000-4000-8000-000000000101";
 
@@ -85,7 +94,12 @@ describe("baseline dispatch migration", () => {
        values ($1,$2,1,repeat('a',64),'historical pricing snapshot',27,27) returning id`,
       [sourceId, run.rows[0]!.id],
     );
+    await db.query(
+      "insert into public.baseline_scan_queue(source_id,status) values ($1,'complete')",
+      [sourceId],
+    );
     await db.exec(reliabilityMigration);
+    await db.exec(completionRaceMigration);
 
     const current = await db.query<{ id: string; url: string; created_at: string }>(`
       select source.id,source.url,source.created_at::text from public.source_catalog source
@@ -111,12 +125,21 @@ describe("baseline dispatch migration", () => {
         )
       ).rows[0]!.count,
     ).toBe(0);
+    expect(
+      (
+        await db.query<{ trigger_run_id: string }>(
+          "select trigger_run_id from public.baseline_scan_queue where source_id=$1",
+          [sourceId],
+        )
+      ).rows[0]!.trigger_run_id,
+    ).toBe("historical-openai-pricing-scan");
     await db.close();
   });
 
   it("reconciles globally, distinguishes empty from error, reclaims leases, bounds attempts, and restricts access", async () => {
     const db = await database();
     await db.exec(reliabilityMigration);
+    await db.exec(completionRaceMigration);
     await db.query(`
       insert into public.source_catalog(dependency_id,name,source_type,url)
       select id,'Baseline QA OpenAI docs','documentation','https://developers.openai.com/api/docs'
@@ -196,6 +219,26 @@ describe("baseline dispatch migration", () => {
         )
       ).rows[0]!.count,
     ).toBe(1);
+    await db.query("select public.mark_due_baseline_source_dispatched($1,$2,$3)", [
+      completed.queue_id,
+      completed.dispatch_attempt,
+      "baseline-reconciliation-success",
+    ]);
+    expect(
+      (
+        await db.query<{ trigger_run_id: string }>(
+          "select trigger_run_id from public.baseline_scan_queue where source_id=$1",
+          [completed.source_id],
+        )
+      ).rows[0]!.trigger_run_id,
+    ).toBe("baseline-reconciliation-success");
+    await expect(
+      db.query("select public.mark_due_baseline_source_dispatched($1,$2,$3)", [
+        completed.queue_id,
+        completed.dispatch_attempt,
+        "different-run-must-not-overwrite",
+      ]),
+    ).rejects.toThrow();
     const dueAfterBaseline = await db.query<{ source_id: string }>(
       "select * from public.list_due_source_ids(now(),100)",
     );
