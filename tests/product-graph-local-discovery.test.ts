@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  cliDependencyConfirmation,
   cliCatalogCoverage,
   cliMonitoringState,
   cliObservationChange,
@@ -7,6 +8,34 @@ import {
 } from "@/lib/protection/product-graph";
 
 describe("local discovery graph semantics", () => {
+  it("links known local observations only to an existing Product dependency", () => {
+    const dependencies = [{ id: "workspace-dependency-1", dependency_id: "catalog-openai" }];
+    expect(
+      cliDependencyConfirmation({
+        providerId: "catalog-openai",
+        persistedWorkspaceDependencyId: null,
+        dependencies,
+      }),
+    ).toEqual({
+      confirmedDependencyId: "workspace-dependency-1",
+      state: "confirmed_for_product",
+    });
+    expect(
+      cliDependencyConfirmation({
+        providerId: "catalog-stripe",
+        persistedWorkspaceDependencyId: null,
+        dependencies,
+      }),
+    ).toEqual({ confirmedDependencyId: null, state: "needs_confirmation" });
+    expect(
+      cliDependencyConfirmation({
+        providerId: null,
+        persistedWorkspaceDependencyId: null,
+        dependencies,
+      }),
+    ).toEqual({ confirmedDependencyId: null, state: "unknown_provider_review_only" });
+  });
+
   it("only compares complete scans whose full observation sets were read", () => {
     expect(
       cliScanComparisonState({

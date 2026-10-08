@@ -1,4 +1,8 @@
 import { cliSecretHash } from "@/lib/cli/security";
+import {
+  cliPayloadSchemaCompatibility,
+  SUPPORTED_CLI_PAYLOAD_SCHEMA,
+} from "@/lib/cli/compatibility";
 import { parseCliDiscoveryPayload, payloadDigest } from "@/lib/cli/payload";
 import { readBoundedTextBody } from "@/lib/http/bounded-body";
 import { claimPublicRateLimit } from "@/lib/public/rate-limit";
@@ -24,7 +28,13 @@ export async function POST(request: Request) {
   let payload: ReturnType<typeof parseCliDiscoveryPayload>;
   try {
     raw = await readBoundedTextBody(request.body, MAX_PAYLOAD_BYTES);
-    payload = parseCliDiscoveryPayload(JSON.parse(raw));
+    const decoded: unknown = JSON.parse(raw);
+    if (cliPayloadSchemaCompatibility(decoded) === "unsupported")
+      return privateJson(
+        { error: "unsupported_cli_version", supportedSchemaVersion: SUPPORTED_CLI_PAYLOAD_SCHEMA },
+        426,
+      );
+    payload = parseCliDiscoveryPayload(decoded);
   } catch (error) {
     return privateJson(
       {

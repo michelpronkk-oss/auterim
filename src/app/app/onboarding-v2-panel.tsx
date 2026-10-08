@@ -20,6 +20,27 @@ type Candidate = {
   evidenceSummary: Array<{ signalType: string; strength: string; sourceOrigin: string }>;
 };
 type CatalogDependency = { id: string; slug: string; name: string; category: string };
+type LocalDiscoveryObservation = {
+  id: string;
+  evidenceFamily: string;
+  identifier: string;
+  identity: string;
+  dependencyConfirmationState:
+    "confirmed_for_product" | "needs_confirmation" | "unknown_provider_review_only";
+  provider: null | { id: string; name: string; slug: string };
+  confirmedDependencyId: string | null;
+  authoritativeSourcesAvailable: number | null;
+  catalogCoverageState: string;
+  safeRelativePath: string | null;
+};
+type LocalCandidateSummary = {
+  provider: LocalDiscoveryObservation["provider"];
+  identifier: string;
+  count: number;
+  confirmedDependencyId: string | null;
+  sources: number | null;
+  families: Set<string>;
+};
 type ReadModel = {
   company: { name: string; websiteUrl: string | null };
   product: Product;
@@ -53,6 +74,15 @@ type ReadModel = {
       mappingState: string;
       verificationCapabilityAvailable: boolean;
     }>;
+    localDiscovery?: {
+      latestScan: null | {
+        status: string;
+        receivedAt: string;
+        observationCount: number;
+      };
+      observations: LocalDiscoveryObservation[];
+      truncated: boolean;
+    };
   };
   repositories: Array<{ id: string; status: string }>;
   recommendations: Array<{ key: string; reason: string; action: string }>;
@@ -74,6 +104,36 @@ const stageLabels: Record<OnboardingV2Stage, string> = {
   activation: "Activation",
   complete: "Protected",
 };
+
+function summarizeLocalCandidates(
+  observations: LocalDiscoveryObservation[],
+): LocalCandidateSummary[] {
+  const grouped = new Map<string, LocalCandidateSummary>();
+  for (const observation of observations) {
+    const key = observation.provider?.slug ?? `unknown:${observation.identifier}`;
+    const current = grouped.get(key) ?? {
+      provider: observation.provider,
+      identifier: observation.identifier,
+      count: 0,
+      confirmedDependencyId: observation.confirmedDependencyId,
+      sources: observation.authoritativeSourcesAvailable,
+      families: new Set<string>(),
+    };
+    current.count += 1;
+    current.confirmedDependencyId ??= observation.confirmedDependencyId;
+    current.families.add(observation.evidenceFamily);
+    if (observation.authoritativeSourcesAvailable !== null)
+      current.sources = Math.max(current.sources ?? 0, observation.authoritativeSourcesAvailable);
+    grouped.set(key, current);
+  }
+  return [...grouped.values()]
+    .sort((left, right) =>
+      (left.provider?.name ?? left.identifier).localeCompare(
+        right.provider?.name ?? right.identifier,
+      ),
+    )
+    .slice(0, 20);
+}
 
 export function OnboardingV2Panel({
   workspaceId,
@@ -115,6 +175,10 @@ export function OnboardingV2Panel({
   );
   const [monthlyReport, setMonthlyReport] = useState(true);
   const loadGeneration = useRef(0);
+  const localCandidates = useMemo(
+    () => summarizeLocalCandidates(model?.protectionGraph?.localDiscovery?.observations ?? []),
+    [model?.protectionGraph?.localDiscovery?.observations],
+  );
 
   const load = useCallback(
     async (requestedProductId?: string) => {
@@ -291,6 +355,17 @@ export function OnboardingV2Panel({
       });
       setCatalogResults([]);
       setCatalogQuery("");
+      await load(productId);
+    });
+  }
+
+  async function confirmLocalProvider(dependencySlug: string) {
+    await run(async () => {
+      await api(`/api/products/${productId}/dependencies`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "manual_add", workspaceId, dependencySlug }),
+      });
       await load(productId);
     });
   }
@@ -541,7 +616,8 @@ export function OnboardingV2Panel({
           {model.progress.stage === "protection_graph" ||
           model.progress.stage === "strengthen_protection" ||
           model.progress.stage === "activation" ||
-          model.product.status === "protected" ? (
+          model.product.status === "protected" ||
+          Boolean(model.protectionGraph?.localDiscovery?.latestScan) ? (
             <>
               <h3>First Protection Graph</h3>
               {model.protectionGraph ? (
@@ -568,6 +644,53 @@ export function OnboardingV2Panel({
               ) : (
                 <p>Graph data is not available yet.</p>
               )}
+              {model.protectionGraph?.localDiscovery?.observations.length ? (
+                <section aria-label="Locally detected dependencies">
+                  <h4>Detected locally</h4>
+                  <p>
+                    Local observations are suggestions. They do not confirm a dependency or enable
+                    monitoring until you add a known provider to this Product.
+                  </p>
+                  {localCandidates.map((candidate) => (
+                    <div
+                      className="onboarding-fields"
+                      key={candidate.provider?.slug ?? candidate.identifier}
+                    >
+                      <strong>{candidate.provider?.name ?? candidate.identifier}</strong>
+                      <span>Detected locally · {candidate.count} local signals</span>
+                      <span>
+                        Evidence:{" "}
+                        {[...candidate.families]
+                          .map((family) => family.replaceAll("_", " "))
+                          .join(", ")}
+                        {candidate.provider
+                          ? candidate.sources && candidate.sources > 0
+                            ? ` · Monitoring sources available: ${candidate.sources}`
+                            : " · Monitoring coverage not available yet"
+                          : " · Provider is not in the catalog; review only"}
+                      </span>
+                      {candidate.provider ? (
+                        candidate.confirmedDependencyId ? (
+                          <span>Confirmed dependency for this Product</span>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => void confirmLocalProvider(candidate.provider!.slug)}
+                          >
+                            Confirm dependency
+                          </button>
+                        )
+                      ) : (
+                        <span>Review when this provider is available in the catalog</span>
+                      )}
+                    </div>
+                  ))}
+                  {model.protectionGraph.localDiscovery.truncated ? (
+                    <p>Additional local observations are omitted from this bounded view.</p>
+                  ) : null}
+                </section>
+              ) : null}
               <p>
                 Baseline:{" "}
                 {model.protectionGraph?.coverage.baselineObservation.replaceAll("_", " ") ??

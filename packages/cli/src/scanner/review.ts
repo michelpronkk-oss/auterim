@@ -130,7 +130,8 @@ export function renderReview(result: ScanResult): string {
   }
   lines.push(
     "",
-    "Only normalized metadata is collected. File contents, environment values, and credentials are not included.",
+    "Connected submission may include the project folder name, safe relative paths, and sanitized Git remote identity.",
+    "Source files, environment values, and credentials are not included. Review these derived fields before consent.",
   );
   return lines.join("\n");
 }

@@ -163,6 +163,21 @@ export function cliMonitoringState(input: {
     : ("no_enabled_authoritative_sources" as const);
 }
 
+export function cliDependencyConfirmation(input: {
+  providerId: string | null;
+  persistedWorkspaceDependencyId: string | null;
+  dependencies: ReadonlyArray<{ id: string; dependency_id: string }>;
+}) {
+  if (!input.providerId)
+    return { confirmedDependencyId: null, state: "unknown_provider_review_only" as const };
+  const dependency =
+    input.dependencies.find((item) => item.id === input.persistedWorkspaceDependencyId) ??
+    input.dependencies.find((item) => item.dependency_id === input.providerId);
+  return dependency
+    ? { confirmedDependencyId: dependency.id, state: "confirmed_for_product" as const }
+    : { confirmedDependencyId: null, state: "needs_confirmation" as const };
+}
+
 export async function getProductProtectionGraph(
   client: SupabaseClient,
   input: {
@@ -666,6 +681,12 @@ export async function getProductProtectionGraph(
         const catalog = Array.isArray(row.dependency_catalog)
           ? row.dependency_catalog[0]
           : row.dependency_catalog;
+        const confirmation = cliDependencyConfirmation({
+          providerId: row.provider_id,
+          persistedWorkspaceDependencyId: row.workspace_dependency_id,
+          dependencies,
+        });
+        const confirmedDependencyId = confirmation.confirmedDependencyId;
         const previous = previousCliObservations.find(
           (candidate) => candidate.observation_id === row.observation_id,
         );
@@ -694,6 +715,7 @@ export async function getProductProtectionGraph(
           reason: row.reason_code,
           confidence: Number(row.confidence),
           identity: "observed_unconfirmed",
+          dependencyConfirmationState: confirmation.state,
           changeSincePrevious: cliObservationChange({
             comparisonState: cliComparisonState,
             previousExists: Boolean(previous),
@@ -702,11 +724,11 @@ export async function getProductProtectionGraph(
           provider: catalog
             ? { id: row.provider_id, name: catalog.name, slug: catalog.slug }
             : null,
-          confirmedDependencyId: row.workspace_dependency_id,
+          confirmedDependencyId,
           productMonitoringState: cliMonitoringState({
-            dependencyId: row.workspace_dependency_id,
+            dependencyId: confirmedDependencyId,
             monitoringEnabled: dependencies.find(
-              (dependency) => dependency.id === row.workspace_dependency_id,
+              (dependency) => dependency.id === confirmedDependencyId,
             )?.monitoring_enabled,
             dependenciesTruncated,
             enabledSources: row.provider_id
