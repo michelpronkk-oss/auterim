@@ -2,7 +2,7 @@
 
 The Auterim CLI analyzes dependency indicators locally and can submit derived metadata to an Auterim Protected Product after browser authorization and explicit terminal consent.
 
-This package is a private release candidate. It is not published to npm.
+This package is the Auterim CLI distribution for local dependency discovery and Protected Product onboarding.
 
 ## Requirements
 
