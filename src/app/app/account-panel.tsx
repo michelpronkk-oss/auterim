@@ -6,6 +6,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { z } from "zod";
 import type { Session } from "@supabase/supabase-js";
+import { OnboardingV2Panel } from "@/app/app/onboarding-v2-panel";
+import { WorkspaceMembersPanel } from "@/app/app/workspace-members-panel";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { notifyWorkspaceUpdated, shouldShowWorkspaceSelector } from "@/lib/app/workspace-bootstrap";
 import {
@@ -48,13 +50,13 @@ const accountSchema = z
     entitlements: z.custom<WorkspaceEntitlements>(),
     initialAssessment: z
       .object({
-        dependencies_confirmed: z.number(),
-        authoritative_sources_available: z.number(),
-        current_global_baselines: z.number(),
-        material_changes_evaluated: z.number(),
-        relevant_changes: z.number(),
-        verified_repository_exposures: z.number(),
-        remediation_available: z.number(),
+        dependenciesConfirmed: z.number(),
+        authoritativeSourcesAvailable: z.number(),
+        snapshotsObservedAtActivation: z.number(),
+        materialChangesEvaluated: z.number(),
+        relevantChanges: z.number(),
+        verifiedRepositoryExposures: z.number(),
+        remediationsAvailable: z.number(),
       })
       .nullable(),
   })
@@ -1097,6 +1099,7 @@ export function AccountPanel({
   initialWebsiteUrl?: string;
   onboardingMode?: boolean;
 }) {
+  const router = useRouter();
   const [session, setSession] = useState<Session | null>(null);
   const [workspaceId, setWorkspaceId] = useState("");
   const [workspaces, setWorkspaces] = useState<WorkspaceOption[]>([]);
@@ -1105,6 +1108,7 @@ export function AccountPanel({
   const [loadError, setLoadError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [showProductProtection, setShowProductProtection] = useState(false);
   const [setupForm, setSetupForm] = useState(() => createInitialSetupForm(initialWebsiteUrl));
   const loadSequence = useRef(createRequestSequence());
   const authEventReceived = useRef(false);
@@ -1255,6 +1259,10 @@ export function AccountPanel({
     return () => listener.subscription.unsubscribe();
   }, [load]);
 
+  useEffect(() => {
+    if (onboardingMode && account?.onboarding.activation) router.replace("/app");
+  }, [account?.onboarding.activation, onboardingMode, router]);
+
   async function signOut() {
     setBusy(true);
     await createSupabaseBrowserClient().auth.signOut();
@@ -1391,32 +1399,42 @@ export function AccountPanel({
             </button>
           </section>
         )}
-        {!loadError &&
-          session &&
-          (!workspaces.length || (account && !account.onboarding.activation)) && (
-            <FirstWorkspaceOnboarding
-              session={session}
-              workspaceId={workspaceId}
-              onboarding={
-                account
-                  ? (onboardingReadModelSchema.safeParse(account.onboarding).data ?? null)
-                  : null
-              }
-              setupForm={setupForm}
-              setSetupForm={setSetupForm}
-              api={api}
-              refresh={load}
-              busy={busy}
-              setBusy={setBusy}
-              setLoadError={setLoadError}
-              canManageWorkspace={account?.role === "owner" || account?.role === "admin"}
-            />
-          )}
+        {!loadError && session && !workspaces.length && (
+          <FirstWorkspaceOnboarding
+            session={session}
+            workspaceId={workspaceId}
+            onboarding={
+              account
+                ? (onboardingReadModelSchema.safeParse(account.onboarding).data ?? null)
+                : null
+            }
+            setupForm={setupForm}
+            setSetupForm={setSetupForm}
+            api={api}
+            refresh={load}
+            busy={busy}
+            setBusy={setBusy}
+            setLoadError={setLoadError}
+            canManageWorkspace={account?.role === "owner" || account?.role === "admin"}
+          />
+        )}
+        {!loadError && session && account && !account.onboarding.activation && workspaceId && (
+          <OnboardingV2Panel
+            workspaceId={workspaceId}
+            api={api}
+            canManageProducts={account.role === "owner" || account.role === "admin"}
+            onActivated={async () => {
+              await load(session.access_token, workspaceId);
+              notifyWorkspaceUpdated();
+              router.push("/app");
+            }}
+          />
+        )}
         {shouldShowWorkspaceSelector({
           workspaceCount: workspaces.length,
         }) && (
           <label className="workspace-select">
-            Workspace
+            {onboardingMode ? "Company" : "Workspace"}
             <select
               value={workspaceId}
               onChange={(event) => void load(session.access_token, event.target.value)}
@@ -1429,11 +1447,14 @@ export function AccountPanel({
             </select>
           </label>
         )}
+        {!loadError && session && account && workspaceId && (
+          <WorkspaceMembersPanel workspaceId={workspaceId} role={account.role} api={api} />
+        )}
         {account?.onboarding.activation && (
           <>
             <div className="account-summary">
               <div>
-                <span className="summary-label">Workspace</span>
+                <span className="summary-label">Company</span>
                 <strong>{account.onboarding.company.name}</strong>
                 <span className="summary-note">{account.onboarding.company.websiteUrl}</span>
               </div>
@@ -1513,15 +1534,16 @@ export function AccountPanel({
                 <p className="card-kicker">INITIAL PROTECTION ASSESSMENT</p>
                 <h2>Auterim is watching.</h2>
                 <p>
-                  {account.initialAssessment.dependencies_confirmed} dependencies ·{" "}
-                  {account.initialAssessment.authoritative_sources_available} authoritative sources
-                  · {account.initialAssessment.current_global_baselines} current shared baselines
+                  {account.initialAssessment.dependenciesConfirmed} dependencies ·{" "}
+                  {account.initialAssessment.authoritativeSourcesAvailable} authoritative sources ·{" "}
+                  {account.initialAssessment.snapshotsObservedAtActivation} shared snapshots
+                  observed at activation
                 </p>
                 <p>
-                  {account.initialAssessment.material_changes_evaluated} material changes evaluated
-                  · {account.initialAssessment.relevant_changes} relevant ·{" "}
-                  {account.initialAssessment.verified_repository_exposures} verified repository
-                  exposures · {account.initialAssessment.remediation_available} remediations
+                  {account.initialAssessment.materialChangesEvaluated} material changes evaluated ·{" "}
+                  {account.initialAssessment.relevantChanges} relevant ·{" "}
+                  {account.initialAssessment.verifiedRepositoryExposures} verified repository
+                  exposures · {account.initialAssessment.remediationsAvailable} remediations
                   available
                 </p>
               </section>
@@ -1530,6 +1552,37 @@ export function AccountPanel({
               Your protection is active. Changes already confirmed in onboarding remain attached to
               this workspace.
             </p>
+            {showProductProtection ? (
+              <>
+                <button
+                  className="secondary-link"
+                  type="button"
+                  onClick={() => setShowProductProtection(false)}
+                >
+                  Close Product protection
+                </button>
+                <OnboardingV2Panel
+                  workspaceId={workspaceId}
+                  api={api}
+                  allowProductCreate={account.role === "owner" || account.role === "admin"}
+                  canManageProducts={account.role === "owner" || account.role === "admin"}
+                  onActivated={async () => {
+                    await load(session.access_token, workspaceId);
+                    notifyWorkspaceUpdated();
+                  }}
+                />
+              </>
+            ) : (
+              (account.role === "owner" || account.role === "admin") && (
+                <button
+                  className="secondary-link"
+                  type="button"
+                  onClick={() => setShowProductProtection(true)}
+                >
+                  Add or view Product protection
+                </button>
+              )
+            )}
           </>
         )}
         {!onboardingMode && (

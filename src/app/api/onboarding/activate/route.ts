@@ -1,19 +1,13 @@
-import { idempotencyKeys, tasks } from "@trigger.dev/sdk";
 import { z } from "zod";
 import {
   authenticateOnboardingRequest,
   onboardingError,
   parseJsonBody,
 } from "@/lib/onboarding/auth";
-import type { scanSourceTask } from "@/trigger/scan-source";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { recordGrowthFirstPartyEvent } from "@/lib/growth-v2/feedback";
 import { hasUnresolvedDiscoveryCandidates } from "@/lib/onboarding/activation-readiness";
-import {
-  baselineClaimResult,
-  dispatchBaselineClaims,
-  type BaselineDispatchClaim,
-} from "@/lib/onboarding/baseline-dispatch";
+import { dispatchOnboardingBaselines } from "@/lib/onboarding/dispatch-baselines";
 
 const inputSchema = z.object({ workspaceId: z.string().uuid() }).strict();
 const activationSchema = z.object({
@@ -26,16 +20,6 @@ const activationSchema = z.object({
     baselineStatus: z.enum(["ready", "in_progress", "partial"]),
   }),
 });
-const claimSchema = z.array(
-  z.object({
-    queue_id: z.string().uuid(),
-    source_id: z.string().uuid(),
-    dispatch_attempt: z.number().int().positive(),
-    lease_recovery_count: z.number().int().nonnegative(),
-    recovered: z.boolean(),
-  }),
-);
-
 export async function POST(request: Request) {
   const auth = await authenticateOnboardingRequest(request);
   if (!auth.ok) return auth.response;
@@ -85,81 +69,16 @@ export async function POST(request: Request) {
     } catch {
       // Growth reporting is idempotent and never blocks protection activation.
     }
-    const dispatchClient = createSupabaseServerClient();
-    let claims: { data: unknown; error: unknown | null };
     try {
-      const result = await dispatchClient.rpc("claim_onboarding_baseline_sources", {
-        p_actor_user_id: auth.user.id,
-        p_workspace_id: input.workspaceId,
-        p_limit: 100,
-      });
-      claims = { data: result.data, error: result.error };
+      await dispatchOnboardingBaselines(auth.user.id, input.workspaceId);
     } catch {
-      claims = { data: null, error: true };
-    }
-    if (baselineClaimResult(claims.error, 0) === "error") {
-      console.warn("Onboarding baseline claim failed.", {
+      // Protection activation is durable; the global baseline dispatcher recovers queued work.
+      console.warn("Onboarding baseline dispatch could not start.", {
         workspaceId: input.workspaceId,
         stage: "claim",
         outcome: "error",
         errorCategory: "claim_rpc_error",
-        attemptCount: 0,
-        leaseRecoveryState: "not_claimed",
       });
-    } else {
-      try {
-        const claimed = claimSchema.parse(claims.data ?? []) as BaselineDispatchClaim[];
-        if (baselineClaimResult(null, claimed.length) === "empty") {
-          console.info("Onboarding baseline claim completed.", {
-            workspaceId: input.workspaceId,
-            stage: "claim",
-            outcome: "empty",
-            errorCategory: null,
-            attemptCount: 0,
-            leaseRecoveryState: "not_applicable",
-          });
-        } else {
-          await dispatchBaselineClaims(claimed, input.workspaceId, {
-            createIdempotencyKey: (claim) =>
-              idempotencyKeys.create(
-                `baseline-source:${claim.queue_id}:${claim.dispatch_attempt}`,
-                { scope: "global" },
-              ),
-            trigger: (sourceId, idempotencyKey) =>
-              tasks.trigger<typeof scanSourceTask>("scan-source", { sourceId }, { idempotencyKey }),
-            markDispatched: (claim, triggerRunId) =>
-              dispatchClient.rpc("mark_onboarding_baseline_dispatched", {
-                p_actor_user_id: auth.user.id,
-                p_workspace_id: input.workspaceId,
-                p_queue_id: claim.queue_id,
-                p_dispatch_attempt: claim.dispatch_attempt,
-                p_trigger_run_id: triggerRunId,
-              }),
-            release: (claim) =>
-              dispatchClient.rpc("release_onboarding_baseline_claim", {
-                p_actor_user_id: auth.user.id,
-                p_workspace_id: input.workspaceId,
-                p_queue_id: claim.queue_id,
-                p_dispatch_attempt: claim.dispatch_attempt,
-              }),
-            log: (event) => {
-              if (event.outcome === "error")
-                console.warn("Onboarding baseline dispatch observed.", event);
-              else console.info("Onboarding baseline dispatch observed.", event);
-            },
-          });
-        }
-      } catch {
-        // Baseline acquisition is resumable background work; it never rolls back activation.
-        console.warn("Onboarding baseline claim response was invalid.", {
-          workspaceId: input.workspaceId,
-          stage: "claim",
-          outcome: "error",
-          errorCategory: "claim_response_invalid",
-          attemptCount: 0,
-          leaseRecoveryState: "not_claimed",
-        });
-      }
     }
     const status = await auth.client.rpc("get_onboarding_status", {
       p_workspace_id: input.workspaceId,

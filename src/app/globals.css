@@ -2672,6 +2672,60 @@ a {
   font-size: 10px;
   line-height: 1.7;
 }
+.workspace-members-card {
+  grid-column: 1 / -1;
+}
+.workspace-members-card > p:not(.card-kicker) {
+  color: #778497;
+  font-size: 10px;
+  line-height: 1.7;
+}
+.workspace-member-list {
+  display: grid;
+  gap: 0;
+  margin: 12px 0 18px;
+  padding: 0;
+  list-style: none;
+}
+.workspace-member-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 42px;
+  border-top: 1px solid #edf0f4;
+  color: #44536a;
+  font-size: 10px;
+}
+.workspace-member-list small {
+  color: #929dac;
+  text-transform: capitalize;
+}
+.workspace-member-form label {
+  display: block;
+  margin-bottom: 6px;
+  color: #59677b;
+  font-size: 9px;
+  font-weight: 650;
+}
+.workspace-member-form > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.workspace-member-form input {
+  min-width: min(280px, 100%);
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid #dce2eb;
+  border-radius: 7px;
+  color: #35445a;
+  background: #fff;
+  font: inherit;
+}
+.workspace-member-message {
+  margin-bottom: 0;
+}
 .success-note {
   grid-column: 1 / -1;
   padding: 11px 14px;

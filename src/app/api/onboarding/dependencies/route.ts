@@ -4,6 +4,7 @@ import {
   onboardingError,
   parseJsonBody,
 } from "@/lib/onboarding/auth";
+import { recordGrowthFirstPartyEvent } from "@/lib/growth-v2/feedback";
 
 const inputSchema = z.discriminatedUnion("action", [
   z
@@ -55,6 +56,16 @@ export async function POST(request: Request) {
             p_dependency_slug: input.dependencySlug,
           });
     if (error) return onboardingError(error);
+    if (input.action === "manual_add" || input.decision === "confirmed") {
+      try {
+        await recordGrowthFirstPartyEvent({
+          eventType: "dependency_confirmed",
+          stableKey: input.workspaceId,
+        });
+      } catch {
+        // Dependency confirmation remains durable if reporting is unavailable.
+      }
+    }
     return Response.json(data);
   } catch (error) {
     if (error instanceof z.ZodError)

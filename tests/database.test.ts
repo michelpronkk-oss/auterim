@@ -116,6 +116,15 @@ const growthClaimAmbiguityMigration = await readFile(
   ),
   "utf8",
 );
+const baselineDispatchRecoveryMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261110000000_baseline_dispatch_recovery_openai_pricing_source.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 const connectorMigration = await readFile(
   fileURLToPath(
     new URL("../supabase/migrations/20261009000000_connector_platform_v1.sql", import.meta.url),
@@ -125,6 +134,15 @@ const connectorMigration = await readFile(
 const growthFeedbackMigration = await readFile(
   fileURLToPath(
     new URL("../supabase/migrations/20261010000000_growth_feedback_v2.sql", import.meta.url),
+  ),
+  "utf8",
+);
+const onboardingFunnelEventsMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261118000000_m155_onboarding_funnel_events.sql",
+      import.meta.url,
+    ),
   ),
   "utf8",
 );
@@ -332,6 +350,21 @@ const legacyAttributionQuotaConsistencyMigration = await readFile(
   ),
   "utf8",
 );
+const onboardingV2Migration = await readFile(
+  fileURLToPath(
+    new URL("../supabase/migrations/20261117000000_m155_onboarding_v2.sql", import.meta.url),
+  ),
+  "utf8",
+);
+const workspaceMemberManagementMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261119000000_m155_workspace_member_management.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase(
   applyCompanySurfaceMigration = true,
@@ -366,6 +399,7 @@ async function makeDatabase(
   await db.exec(growthMigration);
   await db.exec(growthBoundsMigration);
   await db.exec(growthClaimAmbiguityMigration);
+  await db.exec(baselineDispatchRecoveryMigration);
   await db.exec(connectorMigration);
   await db.exec(growthFeedbackMigration);
   await db.exec(growthSearchConsoleScopeMigration);
@@ -396,6 +430,9 @@ async function makeDatabase(
     await db.exec(deterministicLegacyRepositoryAttributionMigration);
   if (applyProductRepositoryProtectionMigration)
     await db.exec(legacyAttributionQuotaConsistencyMigration);
+  if (applyProductRepositoryProtectionMigration) await db.exec(onboardingV2Migration);
+  if (applyProductRepositoryProtectionMigration) await db.exec(workspaceMemberManagementMigration);
+  await db.exec(onboardingFunnelEventsMigration);
   return db;
 }
 
@@ -488,6 +525,42 @@ class PGliteMonitoringRepository implements MonitoringRepository {
 }
 
 describe("Auterim migration and monitoring transaction", () => {
+  it("accepts one-time onboarding Growth events and keeps their keys opaque and idempotent", async () => {
+    const db = await makeDatabase();
+    const events = [
+      "product_selected",
+      "dependency_confirmed",
+      "protection_graph_viewed",
+      "first_grounded_value",
+    ];
+    for (const [index, eventType] of events.entries()) {
+      const eventKey = (index + 1).toString(16).padStart(64, "0");
+      await db.query(
+        `insert into public.growth_first_party_events(event_key,event_type,event_source)
+         values($1,$2,'server') on conflict(event_key) do nothing`,
+        [eventKey, eventType],
+      );
+      await db.query(
+        `insert into public.growth_first_party_events(event_key,event_type,event_source)
+         values($1,$2,'server') on conflict(event_key) do nothing`,
+        [eventKey, eventType],
+      );
+    }
+    const rows = await db.query<{ count: number; distinct_events: number }>(
+      `select count(*)::int as count,count(distinct event_type)::int as distinct_events
+       from public.growth_first_party_events where event_type=any($1::text[])`,
+      [events],
+    );
+    expect(rows.rows[0]).toEqual({ count: 4, distinct_events: 4 });
+    const columns = await db.query<{ has_tenant_payload: boolean }>(
+      `select exists(select 1 from information_schema.columns
+       where table_schema='public' and table_name='growth_first_party_events'
+         and column_name in ('workspace_id','product_id','metadata','payload')) as has_tenant_payload`,
+    );
+    expect(columns.rows[0]!.has_tenant_payload).toBe(false);
+    await db.close();
+  });
+
   it("backfills existing discovery evidence before validating surface provenance", async () => {
     const db = await makeDatabase(false);
     const userId = "11111111-1111-4111-8111-111111111111";
@@ -626,6 +699,129 @@ describe("Auterim migration and monitoring transaction", () => {
     await db.exec("set role anon");
     await expect(db.query("select * from public.workspaces")).rejects.toBeTruthy();
     await db.exec("reset role");
+  });
+
+  it("adds only existing confirmed accounts through an idempotent owner/admin-only boundary", async () => {
+    const membershipDb = await makeDatabase();
+    const owner = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const secondOwner = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const admin = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const member = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const target = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const unconfirmed = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    await membershipDb.query(
+      `insert into auth.users(id,email,email_confirmed_at) values
+        ($1,'owner@example.test',now()),($2,'second-owner@example.test',now()),
+        ($3,'admin@example.test',now()),($4,'member@example.test',now()),
+        ($5,'target@example.test',now()),($6,'unconfirmed@example.test',null)`,
+      [owner, secondOwner, admin, member, target, unconfirmed],
+    );
+    await membershipDb.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    await membershipDb.exec("set role authenticated");
+    const firstWorkspace = await membershipDb.query<{ id: string }>(
+      "select public.create_workspace('Company A') as id",
+    );
+    await membershipDb.exec("reset role");
+    await membershipDb.query("select set_config('request.jwt.claim.sub',$1,false)", [secondOwner]);
+    await membershipDb.exec("set role authenticated");
+    const secondWorkspace = await membershipDb.query<{ id: string }>(
+      "select public.create_workspace('Company B') as id",
+    );
+    await membershipDb.exec("reset role");
+    const companyA = firstWorkspace.rows[0]!.id;
+    const companyB = secondWorkspace.rows[0]!.id;
+    await membershipDb.query(
+      "insert into public.workspace_members(workspace_id,user_id,role) values($1,$2,'admin'),($1,$3,'member')",
+      [companyB, admin, member],
+    );
+
+    await membershipDb.exec("set role service_role");
+    await membershipDb.query("select public.add_existing_workspace_member($1,$2,$3)", [
+      companyB,
+      secondOwner,
+      "TARGET@example.test",
+    ]);
+    await membershipDb.query("select public.add_existing_workspace_member($1,$2,$3)", [
+      companyB,
+      secondOwner,
+      "target@example.test",
+    ]);
+    await membershipDb.query("select public.add_existing_workspace_member($1,$2,$3)", [
+      companyB,
+      admin,
+      "target@example.test",
+    ]);
+    await membershipDb.query("select public.add_existing_workspace_member($1,$2,$3)", [
+      companyB,
+      secondOwner,
+      "unconfirmed@example.test",
+    ]);
+    await membershipDb.query("select public.add_existing_workspace_member($1,$2,$3)", [
+      companyB,
+      secondOwner,
+      "missing@example.test",
+    ]);
+    const targetMembership = await membershipDb.query<{ role: string; count: string }>(
+      `select min(role) as role, count(*)::text as count from public.workspace_members
+       where workspace_id=$1 and user_id=$2`,
+      [companyB, target],
+    );
+    expect(targetMembership.rows[0]).toEqual({ role: "member", count: "1" });
+    const ownerMembership = await membershipDb.query<{ role: string; count: string }>(
+      `select min(role) as role, count(*)::text as count from public.workspace_members
+       where workspace_id=$1 and user_id=$2`,
+      [companyB, secondOwner],
+    );
+    expect(ownerMembership.rows[0]).toEqual({ role: "owner", count: "1" });
+    const targetA = await membershipDb.query<{ count: string }>(
+      "select count(*)::text as count from public.workspace_members where workspace_id=$1 and user_id=$2",
+      [companyA, target],
+    );
+    expect(targetA.rows[0]!.count).toBe("0");
+    const roster = await membershipDb.query<{ email: string; role: string }>(
+      "select email,role from public.list_workspace_members_for_admin($1,$2)",
+      [companyB, secondOwner],
+    );
+    expect(roster.rows).toContainEqual({ email: "target@example.test", role: "member" });
+    await expect(
+      membershipDb.query("select public.add_existing_workspace_member($1,$2,$3)", [
+        companyB,
+        member,
+        "another@example.test",
+      ]),
+    ).rejects.toMatchObject({ code: "42501" });
+    await expect(
+      membershipDb.query("select public.add_existing_workspace_member($1,$2,$3)", [
+        companyB,
+        secondOwner,
+        "owner@example.test",
+      ]),
+    ).resolves.toBeTruthy();
+    await expect(
+      membershipDb.query("select public.add_existing_workspace_member($1,$2,$3)", [
+        companyA,
+        secondOwner,
+        "target@example.test",
+      ]),
+    ).rejects.toMatchObject({ code: "42501" });
+    await membershipDb.exec("reset role; set role authenticated");
+    await membershipDb.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    await expect(
+      membershipDb.query("select public.add_existing_workspace_member($1,$2,$3)", [
+        companyB,
+        owner,
+        "target@example.test",
+      ]),
+    ).rejects.toBeTruthy();
+    await membershipDb.exec("reset role; set role anon");
+    await expect(
+      membershipDb.query("select * from public.list_workspace_members_for_admin($1,$2)", [
+        companyB,
+        secondOwner,
+      ]),
+    ).rejects.toBeTruthy();
+    await membershipDb.exec("reset role");
+    await membershipDb.close();
   });
 
   it("keeps connector credentials service-only and rejects cross-workspace connector mutations", async () => {
@@ -3333,6 +3529,10 @@ describe("Auterim migration and monitoring transaction", () => {
     );
     expect(firstSyncClaim.rows[0]?.acquired).toBe(true);
     expect(competingSyncClaim.rows[0]?.acquired).toBe(false);
+    // `now()` is transaction-stable in Postgres. Keep the rate-limit probe in one
+    // transaction so a minute boundary cannot grant a second bucket mid-test.
+    await db.exec("begin");
+    await db.exec("truncate public.growth_public_event_ingest_buckets");
     let acceptedPublicEvents = 0;
     for (let index = 0; index < 121; index += 1) {
       const allowed = await db.query<{ allowed: boolean }>(
@@ -3341,6 +3541,7 @@ describe("Auterim migration and monitoring transaction", () => {
       if (allowed.rows[0]?.allowed) acceptedPublicEvents += 1;
     }
     expect(acceptedPublicEvents).toBe(120);
+    await db.exec("commit");
     const candidatePayload = {
       opportunity_key: "c".repeat(64),
       opportunity_type: "near_page_one",
@@ -3777,5 +3978,248 @@ describe("Auterim migration and monitoring transaction", () => {
       request_result_type: "jsonb",
       request_rpc_exposes_claim_token: false,
     });
+  });
+
+  it("persists Product onboarding with member RLS, ordered resume, scoped activation, and one trial", async () => {
+    const onboardingDb = await makeDatabase();
+    const owner = "d1515151-5151-4515-8515-151515151515";
+    const outsider = "d2525252-5252-4525-8525-252525252525";
+    await onboardingDb.query("insert into auth.users(id) values($1),($2)", [owner, outsider]);
+    await onboardingDb.query("select set_config('request.jwt.claim.sub',$1,false)", [owner]);
+    await onboardingDb.exec("set role authenticated");
+    const workspace = await onboardingDb.query<{ id: string }>(
+      "select public.create_workspace('V2 onboarding tenant') as id",
+    );
+    const workspaceId = workspace.rows[0]!.id;
+    await onboardingDb.exec("reset role; set role service_role");
+    const company = await onboardingDb.query<{ id: string }>(
+      `insert into public.companies(workspace_id,name,slug,website_url,website_domain)
+       values($1,'V2 Example','v2-example','https://v2.example/','v2.example') returning id`,
+      [workspaceId],
+    );
+    const companyId = company.rows[0]!.id;
+    await onboardingDb.query(
+      `insert into public.workspace_onboarding(workspace_id,company_id,state,
+        dependency_review_completed_at,context_completed_at,notifications_completed_at)
+       values($1,$2,'notifications_setup',now(),now(),now())`,
+      [workspaceId, companyId],
+    );
+    const product = await onboardingDb.query<{ id: string }>(
+      "select id from public.workspace_products where workspace_id=$1 and is_default",
+      [workspaceId],
+    );
+    const productId = product.rows[0]!.id;
+    const dependency = await onboardingDb.query<{ id: string }>(
+      "select id from public.dependency_catalog where slug='stripe'",
+    );
+    await onboardingDb.query(
+      `insert into public.workspace_dependencies(workspace_id,protected_product_id,dependency_id,selected_by,origin)
+       values($1,$2,$3,$4,'manual')`,
+      [workspaceId, productId, dependency.rows[0]!.id, owner],
+    );
+    await onboardingDb.exec("reset role; set role authenticated");
+
+    const started = await onboardingDb.query<{ value: { stage: string; productId: string } }>(
+      "select public.start_product_onboarding_v2($1,$2) as value",
+      [workspaceId, productId],
+    );
+    expect(started.rows[0]!.value).toMatchObject({ stage: "scan_import", productId });
+    const replayed = await onboardingDb.query<{ value: { stage: string } }>(
+      "select public.start_product_onboarding_v2($1,$2) as value",
+      [workspaceId, productId],
+    );
+    expect(replayed.rows[0]!.value.stage).toBe("scan_import");
+    await expect(
+      onboardingDb.query("select public.transition_product_onboarding_v2($1,$2,'discovery')", [
+        workspaceId,
+        productId,
+      ]),
+    ).rejects.toThrow(/out_of_order/);
+
+    for (const stage of [
+      "company",
+      "product",
+      "discovery",
+      "dependency_confirmation",
+      "protection_graph",
+      "strengthen_protection",
+      "activation",
+    ]) {
+      await onboardingDb.query("select public.transition_product_onboarding_v2($1,$2,$3)", [
+        workspaceId,
+        productId,
+        stage,
+      ]);
+    }
+    const activated = await onboardingDb.query<{
+      value: { activatedAt: string; productId: string };
+    }>("select public.activate_product_protection_v2($1,$2) as value", [workspaceId, productId]);
+    expect(activated.rows[0]!.value.productId).toBe(productId);
+    const completed = await onboardingDb.query<{ value: { stage: string } }>(
+      "select public.transition_product_onboarding_v2($1,$2,'complete') as value",
+      [workspaceId, productId],
+    );
+    expect(completed.rows[0]!.value.stage).toBe("complete");
+    const trialRows = await onboardingDb.query<{ count: number }>(
+      "select count(*)::integer as count from public.workspace_subscriptions where workspace_id=$1 and status='trialing'",
+      [workspaceId],
+    );
+    expect(trialRows.rows[0]!.count).toBe(1);
+    const activatedAgain = await onboardingDb.query<{ value: { activatedAt: string } }>(
+      "select public.activate_product_protection_v2($1,$2) as value",
+      [workspaceId, productId],
+    );
+    expect(activatedAgain.rows[0]!.value.activatedAt).toBe(activated.rows[0]!.value.activatedAt);
+    expect(
+      (
+        await onboardingDb.query(
+          "select workspace_id from public.workspace_subscriptions where workspace_id=$1",
+          [workspaceId],
+        )
+      ).rows,
+    ).toHaveLength(1);
+
+    const secondProductResult = await onboardingDb.query<{ value: { product: { id: string } } }>(
+      "select public.create_workspace_product($1,'Second Product','[]'::jsonb,null) as value",
+      [workspaceId],
+    );
+    const secondProductId = secondProductResult.rows[0]!.value.product.id;
+    await onboardingDb.query("select public.add_product_dependency_manually($1,$2,'openai')", [
+      workspaceId,
+      secondProductId,
+    ]);
+    await onboardingDb.query("select public.start_product_onboarding_v2($1,$2)", [
+      workspaceId,
+      secondProductId,
+    ]);
+    await onboardingDb.exec("reset role; set role service_role");
+    await onboardingDb.query("select * from public.claim_onboarding_baseline_sources($1,$2,100)", [
+      owner,
+      workspaceId,
+    ]);
+    const draftProductBaselineRows = await onboardingDb.query<{ count: number }>(
+      `select count(*)::integer as count from public.baseline_scan_queue queue
+       join public.source_catalog source on source.id=queue.source_id
+       join public.dependency_catalog dependency on dependency.id=source.dependency_id
+       where dependency.slug='openai'`,
+    );
+    expect(draftProductBaselineRows.rows[0]!.count).toBe(0);
+    await onboardingDb.exec("reset role; set role authenticated");
+    await expect(
+      onboardingDb.query("select public.activate_product_protection_v2($1,$2)", [
+        workspaceId,
+        secondProductId,
+      ]),
+    ).rejects.toThrow(/activation_stage_required/);
+    await onboardingDb.exec("reset role; set role service_role");
+    const secondRun = await onboardingDb.query<{ id: string }>(
+      `insert into public.dependency_discovery_runs(workspace_id,company_id,website_url,trigger_run_id,attempt_number,status,finished_at)
+       values($1,$2,'https://v2.example/','v2-completed-discovery',1,'completed',now()) returning id`,
+      [workspaceId, companyId],
+    );
+    const stripeId = (
+      await onboardingDb.query<{ id: string }>(
+        "select id from public.dependency_catalog where slug='stripe'",
+      )
+    ).rows[0]!.id;
+    const candidate = await onboardingDb.query<{ id: string }>(
+      `insert into public.discovered_dependencies(workspace_id,company_id,dependency_id,confidence,confidence_label,evidence_summary)
+       values($1,$2,$3,0.8,'high','[]'::jsonb) returning id`,
+      [workspaceId, companyId, stripeId],
+    );
+    expect(secondRun.rows).toHaveLength(1);
+    expect(candidate.rows).toHaveLength(1);
+    await onboardingDb.exec("reset role; set role authenticated");
+    for (const stage of [
+      "company",
+      "product",
+      "discovery",
+      "dependency_confirmation",
+      "protection_graph",
+      "strengthen_protection",
+      "activation",
+    ]) {
+      if (stage === "activation") {
+        await expect(
+          onboardingDb.query("select public.transition_product_onboarding_v2($1,$2,$3)", [
+            workspaceId,
+            secondProductId,
+            stage,
+          ]),
+        ).rejects.toThrow(/review_pending_candidates/);
+        expect(
+          (
+            await onboardingDb.query(
+              "select id from public.workspace_dependencies where workspace_id=$1 and protected_product_id=$2",
+              [workspaceId, secondProductId],
+            )
+          ).rows,
+        ).toHaveLength(1);
+        await onboardingDb.exec("reset role; set role service_role");
+        await onboardingDb.query(
+          "update public.discovered_dependencies set status='rejected' where id=$1",
+          [candidate.rows[0]!.id],
+        );
+        await onboardingDb.exec("reset role; set role authenticated");
+      }
+      await onboardingDb.query("select public.transition_product_onboarding_v2($1,$2,$3)", [
+        workspaceId,
+        secondProductId,
+        stage,
+      ]);
+    }
+    const secondActivation = await onboardingDb.query<{ value: { productId: string } }>(
+      "select public.activate_product_protection_v2($1,$2) as value",
+      [workspaceId, secondProductId],
+    );
+    expect(secondActivation.rows[0]!.value.productId).toBe(secondProductId);
+    const productDependencies = (
+      await onboardingDb.query<{ monitoring_enabled: boolean; protected_product_id: string }>(
+        "select monitoring_enabled,protected_product_id from public.workspace_dependencies where workspace_id=$1 order by protected_product_id",
+        [workspaceId],
+      )
+    ).rows;
+    expect(productDependencies).toHaveLength(2);
+    expect(productDependencies.every((dependency) => dependency.monitoring_enabled)).toBe(true);
+    expect(productDependencies.map((dependency) => dependency.protected_product_id).sort()).toEqual(
+      [productId, secondProductId].sort(),
+    );
+    expect(
+      (
+        await onboardingDb.query(
+          "select workspace_id from public.workspace_subscriptions where workspace_id=$1",
+          [workspaceId],
+        )
+      ).rows,
+    ).toHaveLength(1);
+
+    await onboardingDb.exec("reset role");
+    await onboardingDb.query("select set_config('request.jwt.claim.sub',$1,false)", [outsider]);
+    await onboardingDb.exec("set role authenticated");
+    expect(
+      (
+        await onboardingDb.query(
+          "select * from public.product_onboarding_progress where workspace_id=$1",
+          [workspaceId],
+        )
+      ).rows,
+    ).toHaveLength(0);
+    await expect(
+      onboardingDb.query("select public.start_product_onboarding_v2($1,$2)", [
+        workspaceId,
+        productId,
+      ]),
+    ).rejects.toThrow();
+    await expect(
+      onboardingDb.query(
+        "insert into public.product_onboarding_progress(workspace_id,product_id,company_id) values($1,$2,$3)",
+        [workspaceId, productId, companyId],
+      ),
+    ).rejects.toThrow();
+    await onboardingDb.exec("reset role; set role anon");
+    await expect(
+      onboardingDb.query("select * from public.product_onboarding_progress"),
+    ).rejects.toThrow();
+    await onboardingDb.close();
   });
 });
