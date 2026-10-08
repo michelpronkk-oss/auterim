@@ -5,7 +5,13 @@ import { isIP } from "node:net";
 import { getEnvironment } from "@/lib/env/schema";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
-export type PublicRateLimitPolicy = "public_stack_scan" | "public_conversion";
+export type PublicRateLimitPolicy =
+  | "public_stack_scan"
+  | "public_conversion"
+  | "cli_connect"
+  | "cli_poll"
+  | "cli_connect_approval"
+  | "cli_discovery";
 
 export type PublicRateLimitResult =
   | { status: "allowed"; remaining: number; retryAfterSeconds: 0 }
@@ -15,6 +21,10 @@ export type PublicRateLimitResult =
 const POLICY_LIMITS: Record<PublicRateLimitPolicy, { limit: number; windowSeconds: number }> = {
   public_stack_scan: { limit: 4, windowSeconds: 30 * 60 },
   public_conversion: { limit: 30, windowSeconds: 15 * 60 },
+  cli_connect: { limit: 5, windowSeconds: 15 * 60 },
+  cli_poll: { limit: 100, windowSeconds: 5 * 60 },
+  cli_connect_approval: { limit: 10, windowSeconds: 15 * 60 },
+  cli_discovery: { limit: 10, windowSeconds: 60 * 60 },
 };
 
 /** Fingerprints a trusted client address without persisting or exposing the address itself. */
@@ -29,8 +39,13 @@ export function publicClientFingerprint(address: string, secret: string, policy:
 export async function claimPublicRateLimit(
   request: Request,
   policy: PublicRateLimitPolicy,
+  options: { allowLocalLoopback?: boolean } = {},
 ): Promise<PublicRateLimitResult> {
-  const address = request.headers.get("x-real-ip")?.trim();
+  let address = request.headers.get("x-real-ip")?.trim();
+  if (!address && options.allowLocalLoopback && process.env.NODE_ENV !== "production") {
+    const hostname = new URL(request.url).hostname;
+    if (["localhost", "127.0.0.1", "[::1]"].includes(hostname)) address = "127.0.0.1";
+  }
   if (!address || isIP(address) === 0) return { status: "unavailable" };
 
   let secret: string | undefined;

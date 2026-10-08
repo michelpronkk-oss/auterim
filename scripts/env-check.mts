@@ -49,6 +49,7 @@ try {
   const searchConsoleConfigured = isIntegrationConfigured("searchConsole", environment);
   const connectorEncryptionConfigured = isIntegrationConfigured("connectorEncryption", environment);
   const dodoConfigured = isIntegrationConfigured("dodo", environment);
+  const cliDiscoveryConfigured = isIntegrationConfigured("cliDiscovery", environment);
   const preflightFixtureConfigured =
     environment.AUTERIM_PREFLIGHT_LIVE === "1" &&
     githubAppConfigured &&
@@ -70,6 +71,7 @@ try {
   console.log(
     `Public distributed rate limiting: ${environment.PUBLIC_RATE_LIMIT_HMAC_SECRET ? "configured" : "not configured"}`,
   );
+  console.log(`CLI Product discovery: ${cliDiscoveryConfigured ? "configured" : "not configured"}`);
   if (supabaseConfigured && environment.NEXT_PUBLIC_SUPABASE_URL) {
     const redacted = redactSupabaseUrl(environment.NEXT_PUBLIC_SUPABASE_URL);
     console.log(`  URL host: ${redacted.hostname}`);
