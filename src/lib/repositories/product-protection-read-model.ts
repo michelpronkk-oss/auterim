@@ -1,5 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { latestPreflightRuns } from "@/lib/protection/read-model-helpers";
 
 const REPOSITORY_PAGE_LIMIT = 200;
 
@@ -113,26 +114,63 @@ export async function getProductRepositoryProtection(
   const runResult = impactIds.length
     ? await client
         .from("preflight_runs")
-        .select("id")
+        .select("id,impact_assessment_id,status,verified_impact,created_at,completed_at")
         .eq("workspace_id", workspaceId)
         .in("impact_assessment_id", impactIds)
-        .in("status", ["completed", "partial"])
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .limit(500)
     : { data: [], error: null };
   if (runResult.error) throw new Error("product_repository_graph_unavailable");
-  const runIds = (runResult.data ?? []).map((run) => run.id);
+  const latestRuns = latestPreflightRuns(
+    (runResult.data ?? []) as Array<{
+      id: string;
+      impact_assessment_id: string;
+      status: string;
+      verified_impact: string | null;
+      created_at: string;
+      completed_at: string | null;
+    }>,
+  );
+  const evidenceRuns = (
+    (runResult.data ?? []) as Array<{
+      id: string;
+      impact_assessment_id: string;
+      status: string;
+      verified_impact: string | null;
+      created_at: string;
+      completed_at: string | null;
+    }>
+  ).filter(
+    (run) =>
+      (run.status === "completed" || run.status === "partial") &&
+      run.verified_impact === "verified",
+  );
+  const runIds = evidenceRuns.map((run) => run.id);
   const findingResult =
     runIds.length && repositoryIds.length
       ? await client
           .from("preflight_findings")
-          .select("repository_id")
+          .select("id,preflight_run_id,repository_id,commit_sha,observed_at,verification")
           .eq("workspace_id", workspaceId)
           .in("preflight_run_id", runIds)
           .in("repository_id", repositoryIds)
+          .eq("verification", "verified")
+          .order("observed_at", { ascending: false })
+          .limit(500)
       : { data: [], error: null };
   if (findingResult.error) throw new Error("product_repository_graph_unavailable");
-  const repositoryIdsWithEvidence = new Set(
-    (findingResult.data ?? []).map((finding) => finding.repository_id),
-  );
+  const evidenceByRepository = new Map<
+    string,
+    Array<{ finding: (typeof findingResult.data)[number]; run: (typeof evidenceRuns)[number] }>
+  >();
+  for (const finding of findingResult.data ?? []) {
+    const run = evidenceRuns.find((candidate) => candidate.id === finding.preflight_run_id);
+    if (!run) continue;
+    const evidence = evidenceByRepository.get(finding.repository_id) ?? [];
+    evidence.push({ finding, run });
+    evidenceByRepository.set(finding.repository_id, evidence);
+  }
 
   const summarize = (repository: (typeof boundedRepositories)[number]) => {
     const connectionStatus = connectionHealth.get(repository.connection_id) ?? "unknown";
@@ -158,7 +196,27 @@ export async function getProductRepositoryProtection(
             ? "revoked"
             : "unavailable",
       verificationAvailable: isAvailable && input.verificationCapabilityAvailable,
-      verificationEvidencePresent: repositoryIdsWithEvidence.has(repository.id),
+      verificationEvidencePresent: evidenceByRepository.has(repository.id),
+      verificationEvidence: (evidenceByRepository.get(repository.id) ?? [])
+        .sort(
+          (left, right) =>
+            right.run.created_at.localeCompare(left.run.created_at) ||
+            right.finding.id.localeCompare(left.finding.id),
+        )
+        .slice(0, 5)
+        .map(({ finding, run }) => ({
+          runId: run.id,
+          result: run.verified_impact,
+          completedAt: run.completed_at,
+          findingId: finding.id,
+          commitSha: finding.commit_sha,
+          observedAt: finding.observed_at,
+          currentness: "not_revalidated_against_live_repository_head",
+          relativeToLatestAttempt:
+            latestRuns.get(run.impact_assessment_id)?.id === run.id
+              ? "same_as_latest_attempt"
+              : "historical_before_latest_attempt",
+        })),
     };
   };
   const mappedRepositories = boundedRepositories

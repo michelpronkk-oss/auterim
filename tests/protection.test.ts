@@ -5,7 +5,11 @@ import { describe, expect, it } from "vitest";
 import { classifyEmailFailure } from "@/lib/notifications/email";
 import {
   latestDependencyScan,
+  latestObservationOutcome,
+  latestPreflightRuns,
   latestTerminalPreflightRuns,
+  latestVerifiedPreflightRuns,
+  monitoringEvidenceState,
 } from "@/lib/protection/read-model-helpers";
 
 const versions = [
@@ -92,6 +96,92 @@ describe("protection read models and notifications", () => {
     ]);
     expect(latest.get("impact-1")?.verified_impact).toBe("not_found");
     expect(latest.get("impact-2")?.verified_impact).toBe("verified");
+  });
+
+  it("does not let an older terminal Preflight stand in for a newer queued run", () => {
+    const runs = [
+      {
+        id: "00000000-0000-4000-8000-000000000001",
+        impact_assessment_id: "impact-1",
+        status: "completed",
+        verified_impact: "verified",
+        created_at: "2026-10-01T00:00:00.000Z",
+      },
+      {
+        id: "00000000-0000-4000-8000-000000000002",
+        impact_assessment_id: "impact-1",
+        status: "queued",
+        verified_impact: null,
+        created_at: "2026-10-02T00:00:00.000Z",
+      },
+    ];
+    const latest = latestPreflightRuns(runs);
+    const verified = latestVerifiedPreflightRuns(runs);
+    expect(latest.get("impact-1")).toMatchObject({ status: "queued", verified_impact: null });
+    expect(verified.get("impact-1")).toMatchObject({
+      status: "completed",
+      verified_impact: "verified",
+    });
+  });
+
+  it("retains old verified evidence when a newer terminal attempt is not verified", () => {
+    const runs = [
+      {
+        id: "00000000-0000-4000-8000-000000000001",
+        impact_assessment_id: "impact-1",
+        status: "completed",
+        verified_impact: "verified",
+        created_at: "2026-10-01T00:00:00.000Z",
+      },
+      {
+        id: "00000000-0000-4000-8000-000000000002",
+        impact_assessment_id: "impact-1",
+        status: "completed",
+        verified_impact: "not_found",
+        created_at: "2026-10-02T00:00:00.000Z",
+      },
+    ];
+    expect(latestPreflightRuns(runs).get("impact-1")?.verified_impact).toBe("not_found");
+    expect(latestVerifiedPreflightRuns(runs).get("impact-1")?.id).toBe(
+      "00000000-0000-4000-8000-000000000001",
+    );
+  });
+
+  it("keeps monitoring coverage separate from observed global baselines and scan health", () => {
+    expect(
+      monitoringEvidenceState({
+        monitoringEnabled: true,
+        enabledSourceCount: 4,
+        sourcesWithBaseline: 0,
+        latestScanStatus: null,
+      }),
+    ).toBe("baseline_incomplete");
+    expect(
+      monitoringEvidenceState({
+        monitoringEnabled: true,
+        enabledSourceCount: 0,
+        sourcesWithBaseline: 0,
+        latestScanStatus: null,
+      }),
+    ).toBe("coverage_missing");
+    expect(
+      monitoringEvidenceState({
+        monitoringEnabled: true,
+        enabledSourceCount: 2,
+        sourcesWithBaseline: 2,
+        latestScanStatus: "failed",
+      }),
+    ).toBe("scan_failed");
+  });
+
+  it("does not call mixed successful and never-scanned sources a complete success", () => {
+    expect(latestObservationOutcome(2, [{ scan_status: "success" }, { scan_status: null }])).toBe(
+      "partial_observation",
+    );
+    expect(latestObservationOutcome(2, [{ scan_status: null }, { scan_status: null }])).toBe(
+      "not_observed",
+    );
+    expect(latestObservationOutcome(2, [{ scan_status: "success" }])).toBe("partial_observation");
   });
 
   it("selects dependency scan freshness deterministically across sources", () => {
