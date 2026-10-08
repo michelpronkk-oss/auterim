@@ -11,6 +11,14 @@ type ClaimedGrowthEvaluation = {
   attempts: number;
 };
 
+function logGrowthDispatch(event: string, fields: Record<string, string | number>) {
+  console.info(JSON.stringify({ scope: "growth_opportunity_dispatch", event, ...fields }));
+}
+
+function safeErrorCode(code: string | undefined) {
+  return code && /^[A-Z0-9]{5}$/.test(code) ? code : "unknown";
+}
+
 /** Processes a small leased batch. It never fans out to workspaces or scans historical changes. */
 export async function dispatchGrowthOpportunityEvaluation(
   options: { client?: SupabaseClient; limit?: number } = {},
@@ -18,13 +26,19 @@ export async function dispatchGrowthOpportunityEvaluation(
   const client = options.client ?? createSupabaseServerClient();
   const limit = Math.min(Math.max(Math.trunc(options.limit ?? 10), 1), 25);
   const { data, error } = await client.rpc("claim_growth_evaluation_batch", { p_limit: limit });
-  if (error) throw new Error("growth_queue_claim_failed");
+  if (error) {
+    logGrowthDispatch("claim_error", { error_code: safeErrorCode(error.code), limit });
+    throw new Error("growth_queue_claim_failed");
+  }
   const claimed = (data ?? []) as ClaimedGrowthEvaluation[];
+  if (claimed.length === 0) logGrowthDispatch("claim_empty", { limit });
+  else logGrowthDispatch("claim_success", { count: claimed.length, limit });
   const results = {
     claimed: claimed.length,
     completed: 0,
     skippedUnsafe: 0,
     retried: 0,
+    retryExhausted: 0,
     lostLease: 0,
   };
   for (const item of claimed) {
@@ -50,8 +64,22 @@ export async function dispatchGrowthOpportunityEvaluation(
         p_lease_token: item.lease_token,
         p_error_category: "evaluation_failed",
       });
-      if (failError || !failed) results.lostLease += 1;
-      else results.retried += 1;
+      if (failError || !failed) {
+        results.lostLease += 1;
+        logGrowthDispatch("processing_failure", {
+          outcome: "lease_lost",
+          error_code: safeErrorCode(failError?.code),
+        });
+      } else if (item.attempts >= 5) {
+        logGrowthDispatch("retry_exhausted", { attempts: item.attempts });
+        results.retryExhausted += 1;
+      } else {
+        logGrowthDispatch("processing_failure", {
+          outcome: "retry_scheduled",
+          attempts: item.attempts,
+        });
+        results.retried += 1;
+      }
     }
   }
   return results;
