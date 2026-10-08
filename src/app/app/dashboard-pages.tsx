@@ -1,9 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useProductApp } from "./app-shell";
 import { getDashboardHealthPresentation } from "@/lib/protection/dashboard-health";
+import {
+  createGitHubConnectAction,
+  getGitHubConnectErrorMessage,
+  getGitHubConnectPresentation,
+} from "@/lib/app/github-connect";
 
 type Protection = {
   status?: string;
@@ -99,28 +104,51 @@ function useLoad<T>(path: string | null) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [dataScope, setDataScope] = useState("");
+  const requestId = useRef(0);
+  const scope = `${path ?? ""}:${workspaceId}`;
   const load = useCallback(async () => {
-    if (!path || !workspaceId) return;
+    const currentRequestId = ++requestId.current;
+    if (!path || !workspaceId) {
+      setData(null);
+      setError("");
+      setDataScope(scope);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError("");
+    setData(null);
+    setDataScope("");
     try {
-      setData(
-        await api<T>(
-          `${path}${path.includes("?") ? "&" : "?"}workspaceId=${encodeURIComponent(workspaceId)}`,
-        ),
+      const result = await api<T>(
+        `${path}${path.includes("?") ? "&" : "?"}workspaceId=${encodeURIComponent(workspaceId)}`,
       );
+      if (requestId.current === currentRequestId) {
+        setData(result);
+        setDataScope(scope);
+      }
     } catch (reason) {
-      setError(messageFor(reason));
+      if (requestId.current === currentRequestId) {
+        setError(messageFor(reason));
+        setDataScope(scope);
+      }
     } finally {
-      setLoading(false);
+      if (requestId.current === currentRequestId) setLoading(false);
     }
-  }, [api, path, workspaceId]);
+  }, [api, path, scope, workspaceId]);
   useEffect(() => {
-    queueMicrotask(() => {
-      void load();
-    });
+    queueMicrotask(() => void load());
+    return () => {
+      requestId.current += 1;
+    };
   }, [load]);
-  return { data, error, loading, reload: load };
+  return {
+    data: dataScope === scope ? data : null,
+    error: dataScope === scope ? error : "",
+    loading: loading || dataScope !== scope,
+    reload: load,
+  };
 }
 
 function PageHeading({
@@ -220,9 +248,19 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
   const connectors = useLoad<{ items: Array<Record<string, unknown>> }>(
     kind === "settings" ? "/api/connectors" : null,
   );
+  const accountStatus = useLoad<{
+    role?: string;
+    entitlements?: {
+      capabilities?: { repositoryConnections?: boolean };
+      usage?: { repositories?: number };
+      limits?: { repositories?: number };
+    };
+  }>(kind === "settings" ? "/api/account/status" : null);
   const [preference, setPreference] = useState<Record<string, unknown> | null>(null);
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
+  const [githubConnecting, setGithubConnecting] = useState(false);
+  const githubConnectPending = useRef(false);
   const [filters, setFilters] = useState("all");
 
   useEffect(() => {
@@ -271,6 +309,56 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
     } catch (error) {
       setNotice(messageFor(error));
       setBusy(false);
+    }
+  }
+
+  const githubConnectAction = useMemo(
+    () =>
+      createGitHubConnectAction(
+        (selectedWorkspaceId) =>
+          api<{ authorizationUrl: string }>("/api/repositories/install", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ workspaceId: selectedWorkspaceId }),
+          }),
+        (authorizationUrl) => window.location.assign(authorizationUrl),
+      ),
+    [api],
+  );
+
+  async function connectGitHub() {
+    if (githubConnectPending.current) return;
+    const account = accountStatus.data;
+    const github = connectors.data?.items.find((item) => item.provider === "github");
+    const capabilities = Array.isArray(github?.capabilities) ? github.capabilities : [];
+    const canVerify = capabilities.some(
+      (capability) =>
+        capability &&
+        typeof capability === "object" &&
+        "name" in capability &&
+        capability.name === "CAN_VERIFY" &&
+        "enabled" in capability &&
+        capability.enabled === true,
+    );
+    const presentation = getGitHubConnectPresentation({
+      role: account?.role,
+      configured: github?.configured === true,
+      entitled: account?.entitlements?.capabilities?.repositoryConnections === true && canVerify,
+      status: typeof github?.status === "string" ? github.status : undefined,
+      busy: githubConnecting,
+    });
+    if (!presentation.canConnect || !workspaceId || !account) return;
+
+    githubConnectPending.current = true;
+    setGithubConnecting(true);
+    setNotice("");
+    try {
+      await githubConnectAction(workspaceId);
+    } catch (error) {
+      setNotice(getGitHubConnectErrorMessage(error));
+    } finally {
+      githubConnectPending.current = false;
+      setGithubConnecting(false);
     }
   }
 
@@ -951,10 +1039,13 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
                 <h2>Connected tools</h2>
               </div>
             </div>
-            {connectors.loading ? (
+            {connectors.loading || accountStatus.loading ? (
               <LoadingRows />
-            ) : connectors.error ? (
-              <ErrorState error={connectors.error} retry={connectors.reload} />
+            ) : connectors.error || accountStatus.error ? (
+              <ErrorState
+                error={connectors.error || "Workspace access is temporarily unavailable."}
+                retry={() => void Promise.all([connectors.reload(), accountStatus.reload()])}
+              />
             ) : (
               <div className="connector-list">
                 {(connectors.data?.items ?? []).map((connector) => {
@@ -971,48 +1062,94 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
                           cap.name?.replace("CAN_", "").replaceAll("_", " ").toLowerCase(),
                         )
                     : [];
+                  const account = accountStatus.data;
+                  const githubPresentation =
+                    provider === "github"
+                      ? getGitHubConnectPresentation({
+                          role: account?.role,
+                          configured: connector.configured === true,
+                          entitled:
+                            account?.entitlements?.capabilities?.repositoryConnections === true &&
+                            capabilityNames.includes("verify"),
+                          status,
+                          busy: githubConnecting,
+                        })
+                      : null;
+                  const repositoryUsage = account?.entitlements?.usage?.repositories;
+                  const repositoryLimit = account?.entitlements?.limits?.repositories;
+                  const repositoryEntitled =
+                    account?.entitlements?.capabilities?.repositoryConnections === true &&
+                    capabilityNames.includes("verify");
                   return (
                     <div className="connector-row" key={provider}>
                       <span className="provider-monogram">{provider[0]?.toUpperCase()}</span>
                       <div className="connector-info">
                         <strong>{String(connector.displayName ?? provider)}</strong>
                         <small>
-                          {connected
-                            ? `${String(connector.account ?? "Connected account")} · ${capabilityNames.join(", ")}${
-                                Array.isArray(connector.resources) &&
-                                connector.resources.some(
-                                  (resource: unknown) =>
-                                    resource &&
-                                    typeof resource === "object" &&
-                                    "selected" in resource &&
-                                    resource.selected,
-                                )
-                                  ? ` · ${connector.resources
-                                      .filter(
-                                        (resource: { selected?: boolean }) => resource.selected,
-                                      )
-                                      .map(
-                                        (resource: { display_name?: string }) =>
-                                          resource.display_name,
-                                      )
-                                      .filter(Boolean)
-                                      .join(", ")}`
-                                  : ""
-                              }`
-                            : connector.configured
-                              ? "Not connected"
-                              : "Provider configuration unavailable"}
+                          {provider === "github"
+                            ? githubPresentation?.connected
+                              ? `${String(connector.account ?? "GitHub account")} · ${repositoryEntitled ? "repository verification" : "Pro required for repository verification"}`
+                              : (githubPresentation?.detail ?? "Checking workspace access.")
+                            : connected
+                              ? `${String(connector.account ?? "Connected account")} · ${capabilityNames.join(", ")}${
+                                  Array.isArray(connector.resources) &&
+                                  connector.resources.some(
+                                    (resource: unknown) =>
+                                      resource &&
+                                      typeof resource === "object" &&
+                                      "selected" in resource &&
+                                      resource.selected,
+                                  )
+                                    ? ` · ${connector.resources
+                                        .filter(
+                                          (resource: { selected?: boolean }) => resource.selected,
+                                        )
+                                        .map(
+                                          (resource: { display_name?: string }) =>
+                                            resource.display_name,
+                                        )
+                                        .filter(Boolean)
+                                        .join(", ")}`
+                                    : ""
+                                }`
+                              : connector.configured
+                                ? "Not connected"
+                                : "Provider configuration unavailable"}
                         </small>
                       </div>
                       <span className={`connector-status${connected ? " connected" : ""}`}>
-                        {connected
-                          ? "Connected"
-                          : status === "disconnected"
-                            ? "Disconnected"
-                            : status.replaceAll("_", " ")}
+                        {provider === "github"
+                          ? (githubPresentation?.statusLabel ?? "Checking access")
+                          : connected
+                            ? "Connected"
+                            : status === "disconnected"
+                              ? "Disconnected"
+                              : status.replaceAll("_", " ")}
                       </span>
                       {provider === "github" ? (
-                        <span className="connector-status">Managed in repository settings</span>
+                        <div className="connector-actions">
+                          {githubPresentation?.canConnect ? (
+                            <button
+                              className="button-secondary"
+                              disabled={githubConnecting || !workspaceId}
+                              onClick={() => void connectGitHub()}
+                            >
+                              {githubConnecting ? "Connecting…" : "Connect GitHub"}
+                            </button>
+                          ) : githubPresentation?.connected ? (
+                            <span className="connector-status connected">
+                              {repositoryEntitled &&
+                              typeof repositoryUsage === "number" &&
+                              typeof repositoryLimit === "number"
+                                ? `${repositoryUsage} / ${repositoryLimit} repositories`
+                                : "Connected"}
+                            </span>
+                          ) : (
+                            <span className="connector-status">
+                              {githubPresentation?.statusLabel ?? "Checking access"}
+                            </span>
+                          )}
+                        </div>
                       ) : connected ? (
                         <button
                           className="text-button"
