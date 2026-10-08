@@ -1,0 +1,8 @@
+{
+  "name": "fixture-web",
+  "private": true,
+  "dependencies": {
+    "@sentry/nextjs": "^8.0.0",
+    "@supabase/ssr": "^0.5.0"
+  }
+}

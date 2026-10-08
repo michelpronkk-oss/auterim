@@ -1,0 +1,10 @@
+{
+  "name": "auterim-local-discovery-basic-fixture",
+  "private": true,
+  "dependencies": {
+    "@sentry/node": "^8.0.0",
+    "@supabase/supabase-js": "^2.0.0",
+    "posthog-js": "^1.0.0",
+    "stripe": "^17.0.0"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "auterim",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "bin": {
+    "auterim": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "connect:dry-run": "node ./dist/cli.js connect --dry-run"
+  }
+}

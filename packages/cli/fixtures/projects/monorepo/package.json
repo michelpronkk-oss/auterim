@@ -1,0 +1,8 @@
+{
+  "name": "auterim-local-discovery-monorepo-fixture",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
+}
