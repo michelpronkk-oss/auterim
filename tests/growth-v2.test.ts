@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { growthFirstPartyEventKey } from "@/lib/growth-v2/feedback";
 import {
   canonicalSearchPage,
   didHitSearchAnalyticsPageCap,
@@ -18,6 +19,14 @@ const currentDay = "2026-09-20";
 const article = "https://auterim.com/changes/openai/openai-api-20261001";
 
 describe("Growth Engine V2 Search Console feedback rules", () => {
+  it("uses deterministic non-reversible keys for one-time onboarding funnel events", () => {
+    const first = growthFirstPartyEventKey("first_grounded_value", "workspace:product");
+    expect(first).toMatch(/^[0-9a-f]{64}$/);
+    expect(first).not.toContain("workspace");
+    expect(growthFirstPartyEventKey("first_grounded_value", "workspace:product")).toBe(first);
+    expect(growthFirstPartyEventKey("product_selected", "workspace:product")).not.toBe(first);
+  });
+
   it("marks the five-page sync partial even when page-five rows are rejected later", () => {
     expect(didHitSearchAnalyticsPageCap(4, 1000)).toBe(true);
     expect(didHitSearchAnalyticsPageCap(4, 999)).toBe(false);

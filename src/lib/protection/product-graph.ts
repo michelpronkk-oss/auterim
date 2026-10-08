@@ -4,6 +4,7 @@ import {
   latestDependencyScan,
   latestObservationOutcome,
   latestPreflightRuns,
+  monitoredCatalogDependencyIds,
   monitoringEvidenceState,
 } from "@/lib/protection/read-model-helpers";
 import { getProductRepositoryProtection } from "@/lib/repositories/product-protection-read-model";
@@ -111,9 +112,10 @@ export async function getProductProtectionGraph(
   const dependenciesTruncated = rawDependencies.length > MAX_DEPENDENCIES;
   const dependencies = rawDependencies.slice(0, MAX_DEPENDENCIES);
   const dependencyIds = dependencies.map((dependency) => dependency.id);
-  const catalogDependencyIds = [
-    ...new Set(dependencies.map((dependency) => dependency.dependency_id)),
-  ];
+  // Product coverage counts only dependencies whose monitoring is enabled. Keep
+  // disabled dependencies in the graph for transparency, but do not report
+  // their catalog sources as protected coverage.
+  const catalogDependencyIds = monitoredCatalogDependencyIds(dependencies);
   const repositoryIds = [
     ...new Set(
       [

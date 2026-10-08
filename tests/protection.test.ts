@@ -9,6 +9,7 @@ import {
   latestPreflightRuns,
   latestTerminalPreflightRuns,
   latestVerifiedPreflightRuns,
+  monitoredCatalogDependencyIds,
   monitoringEvidenceState,
 } from "@/lib/protection/read-model-helpers";
 
@@ -63,6 +64,19 @@ async function setup() {
 }
 
 describe("protection read models and notifications", () => {
+  it("counts source coverage only for dependencies whose monitoring is enabled", () => {
+    expect(
+      monitoredCatalogDependencyIds([
+        { dependency_id: "enabled-a", monitoring_enabled: true },
+        { dependency_id: "enabled-a", monitoring_enabled: true },
+        { dependency_id: "disabled-b", monitoring_enabled: false },
+      ]),
+    ).toEqual(["enabled-a"]);
+    expect(
+      monitoredCatalogDependencyIds([{ dependency_id: "disabled-b", monitoring_enabled: false }]),
+    ).toEqual([]);
+  });
+
   it("keeps the newest terminal Preflight result through retries and replaces it on a newer terminal result", () => {
     const latest = latestTerminalPreflightRuns([
       {

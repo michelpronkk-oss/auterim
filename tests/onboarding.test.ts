@@ -458,6 +458,45 @@ describe("onboarding activation backend", () => {
     await db.close();
   });
 
+  it("allows a separately authorized second user to create an independent first Company with idempotent retry", async () => {
+    const db = await database();
+    const secondUserId = "00000000-0000-4000-8000-000000000003";
+    await db.query("insert into auth.users(id) values ($1),($2)", [ownerId, secondUserId]);
+    await asUser(db, ownerId);
+    const companyA = await start(db, "company-a-first-workspace");
+
+    const createCompanyB = async () => {
+      const result = await db.query<{ value: Record<string, unknown> }>(
+        `select public.start_workspace_onboarding(
+          $1,'Company B workspace','Company B','https://company-b.example/','company-b.example',
+          'company-b-first-workspace',null
+        ) as value`,
+        [secondUserId],
+      );
+      return result.rows[0]!.value;
+    };
+    const companyB = await createCompanyB();
+    const replayB = await createCompanyB();
+    expect(companyB.replayed).toBe(false);
+    expect(replayB).toMatchObject({
+      workspaceId: companyB.workspaceId,
+      companyId: companyB.companyId,
+      replayed: true,
+    });
+    expect(companyB.workspaceId).not.toBe(companyA.workspaceId);
+    expect(companyB.companyId).not.toBe(companyA.companyId);
+
+    const boundaries = await db.query<{ workspaces: number; companies: number; members: number }>(
+      `select
+        (select count(*)::int from public.workspaces where created_by=$1) as workspaces,
+        (select count(*)::int from public.companies where workspace_id=$2) as companies,
+        (select count(*)::int from public.workspace_members where workspace_id=$2 and user_id=$1) as members`,
+      [secondUserId, companyB.workspaceId],
+    );
+    expect(boundaries.rows[0]).toEqual({ workspaces: 1, companies: 1, members: 1 });
+    await db.close();
+  });
+
   it("serializes concurrent first-time submissions with different retry keys", async () => {
     const db = await database();
     await db.query("insert into auth.users(id) values ($1)", [ownerId]);

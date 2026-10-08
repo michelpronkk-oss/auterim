@@ -1,9 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ authenticate: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  authenticate: vi.fn(),
+  workspaceRole: vi.fn(),
+  entitlements: vi.fn(),
+}));
 
 vi.mock("@/lib/onboarding/auth", () => ({
   authenticateOnboardingRequest: mocks.authenticate,
+}));
+vi.mock("@/lib/billing/server", () => ({
+  getWorkspaceRole: mocks.workspaceRole,
+  resolveWorkspaceEntitlementsForMember: mocks.entitlements,
 }));
 
 import { GET } from "@/app/api/account/status/route";
@@ -26,7 +34,11 @@ function workspaceQuery(rows: Array<{ id: string; name: string }>) {
 }
 
 describe("GET /api/account/status workspace list", () => {
-  beforeEach(() => mocks.authenticate.mockReset());
+  beforeEach(() => {
+    mocks.authenticate.mockReset();
+    mocks.workspaceRole.mockReset();
+    mocks.entitlements.mockReset();
+  });
 
   it("returns canonical workspace names only for memberships of the authenticated user", async () => {
     const ownerId = "11111111-1111-4111-8111-111111111111";
@@ -83,5 +95,46 @@ describe("GET /api/account/status workspace list", () => {
 
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ error: "account_state_unavailable" });
+  });
+
+  it("names activation-time snapshots explicitly in the account read model", async () => {
+    const workspaceId = "e140d48e-9dc0-4552-a9a4-a81fe3872422";
+    const assessment = {
+      activated_at: "2026-10-01T12:00:00.000Z",
+      dependencies_confirmed: 2,
+      authoritative_sources_available: 4,
+      current_global_baselines: 0,
+      material_changes_evaluated: 1,
+      relevant_changes: 1,
+      verified_repository_exposures: 0,
+      remediation_available: 0,
+      created_at: "2026-10-01T12:00:00.000Z",
+    };
+    const query = {
+      select: vi.fn(() => query),
+      eq: vi.fn(() => query),
+      maybeSingle: vi.fn(async () => ({ data: assessment, error: null })),
+    };
+    const client = {
+      from: vi.fn(() => query),
+      rpc: vi.fn(async () => ({ data: { state: "active" }, error: null })),
+    };
+    mocks.authenticate.mockResolvedValue({ ok: true, user: { id: "owner" }, client });
+    mocks.workspaceRole.mockResolvedValue("owner");
+    mocks.entitlements.mockResolvedValue({ plan: "pro" });
+
+    const response = await GET(
+      new Request(`https://auterim.com/api/account/status?workspaceId=${workspaceId}`),
+    );
+
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload).toMatchObject({
+      initialAssessment: {
+        snapshotsObservedAtActivation: 0,
+        authoritativeSourcesAvailable: 4,
+      },
+    });
+    expect(payload.initialAssessment).not.toHaveProperty("current_global_baselines");
   });
 });

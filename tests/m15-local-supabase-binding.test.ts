@@ -7,7 +7,14 @@ import { parseM15LocalSupabaseCredentials } from "@/lib/m15/local-supabase-crede
 
 describe("M15 local Supabase binding guard", () => {
   it("accepts only the isolated loopback API origin when local integration is enabled", () => {
-    for (const url of ["http://127.0.0.1:65431", "http://localhost:65431", "http://[::1]:65431"]) {
+    for (const url of [
+      "http://127.0.0.1:65431",
+      "http://localhost:65431",
+      "http://[::1]:65431",
+      "http://127.0.0.1:57000",
+      "http://localhost:57000",
+      "http://[::1]:57000",
+    ]) {
       expect(() =>
         assertM15LocalSupabaseBinding({ enabled: "1", nodeEnv: "development", url }),
       ).not.toThrow();
@@ -17,6 +24,7 @@ describe("M15 local Supabase binding guard", () => {
   it.each([
     "https://lnljaacbptrubppoypaz.supabase.co",
     "http://127.0.0.1:54321",
+    "http://127.0.0.1:57000/other",
     "http://127.0.0.1:65431/other",
     "http://127.0.0.1:65431?redirect=outside",
     "http://user:password@127.0.0.1:65431",

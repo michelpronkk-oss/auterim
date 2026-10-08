@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useProductApp } from "./app-shell";
+import { WorkspaceMembersPanel } from "./workspace-members-panel";
 import { getDashboardHealthPresentation } from "@/lib/protection/dashboard-health";
 import {
   createGitHubConnectAction,
@@ -1278,6 +1279,7 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
               Billing &amp; account →
             </Link>
           </section>
+          <WorkspaceMembersPanel workspaceId={workspaceId} role={accountStatus.data?.role} api={api} />
           {notice && (
             <div className="success-note" role="status">
               {notice}

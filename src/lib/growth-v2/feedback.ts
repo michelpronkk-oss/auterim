@@ -392,6 +392,10 @@ export async function recordGrowthFirstPartyEvent(input: {
   eventType:
     | "signup_completed"
     | "protection_activation"
+    | "product_selected"
+    | "dependency_confirmed"
+    | "protection_graph_viewed"
+    | "first_grounded_value"
     | "github_connected"
     | "trial_started"
     | "paid_conversion";
@@ -405,9 +409,7 @@ export async function recordGrowthFirstPartyEvent(input: {
   occurredAt?: string;
 }) {
   const client = createSupabaseServerClient();
-  const key = createHash("sha256")
-    .update(`growth-event:v1:${input.eventType}:${input.stableKey}`)
-    .digest("hex");
+  const key = growthFirstPartyEventKey(input.eventType, input.stableKey);
   const attribution = input.attribution ?? {};
   const safeText = (value: string | undefined) =>
     value && /^[\p{L}\p{N}._ -]{1,100}$/u.test(value) ? value : null;
@@ -431,6 +433,10 @@ export async function recordGrowthFirstPartyEvent(input: {
     { onConflict: "event_key", ignoreDuplicates: true },
   );
   if (error) throw new Error("growth_first_party_event_write_failed");
+}
+
+export function growthFirstPartyEventKey(eventType: string, stableKey: string) {
+  return createHash("sha256").update(`growth-event:v1:${eventType}:${stableKey}`).digest("hex");
 }
 
 export async function getGrowthFeedbackReadModel(options: { limit?: number } = {}) {

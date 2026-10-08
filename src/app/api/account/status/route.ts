@@ -83,7 +83,18 @@ export async function GET(request: Request) {
         role,
         onboarding,
         entitlements,
-        initialAssessment,
+        initialAssessment: initialAssessment
+          ? {
+              activatedAt: initialAssessment.activated_at,
+              dependenciesConfirmed: initialAssessment.dependencies_confirmed,
+              authoritativeSourcesAvailable: initialAssessment.authoritative_sources_available,
+              snapshotsObservedAtActivation: initialAssessment.current_global_baselines,
+              materialChangesEvaluated: initialAssessment.material_changes_evaluated,
+              relevantChanges: initialAssessment.relevant_changes,
+              verifiedRepositoryExposures: initialAssessment.verified_repository_exposures,
+              remediationsAvailable: initialAssessment.remediation_available,
+            }
+          : null,
       },
       { headers: PRIVATE_NO_STORE },
     );

@@ -67,6 +67,18 @@ export function monitoringEvidenceState(input: {
   return "monitoring_evidence_available" as const;
 }
 
+export function monitoredCatalogDependencyIds(
+  dependencies: Array<{ dependency_id: string; monitoring_enabled: boolean }>,
+) {
+  return [
+    ...new Set(
+      dependencies
+        .filter((dependency) => dependency.monitoring_enabled)
+        .map((dependency) => dependency.dependency_id),
+    ),
+  ];
+}
+
 export function latestObservationOutcome(
   enabledSourceCount: number,
   observations: Array<{ scan_status: string | null }>,

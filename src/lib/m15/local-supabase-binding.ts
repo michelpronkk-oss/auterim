@@ -8,6 +8,11 @@ const expectedOrigins = new Set([
   "http://127.0.0.1:65431",
   "http://localhost:65431",
   "http://[::1]:65431",
+  // Dedicated M15.5 QA Supabase project; its config.toml project_id is
+  // auterim-m155-onboarding-v2-qa and it uses the isolated 57000 port block.
+  "http://127.0.0.1:57000",
+  "http://localhost:57000",
+  "http://[::1]:57000",
 ]);
 
 /** Fail closed if an M15 local acceptance worker is accidentally given hosted persistence. */
