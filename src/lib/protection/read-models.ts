@@ -1,5 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
 import {
   latestDependencyScan,
   latestTerminalPreflightRuns,
@@ -116,12 +117,19 @@ export async function getDependenciesOverview(
   if (repositories.error) throw new Error("dependencies_overview_unavailable");
   const sourceRows = sources.data ?? [];
   const sourceIds = sourceRows.map((source) => source.id);
+  const monitoringClient = sourceIds.length ? createSupabaseServerClient() : null;
   const [snapshots, queue, scanRuns] = await Promise.all([
-    sourceIds.length
-      ? client.from("source_snapshots").select("id,source_id,created_at").in("source_id", sourceIds)
+    monitoringClient
+      ? monitoringClient
+          .from("source_snapshots")
+          .select("id,source_id,created_at")
+          .in("source_id", sourceIds)
       : Promise.resolve({ data: [], error: null }),
-    sourceIds.length
-      ? client.from("baseline_scan_queue").select("source_id,status").in("source_id", sourceIds)
+    monitoringClient
+      ? monitoringClient
+          .from("baseline_scan_queue")
+          .select("source_id,status")
+          .in("source_id", sourceIds)
       : Promise.resolve({ data: [], error: null }),
     sourceIds.length
       ? client.rpc("get_dependency_source_scan_states", {

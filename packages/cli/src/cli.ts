@@ -31,7 +31,7 @@ function parseArguments(arguments_: string[]): ParsedArguments | null {
   if (arguments_[0] === "--version" || arguments_[0] === "-v")
     return arguments_.length === 1 ? { command: "version" } : null;
   if (arguments_[0] !== "connect") return null;
-  if (arguments_.length === 1 || arguments_[1] === "--help" || arguments_[1] === "-h")
+  if (arguments_[1] === "--help" || arguments_[1] === "-h")
     return arguments_.length <= 2 ? { command: "connect-help" } : null;
 
   let mode: "dry-run" | "connect" = "connect";
