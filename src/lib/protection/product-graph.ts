@@ -633,6 +633,173 @@ export async function getProductProtectionGraph(
     };
   });
 
+  const { data: deploymentMappings, error: deploymentMappingError } = await client
+    .from("workspace_product_deployment_surfaces")
+    .select("id,deployment_surface_id,repository_id,provenance,created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("protected_product_id", productId)
+    .order("created_at", { ascending: true })
+    .limit(100);
+  if (deploymentMappingError) throw new Error("product_protection_graph_unavailable");
+  const deploymentSurfaceIds = [
+    ...new Set((deploymentMappings ?? []).map((row) => row.deployment_surface_id as string)),
+  ];
+  const { data: deploymentSurfaces, error: deploymentSurfaceError } = deploymentSurfaceIds.length
+    ? await client
+        .from("deployment_surfaces")
+        .select(
+          "id,installation_id,provider,external_project_id,project_name,environment_scope,current_production_deployment_id,last_successful_sync_at,last_attempt_at,last_attempt_status",
+        )
+        .eq("workspace_id", workspaceId)
+        .in("id", deploymentSurfaceIds)
+        .limit(100)
+    : { data: [], error: null };
+  if (deploymentSurfaceError) throw new Error("product_protection_graph_unavailable");
+  const deploymentSurfaceById = new Map(
+    (deploymentSurfaces ?? []).map((surface) => [surface.id as string, surface]),
+  );
+  const deploymentInstallationIds = [
+    ...new Set((deploymentSurfaces ?? []).map((surface) => surface.installation_id as string)),
+  ];
+  const { data: deploymentInstallations, error: deploymentInstallationError } =
+    deploymentInstallationIds.length
+      ? await client
+          .from("connector_installations")
+          .select("id,lifecycle_state,health_state")
+          .eq("workspace_id", workspaceId)
+          .in("id", deploymentInstallationIds)
+          .limit(100)
+      : { data: [], error: null };
+  if (deploymentInstallationError) throw new Error("product_protection_graph_unavailable");
+  const deploymentInstallationById = new Map(
+    (deploymentInstallations ?? []).map((row) => [row.id as string, row]),
+  );
+  const { data: deploymentRows, error: deploymentError } = deploymentSurfaceIds.length
+    ? await client
+        .from("deployment_observations")
+        .select(
+          "id,deployment_surface_id,external_deployment_id,environment_type,deployment_state,commit_sha,source_repository_owner,source_repository_name,source_branch,deployment_url,provider_created_at,provider_ready_at,observed_at,provenance",
+        )
+        .eq("workspace_id", workspaceId)
+        .in("deployment_surface_id", deploymentSurfaceIds)
+        .order("observed_at", { ascending: false })
+        .limit(200)
+    : { data: [], error: null };
+  if (deploymentError) throw new Error("product_protection_graph_unavailable");
+  const deploymentObservationIds = (deploymentRows ?? []).map((row) => row.id as string);
+  const { data: deploymentEvidenceRows, error: deploymentEvidenceError } =
+    deploymentObservationIds.length
+      ? await client
+          .from("product_deployment_evidence")
+          .select(
+            "deployment_observation_id,repository_id,preflight_finding_id,verification_state,verified_commit_sha,observed_at,safe_metadata",
+          )
+          .eq("workspace_id", workspaceId)
+          .eq("protected_product_id", productId)
+          .in("deployment_observation_id", deploymentObservationIds)
+          .limit(200)
+      : { data: [], error: null };
+  if (deploymentEvidenceError) throw new Error("product_protection_graph_unavailable");
+  const evidenceByObservation = new Map(
+    (deploymentEvidenceRows ?? []).map((evidence) => [
+      evidence.deployment_observation_id as string,
+      evidence,
+    ]),
+  );
+  const deploymentSurfacesForProduct = (deploymentMappings ?? []).flatMap((mapping) => {
+    const surface = deploymentSurfaceById.get(mapping.deployment_surface_id as string);
+    if (!surface) return [];
+    const repository = repositoryById.get(mapping.repository_id as string);
+    const repositoryCurrentlyMapped = mappedRepositoryIds.has(mapping.repository_id as string);
+    const installation = deploymentInstallationById.get(surface.installation_id as string);
+    const connectorHealthy =
+      installation?.lifecycle_state === "connected" && installation.health_state === "healthy";
+    const protectionMappingCurrent =
+      input.verificationCapabilityAvailable &&
+      product.status === "protected" &&
+      repositoryCurrentlyMapped &&
+      repository?.status === "available";
+    const observations = (deploymentRows ?? [])
+      .filter((row) => row.deployment_surface_id === surface.id)
+      .slice(0, 20)
+      .map((row) => {
+        const evidence = evidenceByObservation.get(row.id as string);
+        const currentPointerMatches =
+          surface.current_production_deployment_id === row.external_deployment_id;
+        const syncFreshness =
+          surface.last_attempt_status === "succeeded"
+            ? "latest_sync_succeeded"
+            : surface.last_attempt_status === "failed"
+              ? "latest_sync_failed"
+              : "sync_not_yet_succeeded";
+        return {
+          id: row.id,
+          providerDeploymentId: row.external_deployment_id,
+          environment: row.environment_type,
+          state: row.deployment_state,
+          commitSha: row.commit_sha,
+          sourceRepository:
+            row.source_repository_owner && row.source_repository_name
+              ? { owner: row.source_repository_owner, name: row.source_repository_name }
+              : null,
+          branch: row.source_branch,
+          url: row.deployment_url,
+          createdAt: row.provider_created_at,
+          readyAt: row.provider_ready_at,
+          observedAt: row.observed_at,
+          provenance: row.provenance,
+          verification: evidence
+            ? {
+                state: evidence.verification_state,
+                verifiedCommitSha: evidence.verified_commit_sha,
+                preflightFindingId: evidence.preflight_finding_id,
+                exactCommitMatch: evidence.safe_metadata?.exactCommitMatch === true,
+              }
+            : {
+                state: "observed",
+                verifiedCommitSha: null,
+                preflightFindingId: null,
+                exactCommitMatch: false,
+              },
+          currentProduction: Boolean(
+            currentPointerMatches &&
+            surface.last_attempt_status === "succeeded" &&
+            connectorHealthy &&
+            protectionMappingCurrent &&
+            evidence?.verification_state === "production_verified",
+          ),
+          currentness: !protectionMappingCurrent
+            ? "product_repository_mapping_inactive"
+            : !connectorHealthy
+              ? "connector_not_healthy"
+              : currentPointerMatches
+                ? syncFreshness
+                : evidence?.verification_state === "historical"
+                  ? "historical"
+                  : "not_current_production",
+        };
+      });
+    return [
+      {
+        id: mapping.id,
+        provider: surface.provider,
+        projectId: surface.external_project_id,
+        projectName: surface.project_name,
+        environmentScope: surface.environment_scope,
+        repository: repository
+          ? { id: repository.id, owner: repository.owner, name: repository.name }
+          : null,
+        mappingProvenance: mapping.provenance,
+        mappedAt: mapping.created_at,
+        lastSuccessfulSyncAt: surface.last_successful_sync_at,
+        lastAttemptAt: surface.last_attempt_at,
+        lastAttemptStatus: surface.last_attempt_status,
+        currentProductionDeploymentId: surface.current_production_deployment_id,
+        observations,
+      },
+    ];
+  });
+
   const sourcesTotal = sourceResult.count ?? boundedSources.length;
   const snapshotSources = new Set(
     observations.filter((item) => item.snapshot_id !== null).map((item) => item.source_id),
@@ -782,6 +949,11 @@ export async function getProductProtectionGraph(
       connectionHealth: repository.connectionHealth,
       verificationCapabilityAvailable: input.verificationCapabilityAvailable,
     })),
+    deployments: {
+      semantics:
+        "provider_observed; product_mapping_requires_existing_protected_repository_identity",
+      surfaces: deploymentSurfacesForProduct,
+    },
     dependencyRepositoryEdges,
     limits: {
       dependencies: MAX_DEPENDENCIES,

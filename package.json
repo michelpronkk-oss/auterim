@@ -31,6 +31,7 @@
     "eval:growth": "vitest run tests/growth.test.ts tests/database.test.ts",
     "eval:growth-v2": "vitest run tests/growth-v2.test.ts tests/database.test.ts",
     "eval:connectors": "vitest run tests/connectors.test.ts tests/database.test.ts",
+    "eval:deployments": "vitest run tests/deployments.test.ts tests/database.test.ts",
     "eval:dashboard": "vitest run tests/dashboard.test.ts",
     "eval:public": "vitest run tests/public-growth.test.ts tests/public-discovery.test.ts",
     "eval:public-growth": "vitest run tests/public-growth.test.ts tests/public-discovery.test.ts",

@@ -1,4 +1,4 @@
-export const CONNECTOR_PROVIDERS = ["github", "slack", "linear", "sentry"] as const;
+export const CONNECTOR_PROVIDERS = ["github", "slack", "linear", "sentry", "vercel"] as const;
 export type ConnectorProvider = (typeof CONNECTOR_PROVIDERS)[number];
 
 export const CONNECTOR_CAPABILITIES = [
@@ -49,6 +49,7 @@ export const PROVIDER_CAPABILITIES: Record<ConnectorProvider, readonly Connector
   slack: ["CAN_RECEIVE_ALERTS"],
   linear: ["CAN_CREATE_ACTIONS"],
   sentry: ["CAN_READ_RUNTIME_CONTEXT"],
+  vercel: ["CAN_READ_DEPLOYMENT_CONTEXT"],
 };
 
 export const PROVIDER_SCOPE_REQUIREMENTS: Record<
@@ -58,6 +59,10 @@ export const PROVIDER_SCOPE_REQUIREMENTS: Record<
   slack: { required: ["channels:read", "chat:write"], optional: [] },
   linear: { required: ["read", "issues:create"], optional: [] },
   sentry: { required: ["org:read", "project:read", "event:read"], optional: [] },
+  vercel: {
+    required: ["integration-configuration:read", "project:read", "deployment:read", "domain:read"],
+    optional: ["team:read", "user:read"],
+  },
 };
 
 export function hasConnectorCapability(

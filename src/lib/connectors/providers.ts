@@ -14,6 +14,7 @@ export type ProviderCredentials = {
   expiresAt: string | null;
   scopes: string[];
   refreshExpiresAt?: string | null;
+  providerMetadata?: Record<string, string | number | boolean | null>;
 };
 export type OAuthGrant = ProviderCredentials & {
   externalAccountId: string;
@@ -25,7 +26,11 @@ export type ConnectorProviderAdapter = {
   capabilities: readonly string[];
   requiredScopes: readonly string[];
   beginAuthorization(state: string, codeChallenge?: string): string;
-  exchangeCode(code: string, codeVerifier?: string): Promise<OAuthGrant>;
+  exchangeCode(
+    code: string,
+    codeVerifier?: string,
+    callback?: { configurationId?: string | null; teamId?: string | null },
+  ): Promise<OAuthGrant>;
   refreshCredentials?: (refreshToken: string) => Promise<ProviderCredentials>;
   revoke(accessToken: string): Promise<void>;
   listResources(
@@ -44,10 +49,21 @@ export type ConnectorProviderAdapter = {
 };
 
 type Provider = Exclude<ConnectorProvider, "github">;
-function configuration(provider: Provider) {
+function configuration(provider: Provider): {
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  integrationSlug?: string;
+} {
   const environment = getEnvironment();
   const name =
-    provider === "slack" ? "slackApp" : provider === "linear" ? "linearApp" : "sentryApp";
+    provider === "slack"
+      ? "slackApp"
+      : provider === "linear"
+        ? "linearApp"
+        : provider === "sentry"
+          ? "sentryApp"
+          : "vercelApp";
   if (!isIntegrationConfigured(name, environment)) throw new Error(`${provider}_not_configured`);
   if (!isIntegrationConfigured("connectorEncryption", environment))
     throw new Error("connector_credential_encryption_not_configured");
@@ -80,10 +96,17 @@ function configuration(provider: Provider) {
       clientSecret: environment.LINEAR_CLIENT_SECRET!,
       redirectUri: redirect(environment.LINEAR_REDIRECT_URI!),
     };
+  if (provider === "sentry")
+    return {
+      clientId: environment.SENTRY_CLIENT_ID!,
+      clientSecret: environment.SENTRY_CLIENT_SECRET!,
+      redirectUri: redirect(environment.SENTRY_REDIRECT_URI!),
+    };
   return {
-    clientId: environment.SENTRY_CLIENT_ID!,
-    clientSecret: environment.SENTRY_CLIENT_SECRET!,
-    redirectUri: redirect(environment.SENTRY_REDIRECT_URI!),
+    clientId: environment.VERCEL_CLIENT_ID!,
+    clientSecret: environment.VERCEL_CLIENT_SECRET!,
+    redirectUri: redirect(environment.VERCEL_REDIRECT_URI!),
+    integrationSlug: environment.VERCEL_INTEGRATION_SLUG!,
   };
 }
 
@@ -274,19 +297,35 @@ function baseAdapter(provider: Provider): ConnectorProviderAdapter {
       ? ["channels:read", "chat:write"]
       : provider === "linear"
         ? ["read", "issues:create"]
-        : ["org:read", "project:read", "event:read"];
+        : provider === "sentry"
+          ? ["org:read", "project:read", "event:read"]
+          : [
+              "integration-configuration:read",
+              "project:read",
+              "deployment:read",
+              "domain:read",
+              "team:read",
+              "user:read",
+            ];
   const capability =
     provider === "slack"
       ? "CAN_RECEIVE_ALERTS"
       : provider === "linear"
         ? "CAN_CREATE_ACTIONS"
-        : "CAN_READ_RUNTIME_CONTEXT";
+        : provider === "sentry"
+          ? "CAN_READ_RUNTIME_CONTEXT"
+          : "CAN_READ_DEPLOYMENT_CONTEXT";
   const adapter: ConnectorProviderAdapter = {
     provider,
     capabilities: [capability],
     requiredScopes: scopes,
     beginAuthorization(state, challenge) {
       const current = config();
+      if (provider === "vercel") {
+        const url = new URL(`https://vercel.com/integrations/${current.integrationSlug}/new`);
+        url.searchParams.set("state", state);
+        return url.toString();
+      }
       const url = new URL(
         provider === "slack"
           ? "https://slack.com/oauth/v2/authorize"
@@ -306,7 +345,7 @@ function baseAdapter(provider: Provider): ConnectorProviderAdapter {
       }
       return url.toString();
     },
-    async exchangeCode(code, verifier) {
+    async exchangeCode(code, verifier, callback) {
       const current = config();
       let body: Record<string, unknown>;
       if (provider === "slack") {
@@ -343,6 +382,148 @@ function baseAdapter(provider: Provider): ConnectorProviderAdapter {
           safeMetadata: {
             enterpriseId: response.enterprise?.id ?? null,
           } as OAuthGrant["safeMetadata"],
+        };
+      }
+      if (provider === "vercel") {
+        const configurationId = callback?.configurationId;
+        if (!configurationId || !/^[A-Za-z0-9_-]{1,200}$/.test(configurationId))
+          throw new ConnectorError(
+            "INVALID_REQUEST",
+            false,
+            provider,
+            "Vercel authorization response was incomplete.",
+          );
+        body = await providerFetch<Record<string, unknown>>(
+          provider,
+          "https://api.vercel.com/v2/oauth/access_token",
+          {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+            body: form({
+              client_id: current.clientId,
+              client_secret: current.clientSecret,
+              code,
+              redirect_uri: current.redirectUri,
+            }),
+          },
+        );
+        const token =
+          typeof body.access_token === "string"
+            ? body.access_token
+            : typeof body.token === "string"
+              ? body.token
+              : "";
+        if (!token)
+          throw new ConnectorError(
+            "AUTH_REQUIRED",
+            false,
+            provider,
+            "Vercel authorization failed.",
+          );
+        const teamId = typeof body.team_id === "string" ? body.team_id : callback.teamId;
+        if (teamId && callback.teamId && teamId !== callback.teamId)
+          throw new ConnectorError(
+            "INVALID_REQUEST",
+            false,
+            provider,
+            "Vercel team identity did not match the authorization response.",
+          );
+        const { normalizeVercelConfiguration } = await import("@/lib/deployments/vercel");
+        const configUrl = new URL(
+          `https://api.vercel.com/v1/integrations/configuration/${encodeURIComponent(configurationId)}`,
+        );
+        if (teamId) configUrl.searchParams.set("teamId", teamId);
+        const rawConfiguration = await providerFetch<unknown>(
+          provider,
+          configUrl.toString(),
+          {
+            headers: { authorization: `Bearer ${token}` },
+          },
+          64 * 1024,
+        );
+        const installation = normalizeVercelConfiguration(rawConfiguration, {
+          configurationId,
+          teamId: teamId ?? null,
+        });
+        const identityScope = teamId ? "team:read" : "user:read";
+        if (!installation.scopes.includes(identityScope))
+          throw new ConnectorError(
+            "PERMISSION_MISSING",
+            false,
+            provider,
+            "The Vercel installation is missing account identity read permission.",
+          );
+        const identityUrl = teamId
+          ? `https://api.vercel.com/v2/teams/${encodeURIComponent(teamId)}`
+          : "https://api.vercel.com/v2/user";
+        const identity = await providerFetch<Record<string, unknown>>(provider, identityUrl, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        const identityUser =
+          identity.user && typeof identity.user === "object"
+            ? (identity.user as Record<string, unknown>)
+            : identity;
+        const accountId = teamId ?? (typeof identityUser.id === "string" ? identityUser.id : "");
+        if (teamId && identity.id !== teamId)
+          throw new ConnectorError(
+            "INVALID_REQUEST",
+            false,
+            provider,
+            "Vercel team identity could not be verified.",
+          );
+        const configurationOwnerId =
+          typeof rawConfiguration === "object" && rawConfiguration !== null
+            ? (() => {
+                const root = rawConfiguration as Record<string, unknown>;
+                const row =
+                  root.configuration && typeof root.configuration === "object"
+                    ? (root.configuration as Record<string, unknown>)
+                    : root;
+                return typeof row.userId === "string"
+                  ? row.userId
+                  : typeof row.ownerId === "string"
+                    ? row.ownerId
+                    : null;
+              })()
+            : null;
+        if (!teamId && configurationOwnerId && identityUser.id !== configurationOwnerId)
+          throw new ConnectorError(
+            "INVALID_REQUEST",
+            false,
+            provider,
+            "Vercel account identity could not be verified.",
+          );
+        const accountName = teamId
+          ? typeof identity.name === "string"
+            ? identity.name
+            : "Vercel Team"
+          : typeof identityUser.username === "string"
+            ? identityUser.username
+            : "Vercel Account";
+        if (!accountId)
+          throw new ConnectorError(
+            "AUTH_REQUIRED",
+            false,
+            provider,
+            "Vercel account identity could not be verified.",
+          );
+        const tokens: ProviderCredentials = {
+          accessToken: token,
+          refreshToken: null,
+          expiresAt: null,
+          scopes: installation.scopes,
+          providerMetadata: { teamId: teamId ?? null, configurationId },
+        };
+        return {
+          ...tokens,
+          externalAccountId: configurationId,
+          accountName: accountName.slice(0, 160),
+          safeMetadata: {
+            teamId: teamId ?? null,
+            configurationId,
+            accountId,
+            projectSelection: installation.projectSelection,
+          },
         };
       }
       const tokenUrl =
@@ -430,9 +611,18 @@ function baseAdapter(provider: Provider): ConnectorProviderAdapter {
           if (!(error instanceof ConnectorError && error.category === "AUTH_REQUIRED")) throw error;
         }
       }
-      // Sentry does not document an OAuth token revocation endpoint; Auterim revokes locally.
+      // Sentry and Vercel installations are revoked locally; neither adapter calls a write-scoped revoke endpoint.
     },
     async listResources(credentials, context) {
+      if (provider === "vercel") {
+        const { listVercelProjects, vercelProjectResource } =
+          await import("@/lib/deployments/vercel");
+        const teamId =
+          typeof credentials.providerMetadata?.teamId === "string"
+            ? credentials.providerMetadata.teamId
+            : null;
+        return (await listVercelProjects(credentials, teamId)).map(vercelProjectResource);
+      }
       if (provider === "slack") {
         const resources = [];
         let cursor = "";
@@ -529,57 +719,58 @@ function baseAdapter(provider: Provider): ConnectorProviderAdapter {
   if (provider === "slack") adapter.sendAlert = sendSlackNotification;
   if (provider === "linear") adapter.createAction = createLinearIssue;
   if (provider === "sentry") adapter.readRuntimeContext = readSentryRuntimeContext;
-  adapter.refreshCredentials = async (refreshToken: string) => {
-    if (provider === "slack") {
-      const current = config();
-      const body = await providerFetch<Record<string, unknown>>(
-        provider,
-        "https://slack.com/api/oauth.v2.access",
-        {
-          method: "POST",
-          headers: { "content-type": "application/x-www-form-urlencoded" },
-          body: form({
-            client_id: current.clientId,
-            client_secret: current.clientSecret,
-            grant_type: "refresh_token",
-            refresh_token: refreshToken,
-          }),
-        },
-      );
-      if (body.ok !== true)
-        throw new ConnectorError(
-          "AUTH_REQUIRED",
-          false,
+  if (provider !== "vercel")
+    adapter.refreshCredentials = async (refreshToken: string) => {
+      if (provider === "slack") {
+        const current = config();
+        const body = await providerFetch<Record<string, unknown>>(
           provider,
-          "Slack authorization must be renewed.",
+          "https://slack.com/api/oauth.v2.access",
+          {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+            body: form({
+              client_id: current.clientId,
+              client_secret: current.clientSecret,
+              grant_type: "refresh_token",
+              refresh_token: refreshToken,
+            }),
+          },
         );
+        if (body.ok !== true)
+          throw new ConnectorError(
+            "AUTH_REQUIRED",
+            false,
+            provider,
+            "Slack authorization must be renewed.",
+          );
+        return tokenGrant(
+          provider,
+          body,
+          typeof body.scope === "string" ? body.scope.split(",").filter(Boolean) : scopes,
+        );
+      }
+      const current = config();
+      const tokenUrl =
+        provider === "linear"
+          ? "https://api.linear.app/oauth/token"
+          : "https://sentry.io/oauth/token/";
+      const body = await providerFetch<Record<string, unknown>>(provider, tokenUrl, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: form({
+          grant_type: "refresh_token",
+          refresh_token: refreshToken,
+          client_id: current.clientId,
+          client_secret: current.clientSecret,
+        }),
+      });
       return tokenGrant(
         provider,
         body,
-        typeof body.scope === "string" ? body.scope.split(",").filter(Boolean) : scopes,
+        typeof body.scope === "string" ? body.scope.split(/[ ,]+/).filter(Boolean) : [],
       );
-    }
-    const current = config();
-    const tokenUrl =
-      provider === "linear"
-        ? "https://api.linear.app/oauth/token"
-        : "https://sentry.io/oauth/token/";
-    const body = await providerFetch<Record<string, unknown>>(provider, tokenUrl, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: form({
-        grant_type: "refresh_token",
-        refresh_token: refreshToken,
-        client_id: current.clientId,
-        client_secret: current.clientSecret,
-      }),
-    });
-    return tokenGrant(
-      provider,
-      body,
-      typeof body.scope === "string" ? body.scope.split(/[ ,]+/).filter(Boolean) : [],
-    );
-  };
+    };
   return adapter;
 }
 

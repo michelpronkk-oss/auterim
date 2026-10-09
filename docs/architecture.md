@@ -59,3 +59,4 @@ The fetcher blocks common private, local, link-local, documentation, multicast, 
 - `OPENAI_API_KEY` is optional, server-only, and read only by the semantic classifier. `AUTERIM_CLASSIFIER_MODEL` must be set explicitly for live calls. External page content and catalog text are untrusted data, have no tool access, and are never mixed with tenant/company context.
 - External source HTML is untrusted data and is parsed as inert text; no page scripts run.
 - Git and Supabase identity guards use the repository's own local config. No automatic project discovery or linking occurs.
+- M15.7 keeps code exposure distinct from deployment exposure. Vercel is read-only through the shared connector platform; Product linkage requires an existing protected repository mapping, and current Production verification requires exact verified commit plus the current provider alias target. See `docs/deployment-surfaces.md`.

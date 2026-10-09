@@ -10,7 +10,9 @@ const ENTITLEMENT_BY_CAPABILITY: Record<
   CAN_RECEIVE_ALERTS: "slackDelivery",
   CAN_CREATE_ACTIONS: "linearActions",
   CAN_PREPARE_REMEDIATION: "generateFix",
-  CAN_READ_DEPLOYMENT_CONTEXT: null,
+  // Deployment evidence is only collected for already protected repositories;
+  // reuse the existing repository protection entitlement and quota semantics.
+  CAN_READ_DEPLOYMENT_CONTEXT: "repositoryConnections",
 };
 
 export function connectorCapabilityEntitled(
@@ -27,12 +29,14 @@ export function connectorProviderEntitled(
 ) {
   return provider === "github"
     ? connectorCapabilityEntitled(entitlements, "CAN_VERIFY")
-    : connectorCapabilityEntitled(
-        entitlements,
-        provider === "slack"
-          ? "CAN_RECEIVE_ALERTS"
-          : provider === "linear"
-            ? "CAN_CREATE_ACTIONS"
-            : "CAN_READ_RUNTIME_CONTEXT",
-      );
+    : provider === "vercel"
+      ? connectorCapabilityEntitled(entitlements, "CAN_READ_DEPLOYMENT_CONTEXT")
+      : connectorCapabilityEntitled(
+          entitlements,
+          provider === "slack"
+            ? "CAN_RECEIVE_ALERTS"
+            : provider === "linear"
+              ? "CAN_CREATE_ACTIONS"
+              : "CAN_READ_RUNTIME_CONTEXT",
+        );
 }

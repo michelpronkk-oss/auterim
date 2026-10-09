@@ -22,6 +22,8 @@ The graph exposes `latestAttempt` and `lastVerifiedEvidence` separately. A newer
 
 Impact assessments remain tenant-specific and link to the existing global material classification by ID. The graph returns the latest assessed impact summary fields without source bodies. Runtime/deployment context is not inferred from connector presence or a repository mapping; those capabilities require their own selected-resource evidence before the product can make a claim.
 
+M15.7 adds a separate `deployments` section. A Vercel project is mapped to a Product only through an active protected repository mapping plus matching provider repository identity. The graph returns bounded deployment metadata and Product-specific verification evidence. A deployment is marked current Production verified only when its exact commit matches verified Preflight evidence, it is ready, and its provider deployment ID matches the current verified-domain alias target after a successful latest sync. Preview, failed, ambiguous, mismatched, or historical evidence cannot assert current Production exposure. See [deployment surfaces](deployment-surfaces.md).
+
 ## Authorization and non-goals
 
 The route authenticates the caller, verifies membership in the requested workspace, resolves the canonical repository-verification entitlement, and disables shared caching. Reads use workspace-scoped queries and the existing RLS policies. This is a backend read model only: it adds no onboarding or dashboard UI, no provider integration, and no lifecycle mutation.

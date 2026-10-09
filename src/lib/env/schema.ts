@@ -69,6 +69,17 @@ export const environmentSchema = z
     SENTRY_CLIENT_ID: optionalSecret,
     SENTRY_CLIENT_SECRET: optionalSecret,
     SENTRY_REDIRECT_URI: optionalUrl,
+    VERCEL_INTEGRATION_SLUG: z.preprocess(
+      emptyToUndefined,
+      z
+        .string()
+        .trim()
+        .regex(/^[a-z0-9-]{1,32}$/)
+        .optional(),
+    ),
+    VERCEL_CLIENT_ID: optionalSecret,
+    VERCEL_CLIENT_SECRET: optionalSecret,
+    VERCEL_REDIRECT_URI: optionalUrl,
     GOOGLE_SEARCH_CONSOLE_CLIENT_ID: optionalSecret,
     GOOGLE_SEARCH_CONSOLE_CLIENT_SECRET: optionalSecret,
     GOOGLE_SEARCH_CONSOLE_REDIRECT_URI: optionalUrl,
@@ -143,7 +154,8 @@ export const environmentSchema = z
     if (
       (environment.SLACK_CLIENT_ID ||
         environment.LINEAR_CLIENT_ID ||
-        environment.SENTRY_CLIENT_ID) &&
+        environment.SENTRY_CLIENT_ID ||
+        environment.VERCEL_CLIENT_ID) &&
       !encryptionConfigured
     ) {
       context.addIssue({
@@ -225,6 +237,7 @@ export function isIntegrationConfigured(
     | "slackApp"
     | "linearApp"
     | "sentryApp"
+    | "vercelApp"
     | "searchConsole"
     | "connectorEncryption"
     | "cliDiscovery"
@@ -273,6 +286,13 @@ export function isIntegrationConfigured(
       environment.SENTRY_CLIENT_ID &&
       environment.SENTRY_CLIENT_SECRET &&
       environment.SENTRY_REDIRECT_URI,
+    );
+  if (name === "vercelApp")
+    return Boolean(
+      environment.VERCEL_INTEGRATION_SLUG &&
+      environment.VERCEL_CLIENT_ID &&
+      environment.VERCEL_CLIENT_SECRET &&
+      environment.VERCEL_REDIRECT_URI,
     );
   if (name === "searchConsole")
     return Boolean(
