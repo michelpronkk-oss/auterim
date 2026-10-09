@@ -36,6 +36,28 @@ describe("CLI command contract", () => {
     expect(await main(["connect", "--dry-run", "--server", "https://auterim.com"])).toBe(2);
   });
 
+  it("starts the connect command for the arguments npm passes to `npx auterim connect`", async () => {
+    const writes: string[] = [];
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write);
+    vi.spyOn(process.stderr, "write").mockImplementation(((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write);
+
+    // npm/npx invokes the package's `auterim` bin and passes the command as argv[2].
+    // Non-interactive mode is a fail-closed guard: a fixed parser reaches the connect
+    // workflow but does not create a remote connection session.
+    expect(await main(["connect"], { interactive: false, ci: false })).toBe(1);
+    expect(writes.join("")).toContain("Connected mode needs an interactive terminal");
+    expect(writes.join("")).not.toContain("Usage: auterim connect");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("keeps dry-run offline and rejects untrusted origins before making requests", async () => {
     const fetcher = vi.fn();
     vi.stubGlobal("fetch", fetcher);
