@@ -389,6 +389,15 @@ const deploymentSurfacesMigration = await readFile(
   ),
   "utf8",
 );
+const deploymentGrantHardeningMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261123000000_m157_deployment_client_grant_hardening.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase(
   applyCompanySurfaceMigration = true,
@@ -459,7 +468,12 @@ async function makeDatabase(
   await db.exec(onboardingFunnelEventsMigration);
   await db.exec(cliProductDiscoveryMigration);
   await db.exec(cliDraftProductOnboardingMigration);
-  if (applyProductRepositoryProtectionMigration) await db.exec(deploymentSurfacesMigration);
+  if (applyProductRepositoryProtectionMigration) {
+    // Model the broad inherited grants in Supabase's default public-schema setup.
+    await db.exec("alter default privileges in schema public grant all on tables to authenticated");
+    await db.exec(deploymentSurfacesMigration);
+    await db.exec(deploymentGrantHardeningMigration);
+  }
   return db;
 }
 
@@ -4740,10 +4754,18 @@ describe("M15.7 deployment migration", () => {
       relrowsecurity: boolean;
       anon_select: boolean;
       authenticated_select: boolean;
+      authenticated_insert: boolean;
+      authenticated_update: boolean;
+      authenticated_delete: boolean;
+      authenticated_truncate: boolean;
     }>(`
       select c.relname,c.relrowsecurity,
         has_table_privilege('anon',format('public.%I',c.relname),'select') as anon_select,
-        has_table_privilege('authenticated',format('public.%I',c.relname),'select') as authenticated_select
+        has_table_privilege('authenticated',format('public.%I',c.relname),'select') as authenticated_select,
+        has_table_privilege('authenticated',format('public.%I',c.relname),'insert') as authenticated_insert,
+        has_table_privilege('authenticated',format('public.%I',c.relname),'update') as authenticated_update,
+        has_table_privilege('authenticated',format('public.%I',c.relname),'delete') as authenticated_delete,
+        has_table_privilege('authenticated',format('public.%I',c.relname),'truncate') as authenticated_truncate
       from pg_class c join pg_namespace n on n.oid=c.relnamespace
       where n.nspname='public' and c.relname in (
         'deployment_surfaces','workspace_product_deployment_surfaces',
@@ -4753,6 +4775,15 @@ describe("M15.7 deployment migration", () => {
     expect(tables.rows).toHaveLength(5);
     expect(tables.rows.every((row) => row.relrowsecurity)).toBe(true);
     expect(tables.rows.every((row) => !row.anon_select && row.authenticated_select)).toBe(true);
+    expect(
+      tables.rows.every(
+        (row) =>
+          !row.authenticated_insert &&
+          !row.authenticated_update &&
+          !row.authenticated_delete &&
+          !row.authenticated_truncate,
+      ),
+    ).toBe(true);
     const catalog = await db.query<{ provider: string; capability: string }>(`
       select p.provider,c.capability from public.connector_providers p
       join public.connector_provider_capabilities c using(provider) where p.provider='vercel'
