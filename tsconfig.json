@@ -29,7 +29,8 @@
     "**/*.tsx",
     ".next/types/**/*.ts",
     "**/*.mts",
-    "trigger.config.ts"
+    "trigger.config.ts",
+    ".next/dev/types/**/*.ts"
   ],
   "exclude": ["node_modules", "packages/cli/fixtures"]
 }

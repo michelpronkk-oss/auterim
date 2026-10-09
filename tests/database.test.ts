@@ -383,6 +383,12 @@ const cliDraftProductOnboardingMigration = await readFile(
   ),
   "utf8",
 );
+const deploymentSurfacesMigration = await readFile(
+  fileURLToPath(
+    new URL("../supabase/migrations/20261122000000_m157_deployment_surfaces.sql", import.meta.url),
+  ),
+  "utf8",
+);
 
 async function makeDatabase(
   applyCompanySurfaceMigration = true,
@@ -453,6 +459,7 @@ async function makeDatabase(
   await db.exec(onboardingFunnelEventsMigration);
   await db.exec(cliProductDiscoveryMigration);
   await db.exec(cliDraftProductOnboardingMigration);
+  if (applyProductRepositoryProtectionMigration) await db.exec(deploymentSurfacesMigration);
   return db;
 }
 
@@ -4722,5 +4729,87 @@ describe("Auterim migration and monitoring transaction", () => {
       onboardingDb.query("select * from public.product_onboarding_progress"),
     ).rejects.toThrow();
     await onboardingDb.close();
+  });
+});
+
+describe("M15.7 deployment migration", () => {
+  it("adds tenant-scoped deployment tables with RLS and no anonymous access", async () => {
+    const db = await makeDatabase();
+    const tables = await db.query<{
+      relname: string;
+      relrowsecurity: boolean;
+      anon_select: boolean;
+      authenticated_select: boolean;
+    }>(`
+      select c.relname,c.relrowsecurity,
+        has_table_privilege('anon',format('public.%I',c.relname),'select') as anon_select,
+        has_table_privilege('authenticated',format('public.%I',c.relname),'select') as authenticated_select
+      from pg_class c join pg_namespace n on n.oid=c.relnamespace
+      where n.nspname='public' and c.relname in (
+        'deployment_surfaces','workspace_product_deployment_surfaces',
+        'deployment_observations','deployment_sync_attempts','product_deployment_evidence'
+      ) order by c.relname
+    `);
+    expect(tables.rows).toHaveLength(5);
+    expect(tables.rows.every((row) => row.relrowsecurity)).toBe(true);
+    expect(tables.rows.every((row) => !row.anon_select && row.authenticated_select)).toBe(true);
+    const catalog = await db.query<{ provider: string; capability: string }>(`
+      select p.provider,c.capability from public.connector_providers p
+      join public.connector_provider_capabilities c using(provider) where p.provider='vercel'
+    `);
+    expect(catalog.rows).toEqual([
+      { provider: "vercel", capability: "CAN_READ_DEPLOYMENT_CONTEXT" },
+    ]);
+    const constraints = await db.query<{ table_name: string; constraint_name: string }>(`
+      select tc.table_name,tc.constraint_name from information_schema.table_constraints tc
+      where tc.table_schema='public' and tc.constraint_type='FOREIGN KEY'
+        and tc.table_name in ('deployment_surfaces','workspace_product_deployment_surfaces','deployment_observations','product_deployment_evidence')
+    `);
+    expect(constraints.rows.length).toBeGreaterThanOrEqual(10);
+    const userA = "a1000000-0000-4000-8000-000000000001";
+    const userB = "a1000000-0000-4000-8000-000000000002";
+    const workspaceA = "a2000000-0000-4000-8000-000000000001";
+    const workspaceB = "a2000000-0000-4000-8000-000000000002";
+    const installationA = "a3000000-0000-4000-8000-000000000001";
+    const installationB = "a3000000-0000-4000-8000-000000000002";
+    await db.query(
+      "insert into auth.users(id,email) values($1,'a@example.test'),($2,'b@example.test')",
+      [userA, userB],
+    );
+    await db.query(
+      "insert into public.workspaces(id,name,created_by) values($1,'A',$2),($3,'B',$4)",
+      [workspaceA, userA, workspaceB, userB],
+    );
+    await db.query(
+      "insert into public.workspace_members(workspace_id,user_id,role) values($1,$2,'owner'),($3,$4,'owner')",
+      [workspaceA, userA, workspaceB, userB],
+    );
+    await db.exec("set role service_role");
+    await db.query(
+      `insert into public.connector_installations(id,workspace_id,provider,external_account_id,account_name,connected_by)
+      values($1,$2,'vercel','icfg_a','Vercel A',$3),($4,$5,'vercel','icfg_b','Vercel B',$6)`,
+      [installationA, workspaceA, userA, installationB, workspaceB, userB],
+    );
+    await db.query(
+      `insert into public.deployment_surfaces(workspace_id,installation_id,external_project_id,project_name,environment_scope)
+      values($1,$2,'prj_a','Project A','all'),($3,$4,'prj_b','Project B','all')`,
+      [workspaceA, installationA, workspaceB, installationB],
+    );
+    await db.exec("reset role");
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [userA]);
+    await db.exec("set role authenticated");
+    const own = await db.query<{ project_name: string }>(
+      "select project_name from public.deployment_surfaces where workspace_id=$1",
+      [workspaceA],
+    );
+    const crossTenant = await db.query(
+      "select * from public.deployment_surfaces where workspace_id=$1",
+      [workspaceB],
+    );
+    expect(own.rows.map((row) => row.project_name)).toEqual(["Project A"]);
+    expect(crossTenant.rows).toHaveLength(0);
+    await db.exec("reset role; set role anon");
+    await expect(db.query("select * from public.deployment_surfaces")).rejects.toThrow();
+    await db.close();
   });
 });

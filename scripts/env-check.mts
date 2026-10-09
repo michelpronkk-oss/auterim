@@ -46,6 +46,7 @@ try {
   const slackConfigured = isIntegrationConfigured("slackApp", environment);
   const linearConfigured = isIntegrationConfigured("linearApp", environment);
   const sentryConfigured = isIntegrationConfigured("sentryApp", environment);
+  const vercelConfigured = isIntegrationConfigured("vercelApp", environment);
   const searchConsoleConfigured = isIntegrationConfigured("searchConsole", environment);
   const connectorEncryptionConfigured = isIntegrationConfigured("connectorEncryption", environment);
   const dodoConfigured = isIntegrationConfigured("dodo", environment);
@@ -100,6 +101,9 @@ try {
   );
   console.log(
     `Sentry connector: ${sentryConfigured && connectorEncryptionConfigured ? "configured" : "not configured"}`,
+  );
+  console.log(
+    `Vercel deployment connector: ${vercelConfigured && connectorEncryptionConfigured ? "configured" : "not configured"}`,
   );
   console.log(
     `Google Search Console growth integration: ${searchConsoleConfigured ? "configured" : "not configured"}`,

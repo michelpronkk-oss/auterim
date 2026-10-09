@@ -35,6 +35,26 @@ function completeRedirect(provider: ConnectorProvider, status: string, reason?: 
   return Response.redirect(target, 303);
 }
 
+function completeSuccessRedirect(request: Request, provider: ConnectorProvider, reason?: string) {
+  if (provider === "vercel") {
+    const next = new URL(request.url).searchParams.get("next");
+    if (next) {
+      try {
+        const target = new URL(next);
+        if (
+          target.protocol === "https:" &&
+          target.hostname === "vercel.com" &&
+          target.pathname.startsWith("/integrations/")
+        )
+          return Response.redirect(target, 303);
+      } catch {
+        // Invalid provider return URLs fall back to Auterim's own status page.
+      }
+    }
+  }
+  return completeRedirect(provider, "connected", reason);
+}
+
 function clearCookie(response: Response, provider: ConnectorProvider) {
   const environment = getEnvironment();
   const secure = new URL(environment.NEXT_PUBLIC_APP_URL).protocol === "https:" ? "; Secure" : "";
@@ -47,7 +67,12 @@ function clearCookie(response: Response, provider: ConnectorProvider) {
 
 export async function GET(request: Request, context: { params: Promise<{ provider: string }> }) {
   const providerValue = (await context.params).provider;
-  if (!(providerValue === "slack" || providerValue === "linear" || providerValue === "sentry"))
+  if (!(
+    providerValue === "slack" ||
+    providerValue === "linear" ||
+    providerValue === "sentry" ||
+    providerValue === "vercel"
+  ))
     return Response.json({ error: "unsupported_connector" }, { status: 404 });
   const provider = providerValue as Exclude<ConnectorProvider, "github">;
   const url = new URL(request.url);
@@ -89,7 +114,13 @@ export async function GET(request: Request, context: { params: Promise<{ provide
   }
   const environment = getEnvironment();
   const configured =
-    provider === "slack" ? "slackApp" : provider === "linear" ? "linearApp" : "sentryApp";
+    provider === "slack"
+      ? "slackApp"
+      : provider === "linear"
+        ? "linearApp"
+        : provider === "sentry"
+          ? "sentryApp"
+          : "vercelApp";
   if (
     !isIntegrationConfigured(configured, environment) ||
     !isIntegrationConfigured("connectorEncryption", environment)
@@ -133,7 +164,10 @@ export async function GET(request: Request, context: { params: Promise<{ provide
   }
   let grant;
   try {
-    grant = await adapter.exchangeCode(code, verifier);
+    grant = await adapter.exchangeCode(code, verifier, {
+      configurationId: url.searchParams.get("configurationId"),
+      teamId: url.searchParams.get("teamId"),
+    });
   } catch (error) {
     const reason =
       error instanceof ConnectorError && error.category === "PERMISSION_MISSING"
@@ -149,6 +183,7 @@ export async function GET(request: Request, context: { params: Promise<{ provide
       refreshToken: grant.refreshToken,
       expiresAt: grant.expiresAt,
       scopes: grant.scopes,
+      providerMetadata: grant.providerMetadata ?? grant.safeMetadata,
     }),
     `auterim-connector:v1:${stateRow.workspace_id}:${provider}:${grant.externalAccountId}`,
   );
@@ -193,7 +228,7 @@ export async function GET(request: Request, context: { params: Promise<{ provide
         "permission_missing",
         "permission_lost",
       );
-    return clearCookie(completeRedirect(provider, "connected", "permission_missing"), provider);
+    return clearCookie(completeSuccessRedirect(request, provider, "permission_missing"), provider);
   }
   const installation = {
     id: installationId as string,
@@ -214,13 +249,14 @@ export async function GET(request: Request, context: { params: Promise<{ provide
       refreshToken: grant.refreshToken,
       expiresAt: grant.expiresAt,
       scopes: grant.scopes,
+      providerMetadata: grant.providerMetadata,
     });
     await service
       .from("connector_installations")
       .update({ last_checked_at: new Date().toISOString() })
       .eq("id", installationId)
       .eq("workspace_id", stateRow.workspace_id);
-    return clearCookie(completeRedirect(provider, "connected", `resources_${count}`), provider);
+    return clearCookie(completeSuccessRedirect(request, provider, `resources_${count}`), provider);
   } catch (error) {
     const health =
       error instanceof ConnectorError && error.category === "PERMISSION_MISSING"
@@ -238,7 +274,7 @@ export async function GET(request: Request, context: { params: Promise<{ provide
       .single();
     if (installed.data) await setConnectorHealth(service, installed.data, "degraded", health);
     return clearCookie(
-      completeRedirect(provider, "connected", "resource_discovery_unavailable"),
+      completeSuccessRedirect(request, provider, "resource_discovery_unavailable"),
       provider,
     );
   }

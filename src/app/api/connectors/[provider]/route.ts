@@ -11,7 +11,12 @@ import type { ConnectorProvider } from "@/lib/connectors/model";
 
 export async function POST(request: Request, context: { params: Promise<{ provider: string }> }) {
   const providerValue = (await context.params).provider;
-  if (!(providerValue === "slack" || providerValue === "linear" || providerValue === "sentry"))
+  if (!(
+    providerValue === "slack" ||
+    providerValue === "linear" ||
+    providerValue === "sentry" ||
+    providerValue === "vercel"
+  ))
     return Response.json({ error: "unsupported_connector" }, { status: 404 });
   const provider = providerValue;
   const auth = await authenticateOnboardingRequest(request);

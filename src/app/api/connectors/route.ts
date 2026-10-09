@@ -14,9 +14,14 @@ import { connectorStateHash, newOAuthSecrets } from "@/lib/connectors/service";
 
 const inputSchema = z.object({
   workspaceId: z.string().uuid(),
-  provider: z.enum(["slack", "linear", "sentry"]),
+  provider: z.enum(["slack", "linear", "sentry", "vercel"]),
 });
-const configurationName = { slack: "slackApp", linear: "linearApp", sentry: "sentryApp" } as const;
+const configurationName = {
+  slack: "slackApp",
+  linear: "linearApp",
+  sentry: "sentryApp",
+  vercel: "vercelApp",
+} as const;
 
 export async function GET(request: Request) {
   const auth = await authenticateOnboardingRequest(request);
@@ -110,16 +115,7 @@ export async function GET(request: Request) {
         health: installation?.health ?? "unknown",
         capabilities: capabilities.map((capability) => ({
           name: capability,
-          enabled: connectorCapabilityEntitled(
-            entitlements,
-            capability === "CAN_VERIFY"
-              ? "CAN_VERIFY"
-              : capability === "CAN_RECEIVE_ALERTS"
-                ? "CAN_RECEIVE_ALERTS"
-                : capability === "CAN_CREATE_ACTIONS"
-                  ? "CAN_CREATE_ACTIONS"
-                  : "CAN_READ_RUNTIME_CONTEXT",
-          ),
+          enabled: connectorCapabilityEntitled(entitlements, capability),
         })),
         scopes: provider === "github" ? [] : (installation?.scopes ?? []),
         account: installation?.account ?? null,
@@ -179,7 +175,7 @@ export async function POST(request: Request) {
   const stateHash = connectorStateHash(secrets.state);
   const browserBindingHash = connectorStateHash(secrets.browserBinding);
   const { challenge, verifier } =
-    input.provider === "slack"
+    input.provider === "slack" || input.provider === "vercel"
       ? { challenge: undefined, verifier: undefined }
       : await import("@/lib/connectors/providers").then(({ generatePkce }) => generatePkce());
   const verifierCipher = verifier

@@ -15,7 +15,12 @@ async function providerParam(context: {
   params: Promise<{ provider: string }>;
 }): Promise<Exclude<ConnectorProvider, "github"> | null> {
   const provider = (await context.params).provider;
-  return provider === "slack" || provider === "linear" || provider === "sentry" ? provider : null;
+  return provider === "slack" ||
+    provider === "linear" ||
+    provider === "sentry" ||
+    provider === "vercel"
+    ? provider
+    : null;
 }
 
 export async function GET(request: Request, context: { params: Promise<{ provider: string }> }) {
@@ -49,7 +54,7 @@ export async function GET(request: Request, context: { params: Promise<{ provide
     .eq("workspace_id", workspaceId.data)
     .eq("installation_id", installationId.data)
     .order("display_name")
-    .limit(provider === "sentry" ? 100 : 200);
+    .limit(provider === "sentry" ? 100 : provider === "vercel" ? 500 : 200);
   if (error) return Response.json({ error: "connector_resources_unavailable" }, { status: 503 });
   return Response.json({ resources: data ?? [] });
 }
@@ -102,7 +107,7 @@ export async function POST(request: Request, context: { params: Promise<{ provid
       .eq("workspace_id", input.data.workspaceId)
       .eq("installation_id", installation.id)
       .order("display_name")
-      .limit(provider === "sentry" ? 100 : 200);
+      .limit(provider === "sentry" ? 100 : provider === "vercel" ? 500 : 200);
     if (error) throw new Error("connector_resource_read_failed");
     return Response.json({ resourceCount, resources: resources ?? [] });
   } catch (error) {
@@ -164,7 +169,7 @@ export async function PUT(request: Request, context: { params: Promise<{ provide
       resourceIds: z
         .array(z.string().uuid())
         .min(1)
-        .max(provider === "sentry" ? 5 : 1),
+        .max(provider === "sentry" ? 5 : provider === "vercel" ? 100 : 1),
     })
     .safeParse(await request.json().catch(() => null));
   if (!input.success)
