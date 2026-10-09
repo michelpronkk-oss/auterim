@@ -1,6 +1,6 @@
 {
   "name": "auterim",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Analyze local software dependencies and connect derived evidence to Auterim.",
   "repository": {
     "type": "git",

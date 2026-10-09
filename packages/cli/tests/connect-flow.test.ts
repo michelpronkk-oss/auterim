@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +6,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { main } from "../src/cli.js";
 
 const fixture = fileURLToPath(new URL("../fixtures/projects/basic", import.meta.url));
+const packageMetadata = JSON.parse(
+  await readFile(new URL("../package.json", import.meta.url), "utf8"),
+) as { version: string };
 const scratch: string[] = [];
 
 afterEach(async () => {
@@ -32,7 +35,7 @@ describe("CLI command contract", () => {
     expect(await main(["--version"])).toBe(0);
     expect(writes.join("")).toContain("Usage: auterim <command>");
     expect(writes.join("")).toContain("Usage: auterim connect");
-    expect(writes.join("")).toContain("0.1.0");
+    expect(writes.join("")).toContain(packageMetadata.version);
     expect(await main(["connect", "--dry-run", "--server", "https://auterim.com"])).toBe(2);
   });
 
