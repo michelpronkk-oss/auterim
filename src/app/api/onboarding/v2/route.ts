@@ -11,6 +11,11 @@ import {
   ONBOARDING_V2_STAGES,
 } from "@/lib/onboarding/v2";
 import { getProductProtectionGraph } from "@/lib/protection/product-graph";
+import {
+  ProductProtectionReadError,
+  productProtectionReadStage,
+  type ProductProtectionReadStage,
+} from "@/lib/protection/read-stage";
 import { dispatchOnboardingBaselines } from "@/lib/onboarding/dispatch-baselines";
 import { recordGrowthFirstPartyEvent } from "@/lib/growth-v2/feedback";
 
@@ -72,6 +77,7 @@ export async function GET(request: Request) {
   const role = await getWorkspaceRole(auth.client, workspaceId, auth.user.id).catch(() => null);
   if (!role) return Response.json({ error: "forbidden" }, { status: 403, headers: privateHeaders });
 
+  let readStage: ProductProtectionReadStage = "onboarding_status";
   try {
     const [productResult, progressResult, onboardingResult, dependenciesResult, entitlements] =
       await Promise.all([
@@ -92,14 +98,37 @@ export async function GET(request: Request) {
           p_workspace_id: workspaceId,
           p_product_id: productId,
         }),
-        resolveWorkspaceEntitlementsForMember(auth.client, workspaceId),
+        resolveWorkspaceEntitlementsForMember(auth.client, workspaceId).catch(() => {
+          throw new ProductProtectionReadError("entitlements");
+        }),
       ]);
-    if (
-      productResult.error ||
-      progressResult.error ||
-      onboardingResult.error ||
-      dependenciesResult.error
-    ) {
+    if (productResult.error) {
+      readStage = "product";
+      console.error("Product protection read failed.", { stage: readStage });
+      return Response.json(
+        { error: "onboarding_v2_unavailable" },
+        { status: 503, headers: privateHeaders },
+      );
+    }
+    if (progressResult.error) {
+      readStage = "onboarding_progress";
+      console.error("Product protection read failed.", { stage: readStage });
+      return Response.json(
+        { error: "onboarding_v2_unavailable" },
+        { status: 503, headers: privateHeaders },
+      );
+    }
+    if (onboardingResult.error) {
+      readStage = "onboarding_status";
+      console.error("Product protection read failed.", { stage: readStage });
+      return Response.json(
+        { error: "onboarding_v2_unavailable" },
+        { status: 503, headers: privateHeaders },
+      );
+    }
+    if (dependenciesResult.error) {
+      readStage = "dependencies";
+      console.error("Product protection read failed.", { stage: readStage });
       return Response.json(
         { error: "onboarding_v2_unavailable" },
         { status: 503, headers: privateHeaders },
@@ -135,6 +164,7 @@ export async function GET(request: Request) {
         contextNote: context.contextNote ?? "",
       };
     });
+    readStage = "repository_graph";
     const [graph, repositories] = await Promise.all([
       getProductProtectionGraph(auth.client, {
         workspaceId,
@@ -148,11 +178,14 @@ export async function GET(request: Request) {
         .eq("protected_product_id", productId)
         .limit(200),
     ]);
-    if (repositories.error)
+    if (repositories.error) {
+      readStage = "repository_mappings";
+      console.error("Product protection read failed.", { stage: readStage });
       return Response.json(
         { error: "onboarding_v2_unavailable" },
         { status: 503, headers: privateHeaders },
       );
+    }
 
     const progress = progressResult.data;
     const unresolved = candidates.some(
@@ -225,7 +258,11 @@ export async function GET(request: Request) {
       },
       { headers: privateHeaders },
     );
-  } catch {
+  } catch (error) {
+    const stage = productProtectionReadStage(error);
+    console.error("Product protection read failed.", {
+      stage: stage === "unknown" ? readStage : stage,
+    });
     return Response.json(
       { error: "onboarding_v2_unavailable" },
       { status: 503, headers: privateHeaders },

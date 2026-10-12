@@ -17,6 +17,7 @@ vi.mock("@/lib/protection/product-graph", () => ({
 }));
 
 import { GET } from "@/app/api/products/[id]/protection-graph/route";
+import { ProductProtectionReadError } from "@/lib/protection/read-stage";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const productId = "22222222-2222-4222-8222-222222222222";
@@ -59,6 +60,7 @@ describe("product protection graph API", () => {
   });
 
   it("returns only the server-built graph and prevents shared caching", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
     const response = await GET(
       new Request(
         `https://auterim.com/api/products/${productId}/protection-graph?workspaceId=${workspaceId}`,
@@ -79,5 +81,30 @@ describe("product protection graph API", () => {
         verificationCapabilityAvailable: true,
       },
     );
+    expect(log).not.toHaveBeenCalled();
+    log.mockRestore();
   });
+
+  it.each(["dependencies", "baseline_evidence", "deployment_evidence"] as const)(
+    "returns a bounded error and logs only the fixed %s stage",
+    async (stage) => {
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      mocks.graph.mockRejectedValue(new ProductProtectionReadError(stage));
+
+      const response = await GET(
+        new Request(
+          `https://auterim.com/api/products/${productId}/protection-graph?workspaceId=${workspaceId}`,
+        ),
+        { params: Promise.resolve({ id: productId }) },
+      );
+
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: "product_protection_graph_unavailable" });
+      expect(log).toHaveBeenCalledExactlyOnceWith("Product protection read failed.", { stage });
+      expect(JSON.stringify(log.mock.calls)).not.toMatch(
+        /database|secret|token|workspace|22222222/i,
+      );
+      log.mockRestore();
+    },
+  );
 });

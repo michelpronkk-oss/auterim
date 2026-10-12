@@ -8,6 +8,7 @@ import {
   monitoringEvidenceState,
 } from "@/lib/protection/read-model-helpers";
 import { getProductRepositoryProtection } from "@/lib/repositories/product-protection-read-model";
+import { ProductProtectionReadError } from "@/lib/protection/read-stage";
 
 const MAX_DEPENDENCIES = 50;
 const MAX_SOURCES = 500;
@@ -194,7 +195,7 @@ export async function getProductProtectionGraph(
     .eq("id", productId)
     .eq("workspace_id", workspaceId)
     .maybeSingle();
-  if (productError) throw new Error("product_protection_graph_unavailable");
+  if (productError) throw new ProductProtectionReadError("product");
   if (!product) return null;
 
   const [dependencyResult, repositoryGraph, cliRunResult] = await Promise.all([
@@ -219,8 +220,8 @@ export async function getProductProtectionGraph(
       .order("id", { ascending: false })
       .limit(2),
   ]);
-  if (dependencyResult.error || cliRunResult.error)
-    throw new Error("product_protection_graph_unavailable");
+  if (dependencyResult.error) throw new ProductProtectionReadError("dependencies");
+  if (cliRunResult.error) throw new ProductProtectionReadError("cli_runs");
   if (!repositoryGraph) return null;
 
   const rawDependencies = (dependencyResult.data ?? []) as DependencyRow[];
@@ -249,7 +250,7 @@ export async function getProductProtectionGraph(
     readCliObservations(previousCliRun?.id ?? null),
   ]);
   if (latestCliObservationResult.error || previousCliObservationResult.error)
-    throw new Error("product_protection_graph_unavailable");
+    throw new ProductProtectionReadError("cli_observations");
   const cliObservations = (latestCliObservationResult.data ?? []) as CliObservationRow[];
   const previousCliObservations = (previousCliObservationResult.data ?? []) as CliObservationRow[];
   const latestCliObservationsTruncated =
@@ -278,7 +279,7 @@ export async function getProductProtectionGraph(
         p_provider_ids: boundedCliProviderIds,
       })
     : { data: [], error: null };
-  if (cliCoverageResult.error) throw new Error("product_protection_graph_unavailable");
+  if (cliCoverageResult.error) throw new ProductProtectionReadError("cli_coverage");
   const cliCoverageRows = (cliCoverageResult.data ?? []) as {
     provider_id: string;
     enabled_source_count: number | string;
@@ -333,8 +334,9 @@ export async function getProductProtectionGraph(
           .limit(MAX_EVIDENCE_ROWS)
       : Promise.resolve({ data: [], error: null }),
   ]);
-  if (sourceResult.error || accessResult.error || impactResult.error)
-    throw new Error("product_protection_graph_unavailable");
+  if (sourceResult.error) throw new ProductProtectionReadError("source_catalog");
+  if (accessResult.error) throw new ProductProtectionReadError("repository_access");
+  if (impactResult.error) throw new ProductProtectionReadError("impact_assessments");
 
   const sourceRows = (sourceResult.data ?? []) as SourceRow[];
   const sourcesTruncated = sourceRows.length > MAX_SOURCES;
@@ -367,8 +369,9 @@ export async function getProductProtectionGraph(
           .in("repository_id", repositoryIds)
       : Promise.resolve({ data: [], error: null }),
   ]);
-  if (observationResult.error || classificationResult.error || mappingResult.error)
-    throw new Error("product_protection_graph_unavailable");
+  if (observationResult.error) throw new ProductProtectionReadError("source_observations");
+  if (classificationResult.error) throw new ProductProtectionReadError("classifications");
+  if (mappingResult.error) throw new ProductProtectionReadError("repository_mappings");
 
   const observations = (observationResult.data ?? []) as ObservationRow[];
   const observationsBySource = new Map(observations.map((item) => [item.source_id, item]));
@@ -399,7 +402,7 @@ export async function getProductProtectionGraph(
         .order("id", { ascending: false })
         .limit(MAX_EVIDENCE_ROWS)
     : { data: [], error: null };
-  if (runError) throw new Error("product_protection_graph_unavailable");
+  if (runError) throw new ProductProtectionReadError("preflight_runs");
   const allRuns = (runRows ?? []) as RunRow[];
   const latestRuns = latestPreflightRuns(allRuns);
   const verifiedRuns = allRuns.filter(
@@ -424,7 +427,7 @@ export async function getProductProtectionGraph(
           .order("observed_at", { ascending: false })
           .limit(MAX_EVIDENCE_ROWS)
       : { data: [], error: null };
-  if (findingError) throw new Error("product_protection_graph_unavailable");
+  if (findingError) throw new ProductProtectionReadError("preflight_findings");
   const findings = (findingRows ?? []) as FindingRow[];
   const runById = new Map(allRuns.map((run) => [run.id, run]));
   const classificationById = new Map(classifications.map((row) => [row.id, row]));
@@ -642,7 +645,7 @@ export async function getProductProtectionGraph(
     .eq("protected_product_id", productId)
     .order("created_at", { ascending: true })
     .limit(100);
-  if (deploymentMappingError) throw new Error("product_protection_graph_unavailable");
+  if (deploymentMappingError) throw new ProductProtectionReadError("deployment_surfaces");
   const deploymentSurfaceIds = [
     ...new Set((deploymentMappings ?? []).map((row) => row.deployment_surface_id as string)),
   ];
@@ -656,7 +659,7 @@ export async function getProductProtectionGraph(
         .in("id", deploymentSurfaceIds)
         .limit(100)
     : { data: [], error: null };
-  if (deploymentSurfaceError) throw new Error("product_protection_graph_unavailable");
+  if (deploymentSurfaceError) throw new ProductProtectionReadError("deployment_surfaces");
   const deploymentSurfaceById = new Map(
     (deploymentSurfaces ?? []).map((surface) => [surface.id as string, surface]),
   );
@@ -672,7 +675,7 @@ export async function getProductProtectionGraph(
           .in("id", deploymentInstallationIds)
           .limit(100)
       : { data: [], error: null };
-  if (deploymentInstallationError) throw new Error("product_protection_graph_unavailable");
+  if (deploymentInstallationError) throw new ProductProtectionReadError("deployment_surfaces");
   const deploymentInstallationById = new Map(
     (deploymentInstallations ?? []).map((row) => [row.id as string, row]),
   );
@@ -687,7 +690,7 @@ export async function getProductProtectionGraph(
         .order("observed_at", { ascending: false })
         .limit(200)
     : { data: [], error: null };
-  if (deploymentError) throw new Error("product_protection_graph_unavailable");
+  if (deploymentError) throw new ProductProtectionReadError("deployment_observations");
   const deploymentObservationIds = (deploymentRows ?? []).map((row) => row.id as string);
   const { data: deploymentEvidenceRows, error: deploymentEvidenceError } =
     deploymentObservationIds.length
@@ -701,7 +704,7 @@ export async function getProductProtectionGraph(
           .in("deployment_observation_id", deploymentObservationIds)
           .limit(200)
       : { data: [], error: null };
-  if (deploymentEvidenceError) throw new Error("product_protection_graph_unavailable");
+  if (deploymentEvidenceError) throw new ProductProtectionReadError("deployment_evidence");
   const evidenceByObservation = new Map(
     (deploymentEvidenceRows ?? []).map((evidence) => [
       evidence.deployment_observation_id as string,
