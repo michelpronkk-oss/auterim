@@ -18,6 +18,13 @@ export type OnboardingRecommendation = {
   action: "confirm_dependencies" | "connect_github" | "wait_for_baseline" | "review_product";
 };
 
+export function canManageProtectedProductDependencies(input: {
+  productStatus: string;
+  canManageProducts: boolean;
+}): boolean {
+  return input.productStatus === "protected" && input.canManageProducts;
+}
+
 export function deriveProductBaselineStatus(input: {
   protectedProduct: boolean;
   sources: number;

@@ -1,7 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ONBOARDING_V2_STAGES, type OnboardingV2Stage } from "@/lib/onboarding/v2";
+import {
+  canManageProtectedProductDependencies,
+  ONBOARDING_V2_STAGES,
+  type OnboardingV2Stage,
+} from "@/lib/onboarding/v2";
 
 type Product = {
   id: string;
@@ -447,6 +451,13 @@ export function OnboardingV2Panel({
     [];
   const nextStage = ONBOARDING_V2_STAGES[Math.min(stepIndex + 1, ONBOARDING_V2_STAGES.length - 1)]!;
   const discoverySettled = !model?.discovery.status || model.discovery.status !== "running";
+  const canManageProtectedDependencies = Boolean(
+    model &&
+    canManageProtectedProductDependencies({
+      productStatus: model.product.status,
+      canManageProducts,
+    }),
+  );
 
   return (
     <section className="onboarding-card onboarding-v2" aria-label="Product onboarding">
@@ -714,6 +725,45 @@ export function OnboardingV2Panel({
                   </li>
                 ))}
               </ul>
+              {canManageProtectedDependencies ? (
+                <section aria-label="Manage Product dependencies">
+                  <h3>Add a monitored dependency</h3>
+                  <p>
+                    Choose a provider from the catalog to add it to this Product. Connector
+                    connections and selected provider resources are managed separately.
+                  </p>
+                  <label>
+                    Search the dependency catalog
+                    <input
+                      value={catalogQuery}
+                      onChange={(event) => setCatalogQuery(event.target.value)}
+                      maxLength={80}
+                      placeholder="Vercel, OpenAI, Stripe…"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    disabled={busy || !catalogQuery.trim()}
+                    onClick={() => void searchCatalog()}
+                  >
+                    Search providers
+                  </button>
+                  {catalogResults.map((dependency) => (
+                    <div key={dependency.id}>
+                      <span>
+                        {dependency.name} · {dependency.category}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void addCatalogDependency(dependency.slug)}
+                      >
+                        Add to this Product
+                      </button>
+                    </div>
+                  ))}
+                </section>
+              ) : null}
               <h3>Optional dependency context</h3>
               {model.dependencies.map((dependency) => {
                 const context = contexts[dependency.workspaceDependencyId];
