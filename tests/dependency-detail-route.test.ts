@@ -85,6 +85,14 @@ describe("protection dependency detail route", () => {
         sources: [{ latestBaselineAt: "2026-10-04T01:00:00.000Z" }],
       },
     });
+    const dependencyQueryIndex = mocks.from.mock.calls.findIndex(
+      ([table]) => table === "workspace_dependencies",
+    );
+    const dependencySelect =
+      mocks.from.mock.results[dependencyQueryIndex]?.value.select.mock.calls[0]?.[0];
+    expect(dependencySelect).toBe(
+      "id,protected_product_id,dependency_id,origin,monitoring_enabled,created_at,dependency_catalog(name,slug,category),dependency_context(criticality,production_critical,used_for,context_note)",
+    );
     expect(mocks.rpc).toHaveBeenCalledWith("get_dependency_source_baselines", {
       p_workspace_id: workspaceId,
       p_source_ids: [sourceId],
