@@ -2,6 +2,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { latestPreflightRuns } from "@/lib/protection/read-model-helpers";
 import { hasUniqueProductAttribution } from "@/lib/repositories/product-repository-protection";
+import { ProductProtectionReadError } from "@/lib/protection/read-stage";
 
 const REPOSITORY_PAGE_LIMIT = 200;
 
@@ -16,7 +17,7 @@ export async function getProductRepositoryProtection(
     .eq("id", productId)
     .eq("workspace_id", workspaceId)
     .maybeSingle();
-  if (productError) throw new Error("product_repository_graph_unavailable");
+  if (productError) throw new ProductProtectionReadError("product");
   if (!product) return null;
 
   const [repositoryResult, dependencyResult] = await Promise.all([
@@ -35,8 +36,8 @@ export async function getProductRepositoryProtection(
       .eq("workspace_id", workspaceId)
       .eq("protected_product_id", productId),
   ]);
-  if (repositoryResult.error || dependencyResult.error)
-    throw new Error("product_repository_graph_unavailable");
+  if (repositoryResult.error) throw new ProductProtectionReadError("repository_access");
+  if (dependencyResult.error) throw new ProductProtectionReadError("dependencies");
 
   const repositories = repositoryResult.data ?? [];
   const truncated = repositories.length > REPOSITORY_PAGE_LIMIT;
@@ -66,8 +67,9 @@ export async function getProductRepositoryProtection(
           .in("repository_id", repositoryIds)
       : Promise.resolve({ data: [], error: null }),
   ]);
-  if (mappingResult.error || connectionsResult.error || accessResult.error)
-    throw new Error("product_repository_graph_unavailable");
+  if (mappingResult.error) throw new ProductProtectionReadError("repository_mappings");
+  if (connectionsResult.error || accessResult.error)
+    throw new ProductProtectionReadError("repository_access");
 
   const attributedDependencyIds = [
     ...new Set((accessResult.data ?? []).map((access) => access.workspace_dependency_id)),
@@ -80,7 +82,7 @@ export async function getProductRepositoryProtection(
           .eq("workspace_id", workspaceId)
           .in("id", attributedDependencyIds)
       : { data: [], error: null };
-  if (attributedDependenciesError) throw new Error("product_repository_graph_unavailable");
+  if (attributedDependenciesError) throw new ProductProtectionReadError("repository_access");
 
   const mappings = mappingResult.data ?? [];
   const mappingHistoryRepositoryIds = new Set(mappings.map((mapping) => mapping.repository_id));
@@ -135,7 +137,7 @@ export async function getProductRepositoryProtection(
         .eq("workspace_id", workspaceId)
         .in("workspace_dependency_id", mappedDependencyIds)
     : { data: [], error: null };
-  if (impactResult.error) throw new Error("product_repository_graph_unavailable");
+  if (impactResult.error) throw new ProductProtectionReadError("impact_assessments");
   const impactIds = (impactResult.data ?? []).map((impact) => impact.id);
   const runResult = impactIds.length
     ? await client
@@ -147,7 +149,7 @@ export async function getProductRepositoryProtection(
         .order("id", { ascending: false })
         .limit(500)
     : { data: [], error: null };
-  if (runResult.error) throw new Error("product_repository_graph_unavailable");
+  if (runResult.error) throw new ProductProtectionReadError("preflight_runs");
   const latestRuns = latestPreflightRuns(
     (runResult.data ?? []) as Array<{
       id: string;
@@ -185,7 +187,7 @@ export async function getProductRepositoryProtection(
           .order("observed_at", { ascending: false })
           .limit(500)
       : { data: [], error: null };
-  if (findingResult.error) throw new Error("product_repository_graph_unavailable");
+  if (findingResult.error) throw new ProductProtectionReadError("preflight_findings");
   const evidenceByRepository = new Map<
     string,
     Array<{ finding: (typeof findingResult.data)[number]; run: (typeof evidenceRuns)[number] }>
@@ -210,7 +212,7 @@ export async function getProductRepositoryProtection(
         .order("observed_at", { ascending: false })
         .limit(500)
     : { data: [], error: null };
-  if (baselineEvidenceResult.error) throw new Error("product_repository_graph_unavailable");
+  if (baselineEvidenceResult.error) throw new ProductProtectionReadError("baseline_evidence");
   const baselineRunIds = [
     ...new Set((baselineEvidenceResult.data ?? []).map((row) => row.preflight_run_id)),
   ];
@@ -225,7 +227,7 @@ export async function getProductRepositoryProtection(
         .in("id", baselineRunIds)
         .limit(500)
     : { data: [], error: null };
-  if (baselineRunsResult.error) throw new Error("product_repository_graph_unavailable");
+  if (baselineRunsResult.error) throw new ProductProtectionReadError("baseline_runs");
   const baselineRunById = new Map((baselineRunsResult.data ?? []).map((run) => [run.id, run]));
   const baselineEvidenceByRepository = new Map<
     string,
