@@ -9,6 +9,7 @@ import {
   IMPACT_PROMPT_VERSION,
   OpenAIImpactClassifierError,
   OpenAICustomerImpactClassifier,
+  validateGroundedEvidence,
   type CustomerImpact,
   type CustomerImpactPacket,
   type CustomerImpactRepository,
@@ -673,7 +674,48 @@ describe("offline customer impact evaluation", () => {
     expect(prompt).toContain("If no usage area is recorded, return an empty affectedAreas array");
     expect(prompt).toContain("copy one complete excerpt verbatim");
     expect(prompt).toContain("Do not paraphrase, normalize punctuation, or join fragments");
-    expect(IMPACT_PROMPT_VERSION).toBe("tenant-impact-v3");
+    expect(prompt).toContain("This dependency has no recorded usage context");
+    expect(prompt).toContain("Set relevant=false, relevance=none");
+    expect(prompt).toContain("state only that impact is unproven without customer usage context");
+    expect(IMPACT_PROMPT_VERSION).toBe("tenant-impact-v4");
+  });
+
+  it("accepts an explicitly unproven result when no customer usage context exists", () => {
+    const packet = buildCustomerImpactPacket({
+      ...pricingPacket,
+      context: {
+        ...pricingPacket.context,
+        usedFor: [],
+        contextNote: "",
+        usageMetadata: {},
+      },
+    });
+    const result = output({
+      relevant: false,
+      relevance: "none",
+      severity: "informational",
+      affectedAreas: [],
+      impactSummary: "Customer impact is unproven because usage context is not recorded.",
+      whyItMatters: "The workspace's use of this dependency has not been documented.",
+      actionRequired: false,
+      recommendedAction: null,
+      missingContext: ["How this workspace uses the dependency"],
+      evidenceRefs: [
+        {
+          source: "global_evidence",
+          excerpt: "Standard model input: $1.00 -> $1.20 per million tokens",
+        },
+      ],
+    });
+
+    expect(() => validateGroundedEvidence(result, packet)).not.toThrow();
+    expect(applyCustomerImpactPolicy(result, packet)).toMatchObject({
+      relevant: false,
+      relevance: "none",
+      actionRequired: false,
+      recommendedAction: null,
+      affectedAreas: [],
+    });
   });
 
   it("rejects ungrounded evidence and inconsistent schema output", () => {
