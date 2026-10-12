@@ -1,11 +1,33 @@
 import { describe, expect, it } from "vitest";
 import {
+  canManageProtectedProductDependencies,
   deriveOnboardingRecommendations,
   deriveProductBaselineStatus,
   ONBOARDING_V2_STAGES,
 } from "@/lib/onboarding/v2";
 
 describe("Product onboarding V2", () => {
+  it("allows only Product managers to add catalog dependencies to a protected Product", () => {
+    expect(
+      canManageProtectedProductDependencies({
+        productStatus: "protected",
+        canManageProducts: true,
+      }),
+    ).toBe(true);
+    expect(
+      canManageProtectedProductDependencies({
+        productStatus: "protected",
+        canManageProducts: false,
+      }),
+    ).toBe(false);
+    expect(
+      canManageProtectedProductDependencies({
+        productStatus: "draft",
+        canManageProducts: true,
+      }),
+    ).toBe(false);
+  });
+
   it("defines a stable, resumable stage order with the CLI insertion point at discovery", () => {
     expect(ONBOARDING_V2_STAGES).toEqual([
       "scan_import",
