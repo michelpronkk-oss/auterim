@@ -108,4 +108,30 @@ describe("GitHub installation callback authorization handoff", () => {
     );
     expect(mocks.state).not.toHaveBeenCalled();
   });
+
+  it("returns safely after a GitHub installation settings update without treating it as OAuth", async () => {
+    const response = await GET(
+      new Request(
+        "https://auterim.com/api/repositories/install/callback?installation_id=2001&setup_action=update",
+      ),
+    );
+    expect(response.status).toBe(302);
+    expect(new URL(response.headers.get("location")!).searchParams.get("github")).toBe(
+      "installation_updated",
+    );
+    expect(mocks.state).not.toHaveBeenCalled();
+    expect(mocks.membership).not.toHaveBeenCalled();
+  });
+
+  it("continues to reject an OAuth-shaped callback without valid state", async () => {
+    const response = await GET(
+      new Request(
+        "https://auterim.com/api/repositories/install/callback?installation_id=2001&setup_action=install",
+      ),
+    );
+    expect(new URL(response.headers.get("location")!).searchParams.get("github")).toBe(
+      "invalid_state",
+    );
+    expect(mocks.state).not.toHaveBeenCalled();
+  });
 });

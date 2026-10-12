@@ -257,6 +257,19 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
       limits?: { repositories?: number };
     };
   }>(kind === "settings" ? "/api/account/status" : null);
+  const repositories = useLoad<{
+    repositories: Array<{
+      id: string;
+      owner: string;
+      name: string;
+      status: string;
+      selected_for_protection: boolean;
+      activeProductIds: string[];
+    }>;
+  }>(kind === "settings" ? "/api/repositories" : null);
+  const products = useLoad<{
+    products: Array<{ id: string; name: string; status: string }>;
+  }>(kind === "settings" ? "/api/products" : null);
   const [preference, setPreference] = useState<Record<string, unknown> | null>(null);
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -272,6 +285,8 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
     const status = params.get("github");
     const messages: Record<string, string> = {
       connected: "GitHub is connected. Accessible repositories are ready to review.",
+      installation_updated:
+        "GitHub installation settings changed. Refresh repositories to update the catalog.",
       installation_selection_required:
         "Auterim can’t safely choose between multiple GitHub installations. No installation was connected.",
       installation_identity_mismatch:
@@ -420,6 +435,62 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
       });
       setNotice(`${provider} disconnected.`);
       await connectors.reload();
+    } catch (error) {
+      setNotice(messageFor(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function refreshGitHubRepositories() {
+    setBusy(true);
+    setNotice("");
+    try {
+      const result = await api<{ repositoriesImported: number; repositoriesRevoked: number }>(
+        "/api/repositories/refresh",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ workspaceId }),
+        },
+      );
+      await repositories.reload();
+      setNotice(
+        `Repository catalog refreshed: ${result.repositoriesImported} listed by GitHub, ${result.repositoriesRevoked} access revoked. Protection choices were not changed.`,
+      );
+    } catch (error) {
+      setNotice(messageFor(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function selectVercelResource(installationId: string, resourceId: string) {
+    setBusy(true);
+    setNotice("");
+    try {
+      await api("/api/connectors/vercel/resources", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, installationId, resourceIds: [resourceId] }),
+      });
+      await connectors.reload();
+      setNotice("Vercel project selected for deployment context.");
+    } catch (error) {
+      setNotice(messageFor(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function mapRepositoryToProduct(productId: string, repositoryId: string) {
+    setBusy(true);
+    setNotice("");
+    try {
+      await api(`/api/products/${encodeURIComponent(productId)}/repositories`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, repositoryId }),
+      });
+      await Promise.all([repositories.reload(), accountStatus.reload()]);
+      setNotice("Repository protection was added to the selected Product.");
     } catch (error) {
       setNotice(messageFor(error));
     } finally {
@@ -1184,13 +1255,24 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
                               {githubConnecting ? "Connecting…" : "Connect GitHub"}
                             </button>
                           ) : githubPresentation?.connected ? (
-                            <span className="connector-status connected">
-                              {repositoryEntitled &&
-                              typeof repositoryUsage === "number" &&
-                              typeof repositoryLimit === "number"
-                                ? `${repositoryUsage} / ${repositoryLimit} repositories`
-                                : "Connected"}
-                            </span>
+                            <>
+                              <span className="connector-status connected">
+                                {repositoryEntitled &&
+                                typeof repositoryUsage === "number" &&
+                                typeof repositoryLimit === "number"
+                                  ? `${repositoryUsage} / ${repositoryLimit} protected repositories`
+                                  : "Connected"}
+                              </span>
+                              {(account?.role === "owner" || account?.role === "admin") && (
+                                <button
+                                  className="text-button"
+                                  disabled={busy || !workspaceId}
+                                  onClick={() => void refreshGitHubRepositories()}
+                                >
+                                  {busy ? "Refreshing…" : "Refresh repositories"}
+                                </button>
+                              )}
+                            </>
                           ) : (
                             <span className="connector-status">
                               {githubPresentation?.statusLabel ?? "Checking access"}
@@ -1198,16 +1280,47 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
                           )}
                         </div>
                       ) : connected ? (
-                        <button
-                          className="text-button"
-                          disabled={busy}
-                          onClick={() => {
-                            const installationId = String(connector.installationId ?? "");
-                            if (installationId) void disconnect(provider, installationId);
-                          }}
-                        >
-                          Disconnect
-                        </button>
+                        <div className="connector-actions">
+                          {provider === "vercel" &&
+                            Array.isArray(connector.resources) &&
+                            connector.resources
+                              .filter(
+                                (resource: unknown) =>
+                                  resource &&
+                                  typeof resource === "object" &&
+                                  "access_state" in resource &&
+                                  resource.access_state === "available",
+                              )
+                              .map((resource: Record<string, unknown>) => (
+                                <button
+                                  key={String(resource.id)}
+                                  className={resource.selected ? "text-button" : "button-secondary"}
+                                  disabled={
+                                    busy || !["owner", "admin"].includes(account?.role ?? "")
+                                  }
+                                  onClick={() =>
+                                    void selectVercelResource(
+                                      String(connector.installationId ?? ""),
+                                      String(resource.id),
+                                    )
+                                  }
+                                >
+                                  {resource.selected
+                                    ? `${String(resource.display_name)} selected`
+                                    : `Select ${String(resource.display_name)}`}
+                                </button>
+                              ))}
+                          <button
+                            className="text-button"
+                            disabled={busy || !["owner", "admin"].includes(account?.role ?? "")}
+                            onClick={() => {
+                              const installationId = String(connector.installationId ?? "");
+                              if (installationId) void disconnect(provider, installationId);
+                            }}
+                          >
+                            Disconnect
+                          </button>
+                        </div>
                       ) : (
                         <button
                           className="button-secondary"
@@ -1220,6 +1333,72 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
                     </div>
                   );
                 })}
+              </div>
+            )}
+          </section>
+          <section className="surface-card">
+            <p className="card-kicker">REPOSITORIES</p>
+            <h2>Repository protection</h2>
+            <p className="empty-copy">
+              Catalog refresh only discovers what GitHub permits. Protecting a repository for a
+              Product is a separate action and uses the workspace repository allowance.
+            </p>
+            {repositories.loading || products.loading ? (
+              <LoadingRows />
+            ) : repositories.error || products.error ? (
+              <ErrorState
+                error={repositories.error || products.error || "Repository data unavailable."}
+                retry={() => void Promise.all([repositories.reload(), products.reload()])}
+              />
+            ) : (
+              <div className="row-list">
+                {(repositories.data?.repositories ?? []).map((repository) => {
+                  const mappedProducts = new Set(repository.activeProductIds);
+                  const choices = (products.data?.products ?? []).filter(
+                    (product) => product.status === "protected" && !mappedProducts.has(product.id),
+                  );
+                  return (
+                    <div className="connector-row" key={repository.id}>
+                      <div className="connector-info">
+                        <strong>
+                          {repository.owner}/{repository.name}
+                        </strong>
+                        <small>
+                          {repository.status.replaceAll("_", " ")} · {mappedProducts.size} Product
+                          {mappedProducts.size === 1 ? "" : "s"} protected
+                        </small>
+                      </div>
+                      {repository.status === "available" && choices.length > 0 ? (
+                        <label className="connector-actions">
+                          <span className="sr-only">Protect repository for Product</span>
+                          <select
+                            defaultValue=""
+                            disabled={
+                              busy || !["owner", "admin"].includes(accountStatus.data?.role ?? "")
+                            }
+                            onChange={(event) => {
+                              const productId = event.target.value;
+                              if (productId) void mapRepositoryToProduct(productId, repository.id);
+                              event.currentTarget.value = "";
+                            }}
+                          >
+                            <option value="">Choose Product…</option>
+                            {choices.map((product) => (
+                              <option key={product.id} value={product.id}>
+                                Protect for {product.name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      ) : repository.status === "available" && mappedProducts.size > 0 ? (
+                        <span className="connector-status connected">Protected</span>
+                      ) : null}
+                    </div>
+                  );
+                })}
+                {!repositories.data?.repositories.length && (
+                  <p className="empty-copy">No repositories are available in this workspace.</p>
+                )}
               </div>
             )}
           </section>
@@ -1279,7 +1458,11 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
               Billing &amp; account →
             </Link>
           </section>
-          <WorkspaceMembersPanel workspaceId={workspaceId} role={accountStatus.data?.role} api={api} />
+          <WorkspaceMembersPanel
+            workspaceId={workspaceId}
+            role={accountStatus.data?.role}
+            api={api}
+          />
           {notice && (
             <div className="success-note" role="status">
               {notice}

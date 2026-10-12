@@ -18,6 +18,17 @@ export async function GET(request: Request) {
       ? Number(rawInstallationId)
       : Number.NaN;
   const setupAction = url.searchParams.get("setup_action");
+  // GitHub returns here after an installation's repository scope is edited in
+  // GitHub Settings. That browser return is not an Auterim authorization flow;
+  // it must not be treated as proof or mutate the catalog. The owner can then
+  // use the authenticated Refresh repositories action in Auterim.
+  if (
+    setupAction === "update" &&
+    !state &&
+    Number.isSafeInteger(installationId) &&
+    installationId > 0
+  )
+    return settingsRedirect("installation_updated");
   if (
     !state ||
     !/^[A-Za-z0-9_-]{43}$/.test(state) ||

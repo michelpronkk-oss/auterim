@@ -13,6 +13,86 @@ export type VerifiedGitHubConnectionResult = {
   userAccessibleRepositoryCount: number;
 };
 
+export type GitHubCatalogRefreshResult = {
+  repositoriesImported: number;
+  repositoriesRevoked: number;
+};
+
+/** Refreshes catalog visibility for an existing, workspace-owned App installation.
+ * It deliberately does not create repository protection or Product mappings.
+ */
+export async function refreshGitHubInstallationCatalog(input: {
+  service: SupabaseClient;
+  provider: GitHubAppRepositoryProvider;
+  workspaceId: string;
+  connectionId: string;
+}): Promise<GitHubCatalogRefreshResult> {
+  const { data: connection, error: connectionError } = await input.service
+    .from("repository_connections")
+    .select("id,workspace_id,provider,installation_id,account_login,status")
+    .eq("id", input.connectionId)
+    .eq("workspace_id", input.workspaceId)
+    .eq("provider", "github")
+    .maybeSingle();
+  if (connectionError || !connection) throw new Error("github_connection_not_found");
+  if (connection.status !== "connected") throw new Error("github_connection_unavailable");
+  const installationId = Number(connection.installation_id);
+  if (!Number.isSafeInteger(installationId) || installationId <= 0)
+    throw new Error("github_connection_invalid");
+
+  const installation = await input.provider.verifyInstallation(installationId);
+  if (installation.accountLogin.toLowerCase() !== String(connection.account_login).toLowerCase())
+    throw new Error("github_installation_identity_mismatch");
+  const repositories = await input.provider.listInstallationRepositories(installationId);
+  const now = new Date().toISOString();
+  if (repositories.length > 0) {
+    const { error } = await input.service.from("repositories").upsert(
+      repositories.map((repository) => ({
+        workspace_id: input.workspaceId,
+        connection_id: connection.id,
+        external_id: repository.id,
+        owner: repository.owner.login,
+        name: repository.name,
+        default_branch: repository.default_branch,
+        private: repository.private,
+        archived: repository.archived,
+        status: repository.archived ? "archived" : "available",
+        last_synced_at: now,
+      })),
+      { onConflict: "workspace_id,external_id" },
+    );
+    if (error) throw new Error("github_repository_catalog_persistence_failed");
+  }
+
+  const { data: existing, error: existingError } = await input.service
+    .from("repositories")
+    .select("id,external_id")
+    .eq("workspace_id", input.workspaceId)
+    .eq("connection_id", connection.id);
+  if (existingError) throw new Error("github_repository_catalog_read_failed");
+  const currentIds = new Set(repositories.map((repository) => String(repository.id)));
+  const removedIds = (existing ?? [])
+    .filter((repository) => !currentIds.has(String(repository.external_id)))
+    .map((repository) => repository.id as string);
+  if (removedIds.length) {
+    const { error } = await input.service
+      .from("repositories")
+      .update({ status: "access_revoked", selected_for_protection: false, updated_at: now })
+      .eq("workspace_id", input.workspaceId)
+      .eq("connection_id", connection.id)
+      .in("id", removedIds);
+    if (error) throw new Error("github_repository_catalog_reconcile_failed");
+    const { error: accessError } = await input.service
+      .from("workspace_repository_access")
+      .delete()
+      .eq("workspace_id", input.workspaceId)
+      .in("repository_id", removedIds);
+    if (accessError) throw new Error("github_repository_access_reconcile_failed");
+  }
+
+  return { repositoriesImported: repositories.length, repositoriesRevoked: removedIds.length };
+}
+
 function sameInstallationIdentity(left: GitHubUserInstallation, right: GitHubUserInstallation) {
   const sortPermissions = (permissions: Record<string, string>) =>
     Object.entries(permissions).sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey));
