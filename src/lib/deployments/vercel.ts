@@ -16,6 +16,37 @@ const REQUIRED_READ_SCOPES = [
   "integration-configuration",
   "project",
 ] as const;
+const ALLOWED_READ_SCOPE_NAMES = new Set([...REQUIRED_READ_SCOPES, "team", "user"]);
+
+export type VercelConfigurationRejectionStage =
+  | "configuration_invalid"
+  | "configuration_id_mismatch"
+  | "team_mismatch"
+  | "project_selection_missing"
+  | "project_selection_too_broad"
+  | "selected_projects_empty"
+  | "selected_projects_invalid"
+  | "scopes_unreadable"
+  | "required_scope_missing"
+  | "write_scope_detected"
+  | "unexpected_scope_detected";
+
+export type VercelScopeShapeSummary =
+  | { type: "string"; value?: string }
+  | { type: "object"; keys: string[]; candidateName?: string; candidateAccess?: string }
+  | { type: "other" };
+
+export type VercelConfigurationDiagnostic = {
+  configurationIdMatches: boolean;
+  teamIdMatches: boolean;
+  status: string | null;
+  projectSelection: "all" | "selected" | null;
+  projectCount: number;
+  scopeCount: number;
+  scopeShapes: VercelScopeShapeSummary[];
+  rejectionStage: VercelConfigurationRejectionStage | null;
+  missingScopes: string[];
+};
 
 export type VercelConfiguration = {
   id: string;
@@ -144,162 +175,251 @@ async function vercelGet<T>(
   return (await readJsonBounded(response)) as T;
 }
 
-function readScopeNames(value: unknown): string[] {
-  const rows: Array<{ name: string; access: string }> = [];
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      if (typeof item === "string") {
-        const match = /^([a-z-]+):(read|read\/write|write)$/i.exec(item);
-        if (match) rows.push({ name: match[1]!.toLowerCase(), access: match[2]!.toLowerCase() });
-      } else if (item && typeof item === "object") {
-        const row = item as Record<string, unknown>;
-        const name =
-          typeof row.name === "string" ? row.name : typeof row.scope === "string" ? row.scope : "";
-        const access =
-          typeof row.accessLevel === "string"
-            ? row.accessLevel
-            : typeof row.access === "string"
-              ? row.access
-              : typeof row.permission === "string"
-                ? row.permission
-                : "";
-        if (name && access)
-          rows.push({
-            name: name.toLowerCase(),
-            access: access.toLowerCase().replaceAll("_", "/"),
-          });
-      }
-    }
-  } else if (value && typeof value === "object") {
-    for (const [name, accessValue] of Object.entries(value as Record<string, unknown>))
-      if (typeof accessValue === "string")
-        rows.push({
-          name: name.toLowerCase(),
-          access: accessValue.toLowerCase().replaceAll("_", "/"),
-        });
-  }
-  return [
-    ...new Set(
-      rows
-        .filter((scope) => scope.access === "read" || scope.access === "read/write")
-        .map((scope) => `${scope.name}:read`),
-    ),
-  ].sort();
+type ParsedVercelScope = { name: string; access: "read" | "write" | "read-write" };
+
+function scopeAccess(value: unknown): ParsedVercelScope["access"] | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.toLowerCase().replaceAll("_", "/");
+  if (normalized === "read") return "read";
+  if (normalized === "write") return "write";
+  if (normalized === "read/write" || normalized === "read-write") return "read-write";
+  return null;
 }
 
-function hasWriteScope(value: unknown): boolean {
-  const accessLevels: string[] = [];
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      if (typeof item === "string") {
-        const match = /^[a-z-]+:(read|read\/write|write)$/i.exec(item);
-        if (match) accessLevels.push(match[1]!.toLowerCase());
-      } else if (item && typeof item === "object") {
-        const row = item as Record<string, unknown>;
-        const access =
-          typeof row.accessLevel === "string"
-            ? row.accessLevel
-            : typeof row.access === "string"
-              ? row.access
-              : typeof row.permission === "string"
-                ? row.permission
-                : "";
-        if (access) accessLevels.push(access.toLowerCase().replaceAll("_", "/"));
-      }
+function parseVercelScope(value: unknown): ParsedVercelScope | null {
+  if (typeof value === "string") {
+    // Current Vercel Integration API contract: `read:project` / `read-write:project`.
+    const current = /^(read|read-write|write):([a-z][a-z0-9-]{0,79})$/i.exec(value);
+    if (current) {
+      const access = scopeAccess(current[1]);
+      return access ? { name: current[2]!.toLowerCase(), access } : null;
     }
-  } else if (value && typeof value === "object") {
-    for (const access of Object.values(value as Record<string, unknown>))
-      if (typeof access === "string") accessLevels.push(access.toLowerCase().replaceAll("_", "/"));
+    // Keep compatibility with previously accepted `project:read` values.
+    const legacy = /^([a-z][a-z0-9-]{0,79}):(read|read\/write|write)$/i.exec(value);
+    if (legacy) {
+      const access = scopeAccess(legacy[2]);
+      return access ? { name: legacy[1]!.toLowerCase(), access } : null;
+    }
+    return null;
   }
-  return accessLevels.some((access) => access === "write" || access === "read/write");
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const names = [row.name, row.scope].filter((item) => item !== undefined);
+  const accesses = [row.accessLevel, row.access, row.permission].filter(
+    (item) => item !== undefined,
+  );
+  if (
+    names.length !== 1 ||
+    accesses.length !== 1 ||
+    typeof names[0] !== "string" ||
+    !/^[a-z][a-z0-9-]{0,79}$/i.test(names[0])
+  )
+    return null;
+  const access = scopeAccess(accesses[0]);
+  return access ? { name: names[0].toLowerCase(), access } : null;
+}
+
+function parseVercelScopes(value: unknown): ParsedVercelScope[] | null {
+  if (Array.isArray(value)) {
+    if (value.length > 100) return null;
+    const parsed = value.map(parseVercelScope);
+    return parsed.some((scope) => scope === null) ? null : (parsed as ParsedVercelScope[]);
+  }
+  if (value && typeof value === "object") {
+    // Preserve the legacy scope map only when every key/value is explicit and valid.
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length > 100) return null;
+    const parsed = entries.map(([name, access]) => {
+      if (!/^[a-z][a-z0-9-]{0,79}$/i.test(name)) return null;
+      const normalizedAccess = scopeAccess(access);
+      return normalizedAccess ? { name: name.toLowerCase(), access: normalizedAccess } : null;
+    });
+    return parsed.some((scope) => scope === null) ? null : (parsed as ParsedVercelScope[]);
+  }
+  return null;
+}
+
+function summarizeScopeShapes(value: unknown): VercelScopeShapeSummary[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 100).map((scope): VercelScopeShapeSummary => {
+    if (typeof scope === "string") {
+      const parsed = parseVercelScope(scope);
+      return { type: "string", ...(parsed ? { value: `${parsed.access}:${parsed.name}` } : {}) };
+    }
+    if (scope && typeof scope === "object" && !Array.isArray(scope)) {
+      const row = scope as Record<string, unknown>;
+      const keys = Object.keys(row)
+        .filter((key) => ["name", "scope", "accessLevel", "access", "permission"].includes(key))
+        .sort();
+      const name = typeof row.name === "string" ? row.name : row.scope;
+      const access = row.accessLevel ?? row.access ?? row.permission;
+      return {
+        type: "object",
+        keys,
+        ...(typeof name === "string" && /^[a-z][a-z0-9-]{0,79}$/i.test(name)
+          ? { candidateName: name.toLowerCase() }
+          : {}),
+        ...(scopeAccess(access) ? { candidateAccess: scopeAccess(access)! } : {}),
+      };
+    }
+    return { type: "other" };
+  });
 }
 
 export function normalizeVercelConfiguration(
   value: unknown,
   expected: { configurationId: string; teamId: string | null },
+  onDiagnostic?: (diagnostic: VercelConfigurationDiagnostic) => void,
 ): VercelConfiguration {
-  if (!value || typeof value !== "object")
+  const outer = value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+  const row =
+    outer?.configuration && typeof outer.configuration === "object"
+      ? (outer.configuration as Record<string, unknown>)
+      : outer;
+  const projectSelectionValue = row?.projectSelection ?? row?.project_selection;
+  const rawProjects = row?.projects;
+  const rawScopes = row?.scopes;
+  const status =
+    typeof row?.status === "string" &&
+    ["error", "onboarding", "pending", "ready", "resumed", "suspended", "uninstalled"].includes(
+      row.status.toLowerCase(),
+    )
+      ? row.status.toLowerCase()
+      : null;
+  const emitDiagnostic = (
+    rejectionStage: VercelConfigurationRejectionStage | null,
+    missingScopes: string[] = [],
+  ) =>
+    onDiagnostic?.({
+      configurationIdMatches: row?.id === expected.configurationId,
+      teamIdMatches:
+        (typeof row?.teamId === "string" ? row.teamId : row?.team_id) === expected.teamId,
+      status,
+      projectSelection:
+        projectSelectionValue === "all" || projectSelectionValue === "selected"
+          ? projectSelectionValue
+          : null,
+      projectCount: Array.isArray(rawProjects) ? Math.min(rawProjects.length, MAX_PROJECTS + 1) : 0,
+      scopeCount: Array.isArray(rawScopes) ? Math.min(rawScopes.length, 101) : 0,
+      scopeShapes: summarizeScopeShapes(rawScopes),
+      rejectionStage,
+      missingScopes,
+    });
+  const reject = (
+    stage: VercelConfigurationRejectionStage,
+    category: ConstructorParameters<typeof ConnectorError>[0] = "PERMISSION_MISSING",
+    message = "Vercel installation permissions could not be verified.",
+    missingScopes: string[] = [],
+  ): never => {
+    emitDiagnostic(stage, missingScopes);
+    throw new ConnectorError(category, false, "vercel", message);
+  };
+
+  if (!row) {
+    emitDiagnostic("configuration_invalid");
     throw new ConnectorError(
       "PERMISSION_MISSING",
       false,
       "vercel",
       "Vercel installation permissions could not be verified.",
     );
-  const outer = value as Record<string, unknown>;
-  const row =
-    outer.configuration && typeof outer.configuration === "object"
-      ? (outer.configuration as Record<string, unknown>)
-      : outer;
+  }
+  const configurationRow = row;
   if (
-    row.id !== expected.configurationId ||
-    (typeof row.status === "string" &&
-      ["disabled", "removed", "error"].includes(row.status.toLowerCase()))
+    configurationRow.id !== expected.configurationId ||
+    (typeof configurationRow.status === "string" &&
+      ["disabled", "removed", "error", "suspended", "uninstalled"].includes(
+        configurationRow.status.toLowerCase(),
+      ))
   )
-    throw new ConnectorError(
-      "AUTH_REQUIRED",
-      false,
-      "vercel",
-      "Reconnect this Vercel installation.",
-    );
+    reject("configuration_id_mismatch", "AUTH_REQUIRED", "Reconnect this Vercel installation.");
   const teamId =
-    typeof row.teamId === "string"
-      ? row.teamId
-      : typeof row.team_id === "string"
-        ? row.team_id
+    typeof configurationRow.teamId === "string"
+      ? configurationRow.teamId
+      : typeof configurationRow.team_id === "string"
+        ? configurationRow.team_id
         : null;
   if (teamId !== expected.teamId)
-    throw new ConnectorError(
+    reject(
+      "team_mismatch",
       "INVALID_REQUEST",
-      false,
-      "vercel",
       "Vercel installation account did not match the authorization response.",
     );
-  const projectSelection = row.projectSelection ?? row.project_selection;
+  const projectSelection = projectSelectionValue;
   if (projectSelection !== "all" && projectSelection !== "selected")
-    throw new ConnectorError(
+    reject(
+      "project_selection_missing",
       "PERMISSION_MISSING",
-      false,
-      "vercel",
       "Vercel project access could not be verified.",
     );
-  const rawProjects = row.projects;
+  if (projectSelection !== "selected")
+    reject(
+      "project_selection_too_broad",
+      "PERMISSION_MISSING",
+      "Vercel access must be limited to explicitly selected projects.",
+    );
+  const normalizedProjectSelection = projectSelection as "all" | "selected";
   const projects = Array.isArray(rawProjects)
     ? [
         ...new Set(
-          rawProjects.flatMap((project) => {
-            const id =
-              typeof project === "string"
-                ? project
-                : project &&
-                    typeof project === "object" &&
-                    "id" in project &&
-                    typeof project.id === "string"
-                  ? project.id
-                  : null;
-            return id && id.length <= 200 ? [id] : [];
-          }),
+          rawProjects.filter(
+            (project): project is string =>
+              typeof project === "string" && project.length > 0 && project.length <= 200,
+          ),
         ),
-      ].slice(0, MAX_PROJECTS)
+      ]
     : [];
-  if (projectSelection === "selected" && projects.length === 0)
-    throw new ConnectorError(
+  if (projectSelection === "selected") {
+    if (!Array.isArray(rawProjects) || rawProjects.length === 0)
+      reject(
+        "selected_projects_empty",
+        "PERMISSION_MISSING",
+        "No Vercel projects are authorized for this installation.",
+      );
+    const selectedProjectIds = rawProjects as unknown[];
+    if (
+      selectedProjectIds.length > MAX_PROJECTS ||
+      projects.length !== selectedProjectIds.length ||
+      projects.length === 0
+    )
+      reject(
+        "selected_projects_invalid",
+        "PERMISSION_MISSING",
+        "Vercel project access could not be verified.",
+      );
+  }
+  const parsedScopeResult = parseVercelScopes(rawScopes);
+  if (!parsedScopeResult) reject("scopes_unreadable");
+  const parsedScopes = parsedScopeResult as ParsedVercelScope[];
+  if (parsedScopes.some((scope) => scope.access !== "read"))
+    reject(
+      "write_scope_detected",
       "PERMISSION_MISSING",
-      false,
-      "vercel",
-      "No Vercel projects are authorized for this installation.",
+      "Vercel installation includes write permissions.",
     );
-  const scopes = readScopeNames(row.scopes);
-  if (
-    hasWriteScope(row.scopes) ||
-    !REQUIRED_READ_SCOPES.every((scope) => scopes.includes(`${scope}:read`))
-  )
-    throw new ConnectorError(
+  if (parsedScopes.some((scope) => !ALLOWED_READ_SCOPE_NAMES.has(scope.name)))
+    reject(
+      "unexpected_scope_detected",
       "PERMISSION_MISSING",
-      false,
-      "vercel",
+      "Vercel installation includes unexpected permissions.",
+    );
+  const scopes = [...new Set(parsedScopes.map((scope) => `${scope.name}:read`))].sort();
+  const missingScopes = REQUIRED_READ_SCOPES.filter((scope) => !scopes.includes(`${scope}:read`));
+  if (missingScopes.length)
+    reject(
+      "required_scope_missing",
+      "PERMISSION_MISSING",
       "The Vercel installation is missing required read permissions.",
+      missingScopes,
     );
-  return { id: expected.configurationId, teamId, projectSelection, projects, scopes };
+  emitDiagnostic(null);
+  return {
+    id: expected.configurationId,
+    teamId,
+    projectSelection: normalizedProjectSelection,
+    projects: projects.slice(0, MAX_PROJECTS),
+    scopes,
+  };
 }
 
 export async function getVercelConfiguration(

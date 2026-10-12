@@ -5,7 +5,10 @@ import {
 } from "@/lib/connectors/credentials";
 import { connectorProviderEntitled } from "@/lib/connectors/entitlements";
 import { ConnectorError, type ConnectorProvider } from "@/lib/connectors/model";
-import { logConnectorCallbackStage } from "@/lib/connectors/callback-telemetry";
+import {
+  logConnectorCallbackStage,
+  logVercelConfigurationDiagnostic,
+} from "@/lib/connectors/callback-telemetry";
 import { getConnectorProvider } from "@/lib/connectors/providers";
 import {
   connectorStateHash,
@@ -176,6 +179,7 @@ export async function GET(request: Request, context: { params: Promise<{ provide
       configurationId: url.searchParams.get("configurationId"),
       teamId: url.searchParams.get("teamId"),
       onStage: (event) => logConnectorCallbackStage({ provider, ...event }),
+      onConfigurationDiagnostic: (diagnostic) => logVercelConfigurationDiagnostic(diagnostic),
     });
   } catch (error) {
     const reason =
