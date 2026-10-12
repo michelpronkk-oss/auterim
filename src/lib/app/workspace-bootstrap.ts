@@ -21,6 +21,19 @@ export function resolveWorkspaceBootstrapState(input: {
   return input.selectedWorkspaceActive ? "READY" : "NEEDS_ONBOARDING";
 }
 
+/**
+ * A current bootstrap request must not leave the app shell in LOADING when it
+ * exits without choosing a state (for example, when its session became stale).
+ * Superseded requests do not own the state; the newer request will settle it.
+ */
+export function settleUnresolvedWorkspaceBootstrap(input: {
+  state: WorkspaceBootstrapState;
+  requestIsCurrent: boolean;
+}): WorkspaceBootstrapState {
+  if (!input.requestIsCurrent || input.state !== "LOADING") return input.state;
+  return "ERROR";
+}
+
 export function shouldShowWorkspaceSelector(input: { workspaceCount: number }) {
   return input.workspaceCount > 1;
 }
