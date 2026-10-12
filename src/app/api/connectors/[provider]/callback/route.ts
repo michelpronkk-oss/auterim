@@ -5,6 +5,7 @@ import {
 } from "@/lib/connectors/credentials";
 import { connectorProviderEntitled } from "@/lib/connectors/entitlements";
 import { ConnectorError, type ConnectorProvider } from "@/lib/connectors/model";
+import { logConnectorCallbackStage } from "@/lib/connectors/callback-telemetry";
 import { getConnectorProvider } from "@/lib/connectors/providers";
 import {
   connectorStateHash,
@@ -128,8 +129,17 @@ export async function GET(request: Request, context: { params: Promise<{ provide
       p_claim_token: claimToken,
     },
   );
-  if (claimError || claimed !== true)
+  if (claimError || claimed !== true) {
+    logConnectorCallbackStage({
+      provider,
+      stage: "state_claim",
+      outcome: "failed",
+      reason: "state_replayed",
+      ...(claimError?.code ? { databaseCode: claimError.code } : {}),
+    });
     return clearCookie(completeRedirect(provider, "error", "state_replayed"), provider);
+  }
+  logConnectorCallbackStage({ provider, stage: "state_claim", outcome: "succeeded" });
   const adapter = getConnectorProvider(provider);
   let verifier: string | undefined;
   if (
@@ -149,14 +159,23 @@ export async function GET(request: Request, context: { params: Promise<{ provide
         `auterim-connector-pkce:v1:${stateHash}`,
       );
     } catch {
+      logConnectorCallbackStage({
+        provider,
+        stage: "pkce_decrypt",
+        outcome: "failed",
+        reason: "authorization_expired",
+      });
       return clearCookie(completeRedirect(provider, "error", "authorization_expired"), provider);
     }
   }
   let grant;
+  if (provider !== "vercel")
+    logConnectorCallbackStage({ provider, stage: "token_exchange", outcome: "started" });
   try {
     grant = await adapter.exchangeCode(code, verifier, {
       configurationId: url.searchParams.get("configurationId"),
       teamId: url.searchParams.get("teamId"),
+      onStage: (event) => logConnectorCallbackStage({ provider, ...event }),
     });
   } catch (error) {
     const reason =
@@ -165,18 +184,41 @@ export async function GET(request: Request, context: { params: Promise<{ provide
         : error instanceof ConnectorError && error.category === "PROVIDER_UNAVAILABLE"
           ? "provider_unavailable"
           : "authorization_failed";
+    if (provider !== "vercel")
+      logConnectorCallbackStage({
+        provider,
+        stage: "token_exchange",
+        outcome: "failed",
+        reason,
+      });
     return clearCookie(completeRedirect(provider, "error", reason), provider);
   }
-  const credential = encryptConnectorCredential(
-    JSON.stringify({
-      accessToken: grant.accessToken,
-      refreshToken: grant.refreshToken,
-      expiresAt: grant.expiresAt,
-      scopes: grant.scopes,
-      providerMetadata: grant.providerMetadata ?? grant.safeMetadata,
-    }),
-    `auterim-connector:v1:${stateRow.workspace_id}:${provider}:${grant.externalAccountId}`,
-  );
+  if (provider !== "vercel")
+    logConnectorCallbackStage({ provider, stage: "token_exchange", outcome: "succeeded" });
+  logConnectorCallbackStage({ provider, stage: "credential_encryption", outcome: "started" });
+  let credential;
+  try {
+    credential = encryptConnectorCredential(
+      JSON.stringify({
+        accessToken: grant.accessToken,
+        refreshToken: grant.refreshToken,
+        expiresAt: grant.expiresAt,
+        scopes: grant.scopes,
+        providerMetadata: grant.providerMetadata ?? grant.safeMetadata,
+      }),
+      `auterim-connector:v1:${stateRow.workspace_id}:${provider}:${grant.externalAccountId}`,
+    );
+  } catch {
+    logConnectorCallbackStage({
+      provider,
+      stage: "credential_encryption",
+      outcome: "failed",
+      reason: "authorization_failed",
+    });
+    return clearCookie(completeRedirect(provider, "error", "authorization_failed"), provider);
+  }
+  logConnectorCallbackStage({ provider, stage: "credential_encryption", outcome: "succeeded" });
+  logConnectorCallbackStage({ provider, stage: "persistence", outcome: "started" });
   const { data: installationId, error: saveError } = await service.rpc(
     "complete_connector_authorization",
     {
@@ -198,8 +240,17 @@ export async function GET(request: Request, context: { params: Promise<{ provide
       p_refresh_expires_at: null,
     },
   );
-  if (saveError || !installationId)
+  if (saveError || !installationId) {
+    logConnectorCallbackStage({
+      provider,
+      stage: "persistence",
+      outcome: "failed",
+      reason: "authorization_save_failed",
+      ...(saveError?.code ? { databaseCode: saveError.code } : {}),
+    });
     return clearCookie(completeRedirect(provider, "error", "authorization_save_failed"), provider);
+  }
+  logConnectorCallbackStage({ provider, stage: "persistence", outcome: "succeeded" });
   const scopesOk = requiredScopesPresent(provider, grant.scopes);
   if (!scopesOk) {
     const installed = await service

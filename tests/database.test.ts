@@ -398,6 +398,15 @@ const deploymentGrantHardeningMigration = await readFile(
   ),
   "utf8",
 );
+const vercelAuthorizationRpcMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261124000000_m157_allow_vercel_connector_authorization.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase(
   applyCompanySurfaceMigration = true,
@@ -473,6 +482,7 @@ async function makeDatabase(
     await db.exec("alter default privileges in schema public grant all on tables to authenticated");
     await db.exec(deploymentSurfacesMigration);
     await db.exec(deploymentGrantHardeningMigration);
+    await db.exec(vercelAuthorizationRpcMigration);
   }
   return db;
 }
@@ -4747,6 +4757,65 @@ describe("Auterim migration and monitoring transaction", () => {
 });
 
 describe("M15.7 deployment migration", () => {
+  it("persists a Vercel installation through the shared OAuth RPC and consumes state atomically", async () => {
+    const db = await makeDatabase();
+    const userId = "a1000000-0000-4000-8000-000000000011";
+    const workspaceId = "a2000000-0000-4000-8000-000000000011";
+    const stateHash = "a".repeat(64);
+    const browserHash = "b".repeat(64);
+    const claimToken = "a3000000-0000-4000-8000-000000000011";
+    await db.query("insert into auth.users(id,email) values($1,'vercel@example.test')", [userId]);
+    await db.query("insert into public.workspaces(id,name,created_by) values($1,'Vercel QA',$2)", [
+      workspaceId,
+      userId,
+    ]);
+    await db.query(
+      "insert into public.workspace_members(workspace_id,user_id,role) values($1,$2,'owner')",
+      [workspaceId, userId],
+    );
+    await db.query(
+      `insert into public.workspace_subscriptions(workspace_id,plan,status,current_period_start,current_period_end)
+       values($1,'pro','active',now()-interval '1 day',now()+interval '30 days')`,
+      [workspaceId],
+    );
+    await db.query(
+      `insert into public.connector_authorization_states(state_hash,provider,workspace_id,actor_user_id,browser_binding_hash,expires_at)
+       values($1,'vercel',$2,$3,$4,now()+interval '10 minutes')`,
+      [stateHash, workspaceId, userId, browserHash],
+    );
+    await db.exec("set role service_role");
+    const claimed = await db.query<{ claimed: boolean }>(
+      `select public.claim_connector_authorization_state($1,$2,'vercel',$3,$4,$5) as claimed`,
+      [stateHash, browserHash, workspaceId, userId, claimToken],
+    );
+    expect(claimed.rows[0]?.claimed).toBe(true);
+    const persisted = await db.query<{ installation_id: string }>(
+      `select public.complete_connector_authorization(
+        $1,$2,'vercel',$3,$4,$5,'icfg_qa','Vercel QA',
+        array['integration-configuration:read','project:read','deployment:read','domain:read','team:read'],
+        '{"configurationId":"icfg_qa","teamId":"team_qa"}'::jsonb,
+        'encrypted-placeholder','nonce-placeholder','tag-placeholder',1,null,null
+      ) as installation_id`,
+      [stateHash, browserHash, workspaceId, userId, claimToken],
+    );
+    expect(persisted.rows[0]?.installation_id).toBeTruthy();
+    const rows = await db.query<{
+      provider: string;
+      external_account_id: string;
+      consumed_at: string | null;
+    }>(
+      `select i.provider,i.external_account_id,s.consumed_at::text
+       from public.connector_installations i
+       join public.connector_authorization_states s on s.workspace_id=i.workspace_id and s.provider=i.provider
+       where i.id=$1 and s.state_hash=$2`,
+      [persisted.rows[0]!.installation_id, stateHash],
+    );
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0]).toMatchObject({ provider: "vercel", external_account_id: "icfg_qa" });
+    expect(rows.rows[0]?.consumed_at).toBeTruthy();
+    await db.close();
+  });
+
   it("adds tenant-scoped deployment tables with RLS and no anonymous access", async () => {
     const db = await makeDatabase();
     const tables = await db.query<{
