@@ -15,6 +15,11 @@ import {
 import { getEnvironment, isIntegrationConfigured } from "@/lib/env/schema";
 import { getWorkspaceRole, resolveWorkspaceEntitlementsForService } from "@/lib/billing/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import {
+  clearConnectorCallbackCookie,
+  connectorRedirectResponse,
+  vercelIntegrationNextUrl,
+} from "@/lib/connectors/callback-response";
 
 function cookie(request: Request, key: string) {
   const value = request.headers
@@ -32,25 +37,14 @@ function completeRedirect(provider: ConnectorProvider, status: string, reason?: 
   target.searchParams.set("connector", provider);
   target.searchParams.set("status", status);
   if (reason) target.searchParams.set("reason", reason);
-  return Response.redirect(target, 303);
+  return connectorRedirectResponse(target);
 }
 
 function completeSuccessRedirect(request: Request, provider: ConnectorProvider, reason?: string) {
   if (provider === "vercel") {
-    const next = new URL(request.url).searchParams.get("next");
-    if (next) {
-      try {
-        const target = new URL(next);
-        if (
-          target.protocol === "https:" &&
-          target.hostname === "vercel.com" &&
-          target.pathname.startsWith("/integrations/")
-        )
-          return Response.redirect(target, 303);
-      } catch {
-        // Invalid provider return URLs fall back to Auterim's own status page.
-      }
-    }
+    const callback = new URL(request.url).searchParams;
+    const target = vercelIntegrationNextUrl(callback.get("next"), callback.get("configurationId"));
+    if (target) return connectorRedirectResponse(target);
   }
   return completeRedirect(provider, "connected", reason);
 }
@@ -58,11 +52,7 @@ function completeSuccessRedirect(request: Request, provider: ConnectorProvider, 
 function clearCookie(response: Response, provider: ConnectorProvider) {
   const environment = getEnvironment();
   const secure = new URL(environment.NEXT_PUBLIC_APP_URL).protocol === "https:" ? "; Secure" : "";
-  response.headers.append(
-    "set-cookie",
-    `auterim_connector_${provider}=; Path=/api/connectors/${provider}/callback; HttpOnly; SameSite=Lax; Max-Age=0${secure}`,
-  );
-  return response;
+  return clearConnectorCallbackCookie(response, provider, Boolean(secure));
 }
 
 export async function GET(request: Request, context: { params: Promise<{ provider: string }> }) {
