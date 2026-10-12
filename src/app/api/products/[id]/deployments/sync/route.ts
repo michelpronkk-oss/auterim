@@ -66,14 +66,18 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     return Response.json({ error: "selected_vercel_project_required" }, { status: 409 });
 
   const service = serverConnectors();
+  let failureStage: "installation_load" | "credential_refresh" | null = null;
   try {
+    failureStage = "installation_load";
     const installation = await loadInstallation(
       service,
       input.data.workspaceId,
       input.data.installationId,
       "vercel",
     );
+    failureStage = "credential_refresh";
     const credentials = await getFreshProviderCredentials(service, installation);
+    failureStage = null;
     const result = await syncSelectedVercelProject({
       service,
       workspaceId: input.data.workspaceId,
@@ -91,6 +95,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       { headers: { "Cache-Control": "private, no-store" } },
     );
   } catch {
+    if (failureStage) {
+      console.error("Vercel deployment sync preparation failed.", {
+        stage: failureStage,
+        outcome: "error",
+      });
+    }
     return Response.json({ error: "deployment_sync_failed" }, { status: 503 });
   }
 }
