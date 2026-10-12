@@ -671,7 +671,9 @@ describe("offline customer impact evaluation", () => {
 
     expect(prompt).toContain("never copy provider-side affected entities");
     expect(prompt).toContain("If no usage area is recorded, return an empty affectedAreas array");
-    expect(IMPACT_PROMPT_VERSION).toBe("tenant-impact-v2");
+    expect(prompt).toContain("copy one complete excerpt verbatim");
+    expect(prompt).toContain("Do not paraphrase, normalize punctuation, or join fragments");
+    expect(IMPACT_PROMPT_VERSION).toBe("tenant-impact-v3");
   });
 
   it("rejects ungrounded evidence and inconsistent schema output", () => {
