@@ -1,6 +1,7 @@
 import "server-only";
 import { createHash, randomBytes } from "node:crypto";
 import { getEnvironment, isIntegrationConfigured } from "@/lib/env/schema";
+import type { VercelConfigurationDiagnostic } from "@/lib/deployments/vercel";
 import type {
   ConnectorCallbackOutcome,
   ConnectorCallbackReason,
@@ -42,6 +43,7 @@ export type ConnectorProviderAdapter = {
         outcome: ConnectorCallbackOutcome;
         reason?: ConnectorCallbackReason;
       }) => void;
+      onConfigurationDiagnostic?: (diagnostic: VercelConfigurationDiagnostic) => void;
     },
   ): Promise<OAuthGrant>;
   refreshCredentials?: (refreshToken: string) => Promise<ProviderCredentials>;
@@ -508,10 +510,14 @@ function baseAdapter(provider: Provider): ConnectorProviderAdapter {
         callback?.onStage?.({ stage: "configuration_normalization", outcome: "started" });
         let installation;
         try {
-          installation = normalizeVercelConfiguration(rawConfiguration, {
-            configurationId,
-            teamId: teamId ?? null,
-          });
+          installation = normalizeVercelConfiguration(
+            rawConfiguration,
+            {
+              configurationId,
+              teamId: teamId ?? null,
+            },
+            callback?.onConfigurationDiagnostic,
+          );
           callback?.onStage?.({ stage: "configuration_normalization", outcome: "succeeded" });
         } catch (error) {
           callback?.onStage?.({

@@ -180,6 +180,126 @@ describe("M15.7 deployment evidence", () => {
     ).toThrow();
   });
 
+  it("normalizes Vercel's documented permission-first string scopes and selected project IDs", () => {
+    const projectId = "prj_fENIbPMtNzudgAnLv4xsjqSOw8PK";
+    const teamId = "team_tM3JXep1ZWAuR2rAcvuTtXAf";
+    const source = {
+      id: "icfg_auterim",
+      status: "ready",
+      teamId,
+      projectSelection: "selected",
+      projects: [projectId],
+      scopes: [
+        "read:integration-configuration",
+        "read:project",
+        "read:deployment",
+        "read:domain",
+        "read:team",
+        "read:user",
+      ],
+    };
+    const diagnostics: Parameters<
+      NonNullable<Parameters<typeof normalizeVercelConfiguration>[2]>
+    >[0][] = [];
+    const config = normalizeVercelConfiguration(
+      source,
+      { configurationId: "icfg_auterim", teamId },
+      (diagnostic) => diagnostics.push(diagnostic),
+    );
+
+    expect(config.projects).toEqual([projectId]);
+    expect(config.teamId).toBe(teamId);
+    expect(config.scopes).toEqual([
+      "deployment:read",
+      "domain:read",
+      "integration-configuration:read",
+      "project:read",
+      "team:read",
+      "user:read",
+    ]);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      configurationIdMatches: true,
+      teamIdMatches: true,
+      status: "ready",
+      projectSelection: "selected",
+      projectCount: 1,
+      scopeCount: 6,
+      rejectionStage: null,
+      missingScopes: [],
+    });
+    expect(diagnostics[0]?.scopeShapes[0]).toEqual({
+      type: "string",
+      value: "read:integration-configuration",
+    });
+  });
+
+  it("rejects write, read/write, missing, unexpected, malformed, mismatched, and empty Vercel grants", () => {
+    const base = {
+      id: "icfg_auterim",
+      status: "ready",
+      teamId: "team_auterim",
+      projectSelection: "selected",
+      projects: ["prj_auterim"],
+      scopes: [
+        "read:integration-configuration",
+        "read:project",
+        "read:deployment",
+        "read:domain",
+        "read:team",
+        "read:user",
+      ],
+    };
+    const expected = { configurationId: "icfg_auterim", teamId: "team_auterim" };
+    const rejects = (value: unknown) =>
+      expect(() => normalizeVercelConfiguration(value, expected)).toThrow();
+
+    rejects({ ...base, scopes: [...base.scopes, "write:project"] });
+    rejects({ ...base, scopes: [...base.scopes, "read-write:deployment"] });
+    rejects({ ...base, scopes: base.scopes.filter((scope) => scope !== "read:deployment") });
+    rejects({ ...base, scopes: base.scopes.filter((scope) => scope !== "read:project") });
+    rejects({ ...base, scopes: [...base.scopes, "read:project-env-vars"] });
+    rejects({ ...base, scopes: [{ name: "project", accessLevel: "read", permission: "write" }] });
+    rejects({ ...base, teamId: "team_other" });
+    rejects({ ...base, projects: [] });
+    rejects({ ...base, projects: [{ id: "prj_auterim" }] });
+    rejects({ ...base, projectSelection: "all", projects: [] });
+    rejects({ ...base, scopes: [...base.scopes, "unrecognized-permission-shape"] });
+  });
+
+  it("reports the exact missing logical scope without logging credential-like scope values", () => {
+    const diagnostics: Parameters<
+      NonNullable<Parameters<typeof normalizeVercelConfiguration>[2]>
+    >[0][] = [];
+    const value = {
+      id: "icfg_auterim",
+      teamId: "team_auterim",
+      projectSelection: "selected",
+      projects: ["prj_auterim"],
+      scopes: [
+        "read:integration-configuration",
+        "read:project",
+        "read:domain",
+        "read:team",
+        "read:user",
+      ],
+    };
+    expect(() =>
+      normalizeVercelConfiguration(
+        value,
+        { configurationId: "icfg_auterim", teamId: "team_auterim" },
+        (diagnostic) => diagnostics.push(diagnostic),
+      ),
+    ).toThrow();
+    expect(diagnostics[0]).toMatchObject({
+      rejectionStage: "required_scope_missing",
+      missingScopes: ["deployment"],
+    });
+    expect(JSON.stringify(diagnostics)).not.toContain("icfg_auterim");
+    expect(JSON.stringify(diagnostics)).not.toContain("team_auterim");
+    expect(JSON.stringify(diagnostics)).not.toContain("prj_auterim");
+  });
+
   it("fails closed when project scope or required read permissions are absent", () => {
     expect(() =>
       normalizeVercelConfiguration(
