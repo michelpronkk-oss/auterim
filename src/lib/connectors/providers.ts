@@ -1,6 +1,11 @@
 import "server-only";
 import { createHash, randomBytes } from "node:crypto";
 import { getEnvironment, isIntegrationConfigured } from "@/lib/env/schema";
+import type {
+  ConnectorCallbackOutcome,
+  ConnectorCallbackReason,
+  ConnectorCallbackStage,
+} from "./callback-telemetry";
 import {
   ConnectorError,
   normalizeProviderFailure,
@@ -29,7 +34,15 @@ export type ConnectorProviderAdapter = {
   exchangeCode(
     code: string,
     codeVerifier?: string,
-    callback?: { configurationId?: string | null; teamId?: string | null },
+    callback?: {
+      configurationId?: string | null;
+      teamId?: string | null;
+      onStage?: (event: {
+        stage: ConnectorCallbackStage;
+        outcome: ConnectorCallbackOutcome;
+        reason?: ConnectorCallbackReason;
+      }) => void;
+    },
   ): Promise<OAuthGrant>;
   refreshCredentials?: (refreshToken: string) => Promise<ProviderCredentials>;
   revoke(accessToken: string): Promise<void>;
@@ -386,91 +399,187 @@ function baseAdapter(provider: Provider): ConnectorProviderAdapter {
       }
       if (provider === "vercel") {
         const configurationId = callback?.configurationId;
-        if (!configurationId || !/^[A-Za-z0-9_-]{1,200}$/.test(configurationId))
+        if (!configurationId || !/^[A-Za-z0-9_-]{1,200}$/.test(configurationId)) {
+          callback?.onStage?.({
+            stage: "token_exchange",
+            outcome: "failed",
+            reason: "authorization_failed",
+          });
           throw new ConnectorError(
             "INVALID_REQUEST",
             false,
             provider,
             "Vercel authorization response was incomplete.",
           );
-        body = await providerFetch<Record<string, unknown>>(
-          provider,
-          "https://api.vercel.com/v2/oauth/access_token",
-          {
-            method: "POST",
-            headers: { "content-type": "application/x-www-form-urlencoded" },
-            body: form({
-              client_id: current.clientId,
-              client_secret: current.clientSecret,
-              code,
-              redirect_uri: current.redirectUri,
-            }),
-          },
-        );
+        }
+        callback?.onStage?.({ stage: "token_exchange", outcome: "started" });
+        try {
+          body = await providerFetch<Record<string, unknown>>(
+            provider,
+            "https://api.vercel.com/v2/oauth/access_token",
+            {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: form({
+                client_id: current.clientId,
+                client_secret: current.clientSecret,
+                code,
+                redirect_uri: current.redirectUri,
+              }),
+            },
+          );
+        } catch (error) {
+          callback?.onStage?.({
+            stage: "token_exchange",
+            outcome: "failed",
+            reason:
+              error instanceof ConnectorError && error.category === "PROVIDER_UNAVAILABLE"
+                ? "provider_unavailable"
+                : error instanceof ConnectorError && error.category === "PERMISSION_MISSING"
+                  ? "permission_missing"
+                  : "authorization_failed",
+          });
+          throw error;
+        }
         const token =
           typeof body.access_token === "string"
             ? body.access_token
             : typeof body.token === "string"
               ? body.token
               : "";
-        if (!token)
+        if (!token) {
+          callback?.onStage?.({
+            stage: "token_exchange",
+            outcome: "failed",
+            reason: "authorization_failed",
+          });
           throw new ConnectorError(
             "AUTH_REQUIRED",
             false,
             provider,
             "Vercel authorization failed.",
           );
+        }
+        callback?.onStage?.({ stage: "token_exchange", outcome: "succeeded" });
         const teamId = typeof body.team_id === "string" ? body.team_id : callback.teamId;
-        if (teamId && callback.teamId && teamId !== callback.teamId)
+        if (teamId && callback.teamId && teamId !== callback.teamId) {
+          callback?.onStage?.({
+            stage: "identity_verification",
+            outcome: "failed",
+            reason: "identity_mismatch",
+          });
           throw new ConnectorError(
             "INVALID_REQUEST",
             false,
             provider,
             "Vercel team identity did not match the authorization response.",
           );
+        }
         const { normalizeVercelConfiguration } = await import("@/lib/deployments/vercel");
         const configUrl = new URL(
           `https://api.vercel.com/v1/integrations/configuration/${encodeURIComponent(configurationId)}`,
         );
         if (teamId) configUrl.searchParams.set("teamId", teamId);
-        const rawConfiguration = await providerFetch<unknown>(
-          provider,
-          configUrl.toString(),
-          {
-            headers: { authorization: `Bearer ${token}` },
-          },
-          64 * 1024,
-        );
-        const installation = normalizeVercelConfiguration(rawConfiguration, {
-          configurationId,
-          teamId: teamId ?? null,
-        });
+        callback?.onStage?.({ stage: "configuration_fetch", outcome: "started" });
+        let rawConfiguration: unknown;
+        try {
+          rawConfiguration = await providerFetch<unknown>(
+            provider,
+            configUrl.toString(),
+            {
+              headers: { authorization: `Bearer ${token}` },
+            },
+            64 * 1024,
+          );
+          callback?.onStage?.({ stage: "configuration_fetch", outcome: "succeeded" });
+        } catch (error) {
+          callback?.onStage?.({
+            stage: "configuration_fetch",
+            outcome: "failed",
+            reason:
+              error instanceof ConnectorError && error.category === "PERMISSION_MISSING"
+                ? "permission_missing"
+                : error instanceof ConnectorError && error.category === "PROVIDER_UNAVAILABLE"
+                  ? "provider_unavailable"
+                  : "authorization_failed",
+          });
+          throw error;
+        }
+        callback?.onStage?.({ stage: "configuration_normalization", outcome: "started" });
+        let installation;
+        try {
+          installation = normalizeVercelConfiguration(rawConfiguration, {
+            configurationId,
+            teamId: teamId ?? null,
+          });
+          callback?.onStage?.({ stage: "configuration_normalization", outcome: "succeeded" });
+        } catch (error) {
+          callback?.onStage?.({
+            stage: "configuration_normalization",
+            outcome: "failed",
+            reason:
+              error instanceof ConnectorError && error.category === "INVALID_REQUEST"
+                ? "identity_mismatch"
+                : error instanceof ConnectorError && error.category === "PERMISSION_MISSING"
+                  ? "permission_missing"
+                  : "provider_response_invalid",
+          });
+          throw error;
+        }
         const identityScope = teamId ? "team:read" : "user:read";
-        if (!installation.scopes.includes(identityScope))
+        if (!installation.scopes.includes(identityScope)) {
+          callback?.onStage?.({
+            stage: "identity_verification",
+            outcome: "failed",
+            reason: "permission_missing",
+          });
           throw new ConnectorError(
             "PERMISSION_MISSING",
             false,
             provider,
             "The Vercel installation is missing account identity read permission.",
           );
+        }
         const identityUrl = teamId
           ? `https://api.vercel.com/v2/teams/${encodeURIComponent(teamId)}`
           : "https://api.vercel.com/v2/user";
-        const identity = await providerFetch<Record<string, unknown>>(provider, identityUrl, {
-          headers: { authorization: `Bearer ${token}` },
-        });
+        callback?.onStage?.({ stage: "identity_verification", outcome: "started" });
+        let identity: Record<string, unknown>;
+        try {
+          identity = await providerFetch<Record<string, unknown>>(provider, identityUrl, {
+            headers: { authorization: `Bearer ${token}` },
+          });
+        } catch (error) {
+          callback?.onStage?.({
+            stage: "identity_verification",
+            outcome: "failed",
+            reason:
+              error instanceof ConnectorError && error.category === "PERMISSION_MISSING"
+                ? "permission_missing"
+                : error instanceof ConnectorError && error.category === "PROVIDER_UNAVAILABLE"
+                  ? "provider_unavailable"
+                  : "authorization_failed",
+          });
+          throw error;
+        }
         const identityUser =
           identity.user && typeof identity.user === "object"
             ? (identity.user as Record<string, unknown>)
             : identity;
         const accountId = teamId ?? (typeof identityUser.id === "string" ? identityUser.id : "");
-        if (teamId && identity.id !== teamId)
+        if (teamId && identity.id !== teamId) {
+          callback?.onStage?.({
+            stage: "identity_verification",
+            outcome: "failed",
+            reason: "identity_mismatch",
+          });
           throw new ConnectorError(
             "INVALID_REQUEST",
             false,
             provider,
             "Vercel team identity could not be verified.",
           );
+        }
         const configurationOwnerId =
           typeof rawConfiguration === "object" && rawConfiguration !== null
             ? (() => {
@@ -486,13 +595,19 @@ function baseAdapter(provider: Provider): ConnectorProviderAdapter {
                     : null;
               })()
             : null;
-        if (!teamId && configurationOwnerId && identityUser.id !== configurationOwnerId)
+        if (!teamId && configurationOwnerId && identityUser.id !== configurationOwnerId) {
+          callback?.onStage?.({
+            stage: "identity_verification",
+            outcome: "failed",
+            reason: "identity_mismatch",
+          });
           throw new ConnectorError(
             "INVALID_REQUEST",
             false,
             provider,
             "Vercel account identity could not be verified.",
           );
+        }
         const accountName = teamId
           ? typeof identity.name === "string"
             ? identity.name
@@ -500,13 +615,20 @@ function baseAdapter(provider: Provider): ConnectorProviderAdapter {
           : typeof identityUser.username === "string"
             ? identityUser.username
             : "Vercel Account";
-        if (!accountId)
+        if (!accountId) {
+          callback?.onStage?.({
+            stage: "identity_verification",
+            outcome: "failed",
+            reason: "authorization_failed",
+          });
           throw new ConnectorError(
             "AUTH_REQUIRED",
             false,
             provider,
             "Vercel account identity could not be verified.",
           );
+        }
+        callback?.onStage?.({ stage: "identity_verification", outcome: "succeeded" });
         const tokens: ProviderCredentials = {
           accessToken: token,
           refreshToken: null,
