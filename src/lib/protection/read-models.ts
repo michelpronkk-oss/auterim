@@ -89,7 +89,7 @@ export async function getDependenciesOverview(
       ? client
           .from("impact_assessments")
           .select(
-            "id,workspace_dependency_id,relevant,severity,status,assessed_at,source_change_classification_id",
+            "id,workspace_dependency_id,relevant,severity,status,assessed_at,source_change_classification_id,evaluation_mode",
           )
           .eq("workspace_id", workspaceId)
           .in("workspace_dependency_id", workspaceDependencyIds)
@@ -205,6 +205,7 @@ export async function getDependenciesOverview(
             severity: latestImpact.severity,
             relevant: latestImpact.relevant,
             assessedAt: latestImpact.assessed_at,
+            evaluationMode: latestImpact.evaluation_mode,
           }
         : null,
       lastCheckedAt: lastChecked?.finished_at ?? null,
@@ -234,7 +235,7 @@ export async function getChangesOverview(
   let query = client
     .from("impact_assessments")
     .select(
-      "id,workspace_dependency_id,source_change_classification_id,relevant,severity,impact_summary,why_it_matters,recommended_action,action_required,confidence,assessed_at,created_at,status,workspace_dependencies!inner(dependency_id,monitoring_enabled,dependency_catalog(name,category),dependency_context(criticality,production_critical))",
+      "id,workspace_dependency_id,source_change_classification_id,relevant,severity,impact_summary,why_it_matters,recommended_action,action_required,confidence,assessed_at,created_at,status,evaluation_mode,workspace_dependencies!inner(dependency_id,monitoring_enabled,dependency_catalog(name,category),dependency_context(criticality,production_critical))",
     )
     .eq("workspace_id", workspaceId)
     .eq("status", "assessed")
@@ -326,7 +327,12 @@ export async function getChangesOverview(
       !currentClassificationIds.has(classification.id)
     )
       continue;
-    if (activation.data?.activated_at && change.created_at < activation.data.activated_at) continue;
+    if (
+      row.evaluation_mode !== "baseline" &&
+      activation.data?.activated_at &&
+      change.created_at < activation.data.activated_at
+    )
+      continue;
     const key = `${row.workspace_dependency_id}:${classification.change_id}`;
     if (!latestByDependencyChange.has(key)) latestByDependencyChange.set(key, row);
   }
@@ -370,6 +376,7 @@ export async function getChangesOverview(
       const sourceChange = classification ? changeById.get(classification.change_id) : undefined;
       return {
         id: row.id,
+        evaluationMode: row.evaluation_mode,
         dependency: row.workspace_dependencies,
         source: sourceChange ? (sourceById.get(sourceChange.source_id) ?? null) : null,
         change: classification

@@ -407,6 +407,15 @@ const vercelAuthorizationRpcMigration = await readFile(
   ),
   "utf8",
 );
+const baselineImpactAssessmentMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261125000000_m157_baseline_impact_assessments.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase(
   applyCompanySurfaceMigration = true,
@@ -484,6 +493,7 @@ async function makeDatabase(
     await db.exec(deploymentGrantHardeningMigration);
     await db.exec(vercelAuthorizationRpcMigration);
   }
+  await db.exec(baselineImpactAssessmentMigration);
   return db;
 }
 
@@ -3936,6 +3946,320 @@ describe("Auterim migration and monitoring transaction", () => {
     await db.exec("reset role");
     await db.exec("set role anon");
     await expect(db.query("select * from public.impact_assessments")).rejects.toBeTruthy();
+    await db.exec("reset role");
+  });
+
+  it("queues a bounded explicit historical baseline without changing live eligibility or notifying as new", async () => {
+    await db.exec("reset role");
+    const ownerId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaa001";
+    const outsiderId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbb002";
+    const workspaceId = "cccccccc-cccc-4ccc-8ccc-cccccccc0003";
+    let productId = "dddddddd-dddd-4ddd-8ddd-dddddddd0004";
+    await db.query("insert into auth.users(id) values ($1),($2)", [ownerId, outsiderId]);
+    await db.query(
+      "insert into public.workspaces(id,name,created_by) values ($1,'Baseline QA',$2)",
+      [workspaceId, ownerId],
+    );
+    await db.query(
+      "insert into public.workspace_members(workspace_id,user_id,role) values ($1,$2,'owner')",
+      [workspaceId, ownerId],
+    );
+    await db.query(
+      `insert into public.workspace_subscriptions(workspace_id,plan,status,current_period_start,current_period_end)
+       values ($1,'pro','active',now(),now()+interval '30 days')`,
+      [workspaceId],
+    );
+    const defaultProduct = await db.query<{ id: string }>(
+      "select id from public.workspace_products where workspace_id=$1 and is_default",
+      [workspaceId],
+    );
+    if (defaultProduct.rows[0]) {
+      productId = defaultProduct.rows[0].id;
+      await db.query(
+        "update public.workspace_products set status='protected',protected_at=now() where id=$1",
+        [productId],
+      );
+    } else {
+      await db.query(
+        `insert into public.workspace_products(id,workspace_id,name,slug,status,is_default,protected_at,created_by)
+         values ($1,$2,'Baseline Product','baseline-product','protected',true,now(),$3)`,
+        [productId, workspaceId, ownerId],
+      );
+    }
+
+    await db.exec("set role service_role");
+    const unique = Date.now().toString();
+    let content = "baseline-a";
+    const fixtureFetcher = async () => ({
+      status: 200,
+      body: Buffer.from(content),
+      contentType: "application/json",
+      etag: null,
+      lastModified: null,
+      finalUrl: "https://fixture.invalid/baseline",
+    });
+    const runScan = (triggerRunId: string) =>
+      scanSource(
+        { sourceId, triggerRunId, attemptNumber: 1 },
+        { repository, fetcher: fixtureFetcher as never, enqueueClassifier: async () => undefined },
+      );
+    await runScan(`m157-baseline-${unique}-a`);
+    content = "baseline-b";
+    const changed = await runScan(`m157-baseline-${unique}-b`);
+    expect(changed.status).toBe("changed");
+    expect(changed.changeId).toBeTruthy();
+    await db.exec("reset role");
+    await db.exec("alter table public.source_changes disable trigger source_changes_immutable");
+    await db.query(
+      "update public.source_changes set created_at=now()-interval '1 day' where id=$1",
+      [changed.changeId],
+    );
+    await db.exec("alter table public.source_changes enable trigger source_changes_immutable");
+    await db.exec("set role service_role");
+    const sourceChangeTime = await db.query<{ created_at: string }>(
+      "select created_at from public.source_changes where id=$1",
+      [changed.changeId],
+    );
+
+    const dependency = await db.query<{ dependency_id: string }>(
+      "select dependency_id from public.source_catalog where id=$1",
+      [sourceId],
+    );
+    const workspaceDependency = await db.query<{ id: string }>(
+      `insert into public.workspace_dependencies(
+         workspace_id,protected_product_id,dependency_id,selected_by,origin,monitoring_enabled,protection_started_at
+       ) values ($1,$2,$3,$4,'manual',true,now()) returning id`,
+      [workspaceId, productId, dependency.rows[0]!.dependency_id, ownerId],
+    );
+    const classificationStart = await db.query<{ value: Record<string, unknown> }>(
+      "select public.begin_source_change_classification($1,'m157-baseline-classify',1,'semantic-v1',1,'materiality-v1','openai') as value",
+      [changed.changeId],
+    );
+    const fingerprint = classificationStart.rows[0]!.value.evidenceFingerprint;
+    await db.query(
+      `select public.record_source_change_classification(
+        $1,'semantic-v1',$2,'m157-baseline-classify',1,'openai','fixture/model',1,'materiality-v1',true,
+        'api_change','["/v2"]'::jsonb,'high',0.91,'The documented API contract changed.',
+        '[{"type":"added","excerpt":"The API contract changed."}]'::jsonb,
+        'The source records a material API change.','classified',null,null,1
+      )`,
+      [changed.changeId, fingerprint],
+    );
+    const classified = await db.query<{ id: string }>(
+      "select id from public.source_change_classifications where change_id=$1 and status='classified' order by created_at desc,id desc limit 1",
+      [changed.changeId],
+    );
+    const before = await db.query<{ count: number }>(
+      "select count(*)::int as count from public.customer_impact_dispatch_queue where workspace_dependency_id=$1",
+      [workspaceDependency.rows[0]!.id],
+    );
+    expect(before.rows[0]!.count).toBe(0);
+
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [outsiderId]);
+    await db.exec("set role authenticated");
+    await expect(
+      db.query("select public.request_product_dependency_baseline_assessment($1,$2,$3)", [
+        workspaceId,
+        productId,
+        workspaceDependency.rows[0]!.id,
+      ]),
+    ).rejects.toBeTruthy();
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [ownerId]);
+    const requested = await db.query<{ value: Record<string, unknown> }>(
+      "select public.request_product_dependency_baseline_assessment($1,$2,$3) as value",
+      [workspaceId, productId, workspaceDependency.rows[0]!.id],
+    );
+    expect(requested.rows[0]!.value).toMatchObject({
+      evaluationMode: "baseline",
+      lookbackDays: 30,
+    });
+    const eligibleCount = Number(requested.rows[0]!.value.eligibleClassifications);
+    expect(eligibleCount).toBeGreaterThan(0);
+    expect(requested.rows[0]!.value.newlyQueued).toBe(eligibleCount);
+    const replay = await db.query<{ value: Record<string, unknown> }>(
+      "select public.request_product_dependency_baseline_assessment($1,$2,$3) as value",
+      [workspaceId, productId, workspaceDependency.rows[0]!.id],
+    );
+    expect(replay.rows[0]!.value).toMatchObject({
+      eligibleClassifications: eligibleCount,
+      newlyQueued: 0,
+    });
+    await expect(
+      db.query(
+        `insert into public.customer_impact_dispatch_queue(
+          workspace_id,workspace_dependency_id,source_change_classification_id,context_revision,evaluation_mode
+        ) values ($1,$2,$3,0,'baseline')`,
+        [workspaceId, workspaceDependency.rows[0]!.id, classified.rows[0]!.id],
+      ),
+    ).rejects.toBeTruthy();
+    await db.exec("reset role");
+
+    await db.exec("set role service_role");
+    const queued = await db.query<{
+      queue_id: string;
+      workspace_dependency_id: string;
+      source_change_classification_id: string;
+      evaluation_mode: string;
+    }>("select * from public.list_customer_impact_dispatch_queue($1,100)", [changed.changeId]);
+    const targetQueue = queued.rows.find(
+      (row) => row.workspace_dependency_id === workspaceDependency.rows[0]!.id,
+    );
+    expect(targetQueue?.evaluation_mode).toBe("baseline");
+    const packet = await db.query<{ value: Record<string, unknown> }>(
+      "select public.load_customer_impact_packet_for_mode($1,$2,'baseline') as value",
+      [workspaceDependency.rows[0]!.id, targetQueue!.source_change_classification_id],
+    );
+    expect(packet.rows[0]!.value.evaluationMode).toBe("baseline");
+    await expect(
+      db.query("select public.load_customer_impact_packet_for_mode($1,$2,'live')", [
+        workspaceDependency.rows[0]!.id,
+        targetQueue!.source_change_classification_id,
+      ]),
+    ).rejects.toBeTruthy();
+    const started = await db.query<{ value: Record<string, unknown> }>(
+      `select public.begin_customer_impact_assessment_for_mode(
+        $1,$2,repeat('f',64),'customer-impact-v1',1,'tenant-impact-v1','openai','m157-baseline-impact',1,'baseline'
+      ) as value`,
+      [workspaceDependency.rows[0]!.id, targetQueue!.source_change_classification_id],
+    );
+    const assessmentId = started.rows[0]!.value.id;
+    await db.query(
+      `select public.record_customer_impact_assessment(
+        $1,'m157-baseline-impact',1,'openai','fixture/model',true,'low','low',
+        '["verification"]'::jsonb,'Historical API change may affect verification.',
+        'The dependency context links the API to verification.',false,null,0.84,
+        '[]'::jsonb,'[{"source":"global_evidence","excerpt":"The API contract changed."},{"source":"dependency_context","excerpt":"verification"}]'::jsonb,10,5,1
+      )`,
+      [assessmentId],
+    );
+    const stored = await db.query<{
+      evaluation_mode: string;
+      status: string;
+      assessed_at: string;
+    }>("select evaluation_mode,status,assessed_at from public.impact_assessments where id=$1", [
+      assessmentId,
+    ]);
+    expect(stored.rows[0]).toMatchObject({ evaluation_mode: "baseline", status: "assessed" });
+    expect(Date.parse(stored.rows[0]!.assessed_at)).toBeGreaterThan(
+      Date.parse(sourceChangeTime.rows[0]!.created_at),
+    );
+    const preservedSourceChange = await db.query<{ created_at: string }>(
+      "select created_at from public.source_changes where id=$1",
+      [changed.changeId],
+    );
+    expect(Date.parse(preservedSourceChange.rows[0]!.created_at)).toBe(
+      Date.parse(sourceChangeTime.rows[0]!.created_at),
+    );
+    const notifications = await db.query<{ count: number }>(
+      "select count(*)::int as count from public.notifications where workspace_id=$1",
+      [workspaceId],
+    );
+    expect(notifications.rows[0]!.count).toBe(0);
+    await db.exec("reset role");
+
+    const classifyChange = async (
+      changeId: string,
+      runId: string,
+      material: boolean,
+      decisionStatus: "classified" | "review_required",
+    ) => {
+      const start = await db.query<{ value: Record<string, unknown> }>(
+        "select public.begin_source_change_classification($1,$2,1,'semantic-v1',1,'materiality-v1','openai') as value",
+        [changeId, `${runId}-start`],
+      );
+      await db.query(
+        `select public.record_source_change_classification(
+          $1,'semantic-v1',$2,$3,1,'openai','fixture/model',1,'materiality-v1',$4,
+          'api_change','["/v3"]'::jsonb,'high',0.91,'A separate source fixture change.',
+          '[{"type":"added","excerpt":"A separate source fixture change."}]'::jsonb,
+          'The source describes the fixture change.',$5,null,null,1
+        )`,
+        [
+          changeId,
+          start.rows[0]!.value.evidenceFingerprint,
+          `${runId}-start`,
+          material,
+          decisionStatus,
+        ],
+      );
+      const row = await db.query<{ id: string }>(
+        "select id from public.source_change_classifications where change_id=$1 and status='classified' order by created_at desc,id desc limit 1",
+        [changeId],
+      );
+      return row.rows[0]!.id;
+    };
+    const createFixtureChange = async (
+      nextContent: string,
+      runId: string,
+      age: "2 days" | "31 days",
+      material: boolean,
+      decisionStatus: "classified" | "review_required",
+    ) => {
+      content = nextContent;
+      await db.exec("set role service_role");
+      const outcome = await runScan(runId);
+      expect(outcome.status).toBe("changed");
+      await db.exec("reset role");
+      await db.exec("alter table public.source_changes disable trigger source_changes_immutable");
+      await db.query("update public.source_changes set created_at=now()-$2::interval where id=$1", [
+        outcome.changeId,
+        age,
+      ]);
+      await db.exec("alter table public.source_changes enable trigger source_changes_immutable");
+      await db.exec("set role service_role");
+      return classifyChange(outcome.changeId!, runId, material, decisionStatus);
+    };
+
+    const outsideWindow = await createFixtureChange(
+      "baseline-c",
+      `m157-baseline-${unique}-c`,
+      "31 days",
+      true,
+      "classified",
+    );
+    const nonMaterial = await createFixtureChange(
+      "baseline-d",
+      `m157-baseline-${unique}-d`,
+      "2 days",
+      false,
+      "classified",
+    );
+    const reviewRequired = await createFixtureChange(
+      "baseline-e",
+      `m157-baseline-${unique}-e`,
+      "2 days",
+      true,
+      "review_required",
+    );
+    for (const classificationId of [outsideWindow, nonMaterial, reviewRequired]) {
+      const eligibility = await db.query<{ eligible: boolean }>(
+        "select private.customer_impact_input_is_eligible($1,$2,'baseline') as eligible",
+        [workspaceDependency.rows[0]!.id, classificationId],
+      );
+      expect(eligibility.rows[0]!.eligible).toBe(false);
+    }
+
+    await db.exec("reset role");
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [ownerId]);
+    await db.exec("set role authenticated");
+    await db.query("select public.disable_workspace_dependency($1,$2)", [
+      workspaceId,
+      workspaceDependency.rows[0]!.id,
+    ]);
+    await expect(
+      db.query("select public.request_product_dependency_baseline_assessment($1,$2,$3)", [
+        workspaceId,
+        productId,
+        workspaceDependency.rows[0]!.id,
+      ]),
+    ).rejects.toBeTruthy();
+    await db.exec("reset role");
+    await db.exec("set role service_role");
+    const disabledEligibility = await db.query<{ eligible: boolean }>(
+      "select private.customer_impact_input_is_eligible($1,$2,'baseline') as eligible",
+      [workspaceDependency.rows[0]!.id, classified.rows[0]!.id],
+    );
+    expect(disabledEligibility.rows[0]!.eligible).toBe(false);
     await db.exec("reset role");
   });
 

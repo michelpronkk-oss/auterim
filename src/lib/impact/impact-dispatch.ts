@@ -3,6 +3,7 @@ export type CustomerImpactQueueItem = {
   workspace_dependency_id: string;
   source_change_classification_id: string;
   context_revision: number;
+  evaluation_mode: "live" | "baseline";
 };
 
 export async function dispatchCustomerImpactQueueBatch(input: {

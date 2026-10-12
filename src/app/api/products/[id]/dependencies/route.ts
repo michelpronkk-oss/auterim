@@ -21,6 +21,13 @@ const operationSchema = z.discriminatedUnion("action", [
       decision: z.enum(["confirmed", "rejected"]),
     })
     .strict(),
+  z
+    .object({
+      action: z.literal("baseline_assessment"),
+      workspaceId: z.string().uuid(),
+      workspaceDependencyId: z.string().uuid(),
+    })
+    .strict(),
 ]);
 
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
@@ -58,18 +65,24 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   try {
     const input = operationSchema.parse(await parseJsonBody(request));
     const operation =
-      input.action === "decision"
-        ? await auth.client.rpc("decide_product_dependency_candidate", {
+      input.action === "baseline_assessment"
+        ? await auth.client.rpc("request_product_dependency_baseline_assessment", {
             p_workspace_id: input.workspaceId,
             p_product_id: productId.data,
-            p_candidate_id: input.candidateId,
-            p_decision: input.decision,
+            p_workspace_dependency_id: input.workspaceDependencyId,
           })
-        : await auth.client.rpc("add_product_dependency_manually", {
-            p_workspace_id: input.workspaceId,
-            p_product_id: productId.data,
-            p_dependency_slug: input.dependencySlug,
-          });
+        : input.action === "decision"
+          ? await auth.client.rpc("decide_product_dependency_candidate", {
+              p_workspace_id: input.workspaceId,
+              p_product_id: productId.data,
+              p_candidate_id: input.candidateId,
+              p_decision: input.decision,
+            })
+          : await auth.client.rpc("add_product_dependency_manually", {
+              p_workspace_id: input.workspaceId,
+              p_product_id: productId.data,
+              p_dependency_slug: input.dependencySlug,
+            });
     if (operation.error) return onboardingError(operation.error);
     return Response.json(operation.data);
   } catch (error) {

@@ -54,6 +54,7 @@ type ImpactRow = {
   relevant: boolean;
   severity: string;
   assessed_at: string;
+  evaluation_mode: "live" | "baseline";
 };
 type ClassificationRow = { id: string; material: boolean; status: string; change_id: string };
 type RunRow = {
@@ -322,7 +323,7 @@ export async function getProductProtectionGraph(
       ? client
           .from("impact_assessments")
           .select(
-            "id,workspace_dependency_id,source_change_classification_id,relevant,severity,assessed_at",
+            "id,workspace_dependency_id,source_change_classification_id,relevant,severity,assessed_at,evaluation_mode",
           )
           .eq("workspace_id", workspaceId)
           .in("workspace_dependency_id", dependencyIds)
@@ -535,6 +536,7 @@ export async function getProductProtectionGraph(
             relevant: latestImpact.relevant,
             severity: latestImpact.severity,
             assessedAt: latestImpact.assessed_at,
+            evaluationMode: latestImpact.evaluation_mode,
             classification: classification
               ? {
                   id: classification.id,

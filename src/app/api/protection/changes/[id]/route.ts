@@ -17,7 +17,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
   const { data: impact, error } = await auth.client
     .from("impact_assessments")
     .select(
-      "id,workspace_dependency_id,source_change_classification_id,relevant,severity,impact_summary,why_it_matters,recommended_action,action_required,confidence,assessed_at,status,workspace_dependencies!inner(workspace_id,dependency_id,monitoring_enabled,dependency_catalog(name,slug,category),dependency_context(criticality,production_critical,used_for))",
+      "id,workspace_dependency_id,source_change_classification_id,relevant,severity,impact_summary,why_it_matters,recommended_action,action_required,confidence,assessed_at,status,evaluation_mode,workspace_dependencies!inner(workspace_id,dependency_id,monitoring_enabled,dependency_catalog(name,slug,category),dependency_context(criticality,production_critical,used_for))",
     )
     .eq("id", id)
     .eq("workspace_id", workspaceId.data)
@@ -67,6 +67,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
   return Response.json({
     item: {
       id: impact.id,
+      evaluationMode: impact.evaluation_mode,
       dependency,
       source: source.data,
       change: classification.data
