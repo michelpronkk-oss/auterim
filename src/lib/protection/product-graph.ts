@@ -9,6 +9,7 @@ import {
 } from "@/lib/protection/read-model-helpers";
 import { getProductRepositoryProtection } from "@/lib/repositories/product-protection-read-model";
 import { ProductProtectionReadError } from "@/lib/protection/read-stage";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 const MAX_DEPENDENCIES = 50;
 const MAX_SOURCES = 500;
@@ -100,6 +101,24 @@ type CliObservationRow = {
   workspace_dependency_id: string | null;
   dependency_catalog: { name: string; slug: string } | Array<{ name: string; slug: string }> | null;
 };
+
+/**
+ * Classifications are global source evidence and intentionally have no
+ * authenticated Data API grant. Call only with IDs from workspace-filtered
+ * impact rows; keep the privileged read limited to those IDs and safe fields.
+ */
+export async function readProductProtectionClassifications(
+  classificationIds: readonly string[],
+): Promise<ClassificationRow[]> {
+  if (classificationIds.length === 0) return [];
+
+  const { data, error } = await createSupabaseServerClient()
+    .from("source_change_classifications")
+    .select("id,material,status,change_id")
+    .in("id", [...classificationIds]);
+  if (error) throw new ProductProtectionReadError("classifications");
+  return (data ?? []) as ClassificationRow[];
+}
 
 export function cliScanComparisonState(input: {
   latest: { status: string; observationCount: number } | null;
@@ -348,19 +367,14 @@ export async function getProductProtectionGraph(
     ...new Set(impacts.map((impact) => impact.source_change_classification_id)),
   ];
 
-  const [observationResult, classificationResult, mappingResult] = await Promise.all([
+  const [observationResult, classifications, mappingResult] = await Promise.all([
     sourceIds.length
       ? client.rpc("get_product_source_observation_states", {
           p_workspace_id: workspaceId,
           p_source_ids: sourceIds,
         })
       : Promise.resolve({ data: [], error: null, count: 0 }),
-    classificationIds.length
-      ? client
-          .from("source_change_classifications")
-          .select("id,material,status,change_id")
-          .in("id", classificationIds)
-      : Promise.resolve({ data: [], error: null }),
+    readProductProtectionClassifications(classificationIds),
     repositoryIds.length
       ? client
           .from("workspace_product_repositories")
@@ -370,12 +384,10 @@ export async function getProductProtectionGraph(
       : Promise.resolve({ data: [], error: null }),
   ]);
   if (observationResult.error) throw new ProductProtectionReadError("source_observations");
-  if (classificationResult.error) throw new ProductProtectionReadError("classifications");
   if (mappingResult.error) throw new ProductProtectionReadError("repository_mappings");
 
   const observations = (observationResult.data ?? []) as ObservationRow[];
   const observationsBySource = new Map(observations.map((item) => [item.source_id, item]));
-  const classifications = (classificationResult.data ?? []) as ClassificationRow[];
   const mappings = mappingResult.data ?? [];
   const mappingsByRepository = new Map<string, typeof mappings>();
   for (const mapping of mappings) {
