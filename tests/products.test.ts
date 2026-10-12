@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 const migrationNames = [
   "20261002232050_auterim_monitoring_foundation.sql",
@@ -98,8 +98,9 @@ async function newWorkspace(db: PGlite, slug: string, plan: "core" | "pro" | "bu
 }
 
 describe("protected product entitlement foundation", () => {
-  afterAll(async () => {
-    await Promise.all(dbs.map((db) => db.close()));
+  afterEach(async () => {
+    const completedDatabases = dbs.splice(0);
+    await Promise.all(completedDatabases.map((db) => db.close()));
   });
 
   it("backfills a default product and surface without changing dependency identity", async () => {
