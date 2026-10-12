@@ -416,6 +416,12 @@ const baselineImpactAssessmentMigration = await readFile(
   ),
   "utf8",
 );
+const baselinePreflightMigration = await readFile(
+  fileURLToPath(
+    new URL("../supabase/migrations/20261126000000_m157_baseline_preflight.sql", import.meta.url),
+  ),
+  "utf8",
+);
 
 async function makeDatabase(
   applyCompanySurfaceMigration = true,
@@ -494,6 +500,7 @@ async function makeDatabase(
     await db.exec(vercelAuthorizationRpcMigration);
   }
   await db.exec(baselineImpactAssessmentMigration);
+  if (applyProductRepositoryProtectionMigration) await db.exec(baselinePreflightMigration);
   return db;
 }
 
@@ -5234,6 +5241,221 @@ describe("M15.7 deployment migration", () => {
     expect(crossTenant.rows).toHaveLength(0);
     await db.exec("reset role; set role anon");
     await expect(db.query("select * from public.deployment_surfaces")).rejects.toThrow();
+    await db.close();
+  });
+});
+
+describe("M15.7 baseline Preflight migration", () => {
+  it("persists exact protected repository baseline evidence idempotently without synthetic impact", async () => {
+    const db = await makeDatabase();
+    const ownerId = "b1000000-0000-4000-8000-000000000001";
+    const repositoryId = "b3000000-0000-4000-8000-000000000001";
+    const commitSha = "a".repeat(40);
+    await db.query("insert into auth.users(id,email) values($1,'baseline@example.test')", [
+      ownerId,
+    ]);
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [ownerId]);
+    await db.exec("set role authenticated");
+    await db.query("select public.create_workspace('Baseline Preflight QA')");
+    await db.exec("reset role; set role service_role");
+    const workspace = await db.query<{ id: string }>(
+      "select id from public.workspaces where created_by=$1",
+      [ownerId],
+    );
+    const createdWorkspaceId = workspace.rows[0]!.id;
+    const product = await db.query<{ id: string }>(
+      "select id from public.workspace_products where workspace_id=$1 and is_default",
+      [createdWorkspaceId],
+    );
+    const productId = product.rows[0]!.id;
+    const otherProduct = await db.query<{ id: string }>(
+      `insert into public.workspace_products(workspace_id,name,slug,status,created_by)
+       values($1,'Unprotected QA','unprotected-qa','draft',$2) returning id`,
+      [createdWorkspaceId, ownerId],
+    );
+    await db.query(
+      "update public.workspace_products set status='protected',protected_at=now() where id=$1",
+      [productId],
+    );
+    const connection = await db.query<{ id: string }>(
+      `insert into public.repository_connections(workspace_id,installation_id,account_login,connected_by)
+       values($1,9901,'auterim',$2) returning id`,
+      [createdWorkspaceId, ownerId],
+    );
+    const unprotectedRepositoryId = "b3000000-0000-4000-8000-000000000002";
+    await db.query(
+      `insert into public.repositories(id,workspace_id,connection_id,external_id,owner,name,default_branch,selected_for_protection)
+       values($1,$2,$3,9902,'michelpronkk-oss','auterim','main',true),
+             ($4,$2,$3,9903,'michelpronkk-oss','unprotected','main',false)`,
+      [repositoryId, createdWorkspaceId, connection.rows[0]!.id, unprotectedRepositoryId],
+    );
+    await db.query(
+      `insert into public.workspace_product_repositories(workspace_id,protected_product_id,repository_id,status,provenance,created_by)
+       values($1,$2,$3,'active','user_selected',$4)`,
+      [createdWorkspaceId, productId, repositoryId, ownerId],
+    );
+
+    const fingerprint = "c".repeat(64);
+    const persist = (actorId: string, targetWorkspaceId = createdWorkspaceId) =>
+      db.query<{
+        preflight_run_id: string;
+        baseline_evidence_id: string;
+        created: boolean;
+        observed_at: string;
+      }>(
+        `select * from public.persist_baseline_preflight(
+          $1,$2,$3,$4,9902,'michelpronkk-oss','auterim','main',$5,$6,'baseline-v1'
+        )`,
+        [actorId, targetWorkspaceId, productId, repositoryId, commitSha, fingerprint],
+      );
+
+    const first = (await persist(ownerId)).rows[0]!;
+    expect(first.created).toBe(true);
+    const replay = (await persist(ownerId)).rows[0]!;
+    expect(replay).toMatchObject({
+      preflight_run_id: first.preflight_run_id,
+      baseline_evidence_id: first.baseline_evidence_id,
+      created: false,
+      observed_at: first.observed_at,
+    });
+    const persisted = await db.query<{
+      preflight_mode: string;
+      protected_product_id: string;
+      impact_assessment_id: string | null;
+      status: string;
+      verified_impact: string | null;
+      repositories_scanned: number;
+      evidence_count: number;
+      commit_sha: string;
+    }>(
+      `select run.preflight_mode,run.protected_product_id,run.impact_assessment_id,run.status,
+              run.verified_impact,run.repositories_scanned,count(evidence.id)::int as evidence_count,
+              max(evidence.commit_sha) as commit_sha
+       from public.preflight_runs run
+       join public.baseline_preflight_evidence evidence on evidence.preflight_run_id=run.id
+       where run.id=$1 group by run.id`,
+      [first.preflight_run_id],
+    );
+    expect(persisted.rows[0]).toMatchObject({
+      preflight_mode: "baseline",
+      protected_product_id: productId,
+      impact_assessment_id: null,
+      status: "completed",
+      verified_impact: null,
+      repositories_scanned: 1,
+      evidence_count: 1,
+      commit_sha: commitSha,
+    });
+    expect(
+      (
+        await db.query("select id from public.impact_assessments where workspace_id=$1", [
+          createdWorkspaceId,
+        ])
+      ).rows,
+    ).toHaveLength(0);
+    expect(
+      (
+        await db.query("select id from public.preflight_findings where preflight_run_id=$1", [
+          first.preflight_run_id,
+        ])
+      ).rows,
+    ).toHaveLength(0);
+    await expect(persist("b1000000-0000-4000-8000-000000000099")).rejects.toThrow(/forbidden/);
+    await expect(persist(ownerId, "b2000000-0000-4000-8000-000000000099")).rejects.toThrow(
+      /forbidden/,
+    );
+
+    await db.query(
+      "update public.workspace_product_repositories set status='inactive' where repository_id=$1",
+      [repositoryId],
+    );
+    await expect(persist(ownerId)).rejects.toThrow(/baseline_preflight_ineligible/);
+    await db.query(
+      "update public.workspace_product_repositories set status='active' where repository_id=$1",
+      [repositoryId],
+    );
+    await expect(
+      db.query(
+        `select * from public.persist_baseline_preflight(
+          $1,$2,$3,$4,9902,'michelpronkk-oss','auterim','main',$5,$6,'baseline-v1'
+        )`,
+        [
+          ownerId,
+          createdWorkspaceId,
+          otherProduct.rows[0]!.id,
+          repositoryId,
+          commitSha,
+          "d".repeat(64),
+        ],
+      ),
+    ).rejects.toThrow(/baseline_preflight_ineligible/);
+    await expect(
+      db.query(
+        `select * from public.persist_baseline_preflight(
+          $1,$2,$3,$4,9903,'michelpronkk-oss','unprotected','main',$5,$6,'baseline-v1'
+        )`,
+        [
+          ownerId,
+          createdWorkspaceId,
+          productId,
+          unprotectedRepositoryId,
+          commitSha,
+          "e".repeat(64),
+        ],
+      ),
+    ).rejects.toThrow(/baseline_preflight_ineligible/);
+    await db.query("update public.repositories set status='access_revoked' where id=$1", [
+      repositoryId,
+    ]);
+    await expect(persist(ownerId)).rejects.toThrow(/baseline_preflight_ineligible/);
+    await db.exec("reset role");
+    await db.query("insert into auth.users(id,email) values($1,'outsider@example.test')", [
+      "b1000000-0000-4000-8000-000000000099",
+    ]);
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [ownerId]);
+    await db.exec("set role authenticated");
+    expect((await db.query("select id from public.baseline_preflight_evidence")).rows).toHaveLength(
+      1,
+    );
+    await db.query("select set_config('request.jwt.claim.sub',$1,false)", [
+      "b1000000-0000-4000-8000-000000000099",
+    ]);
+    expect((await db.query("select id from public.baseline_preflight_evidence")).rows).toHaveLength(
+      0,
+    );
+    await db.close();
+  });
+
+  it("keeps baseline evidence member-readable and denies anonymous or client mutation", async () => {
+    const db = await makeDatabase();
+    const grants = await db.query<{
+      rls: boolean;
+      anon_select: boolean;
+      authenticated_select: boolean;
+      authenticated_insert: boolean;
+      authenticated_update: boolean;
+      service_execute: boolean;
+      authenticated_execute: boolean;
+    }>(`
+      select c.relrowsecurity as rls,
+        has_table_privilege('anon','public.baseline_preflight_evidence','select') as anon_select,
+        has_table_privilege('authenticated','public.baseline_preflight_evidence','select') as authenticated_select,
+        has_table_privilege('authenticated','public.baseline_preflight_evidence','insert') as authenticated_insert,
+        has_table_privilege('authenticated','public.baseline_preflight_evidence','update') as authenticated_update,
+        has_function_privilege('service_role','public.persist_baseline_preflight(uuid,uuid,uuid,uuid,bigint,text,text,text,text,text,text)','execute') as service_execute,
+        has_function_privilege('authenticated','public.persist_baseline_preflight(uuid,uuid,uuid,uuid,bigint,text,text,text,text,text,text)','execute') as authenticated_execute
+      from pg_class c join pg_namespace n on n.oid=c.relnamespace
+      where n.nspname='public' and c.relname='baseline_preflight_evidence'
+    `);
+    expect(grants.rows[0]).toEqual({
+      rls: true,
+      anon_select: false,
+      authenticated_select: true,
+      authenticated_insert: false,
+      authenticated_update: false,
+      service_execute: true,
+      authenticated_execute: false,
+    });
     await db.close();
   });
 });

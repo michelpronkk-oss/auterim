@@ -198,6 +198,46 @@ export async function getProductRepositoryProtection(
     evidenceByRepository.set(finding.repository_id, evidence);
   }
 
+  const mappedIds = [...mappedRepositoryIds];
+  const baselineEvidenceResult = mappedIds.length
+    ? await client
+        .from("baseline_preflight_evidence")
+        .select("id,preflight_run_id,repository_id,commit_sha,observed_at")
+        .eq("workspace_id", workspaceId)
+        .eq("protected_product_id", productId)
+        .in("repository_id", mappedIds)
+        .eq("verification_state", "verified")
+        .order("observed_at", { ascending: false })
+        .limit(500)
+    : { data: [], error: null };
+  if (baselineEvidenceResult.error) throw new Error("product_repository_graph_unavailable");
+  const baselineRunIds = [
+    ...new Set((baselineEvidenceResult.data ?? []).map((row) => row.preflight_run_id)),
+  ];
+  const baselineRunsResult = baselineRunIds.length
+    ? await client
+        .from("preflight_runs")
+        .select("id,created_at,completed_at,status,preflight_mode,protected_product_id")
+        .eq("workspace_id", workspaceId)
+        .eq("protected_product_id", productId)
+        .eq("preflight_mode", "baseline")
+        .eq("status", "completed")
+        .in("id", baselineRunIds)
+        .limit(500)
+    : { data: [], error: null };
+  if (baselineRunsResult.error) throw new Error("product_repository_graph_unavailable");
+  const baselineRunById = new Map((baselineRunsResult.data ?? []).map((run) => [run.id, run]));
+  const baselineEvidenceByRepository = new Map<
+    string,
+    Array<{ id: string; preflight_run_id: string; commit_sha: string; observed_at: string }>
+  >();
+  for (const evidence of baselineEvidenceResult.data ?? []) {
+    if (!baselineRunById.has(evidence.preflight_run_id)) continue;
+    const existing = baselineEvidenceByRepository.get(evidence.repository_id) ?? [];
+    existing.push(evidence);
+    baselineEvidenceByRepository.set(evidence.repository_id, existing);
+  }
+
   const summarize = (repository: (typeof boundedRepositories)[number]) => {
     const connectionStatus = connectionHealth.get(repository.connection_id) ?? "unknown";
     const isAvailable = repository.status === "available" && connectionStatus === "connected";
@@ -252,6 +292,20 @@ export async function getProductRepositoryProtection(
               ? "same_as_latest_attempt"
               : "historical_before_latest_attempt",
         })),
+      baselineVerification: (baselineEvidenceByRepository.get(repository.id) ?? [])
+        .slice(0, 5)
+        .map((evidence) => {
+          const run = baselineRunById.get(evidence.preflight_run_id);
+          return {
+            runId: evidence.preflight_run_id,
+            evidenceId: evidence.id,
+            mode: "baseline" as const,
+            verificationState: "verified" as const,
+            commitSha: evidence.commit_sha,
+            verifiedAt: run?.completed_at ?? evidence.observed_at,
+            observedAt: evidence.observed_at,
+          };
+        }),
     };
   };
   const mappedRepositories = boundedRepositories

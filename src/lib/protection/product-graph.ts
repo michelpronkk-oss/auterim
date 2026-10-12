@@ -694,7 +694,7 @@ export async function getProductProtectionGraph(
       ? await client
           .from("product_deployment_evidence")
           .select(
-            "deployment_observation_id,repository_id,preflight_finding_id,verification_state,verified_commit_sha,observed_at,safe_metadata",
+            "deployment_observation_id,repository_id,preflight_finding_id,baseline_preflight_evidence_id,verification_state,verified_commit_sha,observed_at,safe_metadata",
           )
           .eq("workspace_id", workspaceId)
           .eq("protected_product_id", productId)
@@ -755,12 +755,14 @@ export async function getProductProtectionGraph(
                 state: evidence.verification_state,
                 verifiedCommitSha: evidence.verified_commit_sha,
                 preflightFindingId: evidence.preflight_finding_id,
+                baselinePreflightEvidenceId: evidence.baseline_preflight_evidence_id,
                 exactCommitMatch: evidence.safe_metadata?.exactCommitMatch === true,
               }
             : {
                 state: "observed",
                 verifiedCommitSha: null,
                 preflightFindingId: null,
+                baselinePreflightEvidenceId: null,
                 exactCommitMatch: false,
               },
           currentProduction: Boolean(
@@ -950,6 +952,7 @@ export async function getProductProtectionGraph(
       mappingProvenance: repository.mappingProvenance,
       connectionHealth: repository.connectionHealth,
       verificationCapabilityAvailable: input.verificationCapabilityAvailable,
+      baselineVerification: repository.baselineVerification,
     })),
     deployments: {
       semantics:

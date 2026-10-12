@@ -7,7 +7,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
   const { data: run, error: runError } = await auth.client
     .from("preflight_runs")
     .select(
-      "id,workspace_id,impact_assessment_id,status,verified_impact,confidence,complexity,recommended_remediation,effective_at,announced_at,deadline,days_remaining,repositories_scanned,preflight_version,created_at,completed_at",
+      "id,workspace_id,impact_assessment_id,protected_product_id,preflight_mode,status,verified_impact,confidence,complexity,recommended_remediation,effective_at,announced_at,deadline,days_remaining,repositories_scanned,preflight_version,created_at,completed_at",
     )
     .eq("id", id)
     .maybeSingle();
@@ -22,7 +22,23 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     .order("file_path")
     .limit(200);
   if (findingsError) return Response.json({ error: "preflight_unavailable" }, { status: 503 });
+  const { data: baselineEvidence, error: baselineEvidenceError } =
+    run.preflight_mode === "baseline"
+      ? await auth.client
+          .from("baseline_preflight_evidence")
+          .select(
+            "id,repository_id,provider,external_repository_id,repository_owner,repository_name,default_branch,commit_sha,verification_state,observed_at",
+          )
+          .eq("workspace_id", run.workspace_id)
+          .eq("preflight_run_id", id)
+          .order("observed_at")
+          .limit(100)
+      : { data: [], error: null };
+  if (baselineEvidenceError)
+    return Response.json({ error: "preflight_unavailable" }, { status: 503 });
   return Response.json({
+    mode: run.preflight_mode,
+    productId: run.protected_product_id,
     status: run.status,
     verifiedImpact: run.verified_impact,
     confidence: run.confidence,
@@ -33,8 +49,12 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     repositoriesScanned: run.repositories_scanned,
     complexity: run.complexity,
     recommendedRemediation: run.recommended_remediation,
-    remediationAvailable: run.status === "completed" && run.verified_impact === "verified",
+    remediationAvailable:
+      run.preflight_mode === "change" &&
+      run.status === "completed" &&
+      run.verified_impact === "verified",
     findings: findings ?? [],
+    baselineEvidence: baselineEvidence ?? [],
     createdAt: run.created_at,
     completedAt: run.completed_at,
   });

@@ -16,6 +16,64 @@ function fail(message: string): never {
   throw new Error(message);
 }
 
+async function baselineRepositoryEvidence(
+  service: SupabaseClient,
+  workspaceId: string,
+  productId: string,
+  repositoryId: string,
+  commitSha: string,
+) {
+  const [{ data: product, error: productError }, { data: mapping, error: mappingError }] =
+    await Promise.all([
+      service
+        .from("workspace_products")
+        .select("id,status")
+        .eq("workspace_id", workspaceId)
+        .eq("id", productId)
+        .maybeSingle(),
+      service
+        .from("workspace_product_repositories")
+        .select("repository_id")
+        .eq("workspace_id", workspaceId)
+        .eq("protected_product_id", productId)
+        .eq("repository_id", repositoryId)
+        .eq("status", "active")
+        .maybeSingle(),
+    ]);
+  if (productError || mappingError) fail("deployment_evidence_unavailable");
+  if (product?.status !== "protected" || !mapping) return null;
+  const { data: rows, error } = await service
+    .from("baseline_preflight_evidence")
+    .select("id,commit_sha,preflight_run_id")
+    .eq("workspace_id", workspaceId)
+    .eq("protected_product_id", productId)
+    .eq("repository_id", repositoryId)
+    .eq("commit_sha", commitSha)
+    .eq("verification_state", "verified")
+    .order("observed_at", { ascending: false })
+    .limit(5);
+  if (error) fail("deployment_evidence_unavailable");
+  const baseline = rows?.[0];
+  if (!baseline) return null;
+  const { data: run, error: runError } = await service
+    .from("preflight_runs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("id", baseline.preflight_run_id)
+    .eq("preflight_mode", "baseline")
+    .eq("protected_product_id", productId)
+    .eq("status", "completed")
+    .maybeSingle();
+  if (runError) fail("deployment_evidence_unavailable");
+  return run
+    ? {
+        source: "baseline" as const,
+        id: baseline.id as string,
+        commitSha: baseline.commit_sha as string,
+      }
+    : null;
+}
+
 async function repositoryEvidence(
   service: SupabaseClient,
   workspaceId: string,
@@ -24,6 +82,8 @@ async function repositoryEvidence(
   commitSha: string | null,
 ) {
   if (!commitSha) return null;
+  const baselineFallback = () =>
+    baselineRepositoryEvidence(service, workspaceId, productId, repositoryId, commitSha);
   const { data: dependencies, error: dependencyError } = await service
     .from("workspace_dependencies")
     .select("id")
@@ -33,7 +93,7 @@ async function repositoryEvidence(
     .limit(100);
   if (dependencyError) fail("deployment_evidence_unavailable");
   const dependencyIds = (dependencies ?? []).map((row) => row.id as string);
-  if (!dependencyIds.length) return null;
+  if (!dependencyIds.length) return baselineFallback();
   const { data: access, error: accessError } = await service
     .from("workspace_repository_access")
     .select("workspace_dependency_id")
@@ -45,7 +105,7 @@ async function repositoryEvidence(
   const attributed = [
     ...new Set((access ?? []).map((row) => row.workspace_dependency_id as string)),
   ];
-  if (!attributed.length) return null;
+  if (!attributed.length) return baselineFallback();
   const { data: impacts, error: impactError } = await service
     .from("impact_assessments")
     .select("id")
@@ -55,7 +115,7 @@ async function repositoryEvidence(
     .limit(200);
   if (impactError) fail("deployment_evidence_unavailable");
   const impactIds = [...new Set((impacts ?? []).map((row) => row.id as string))];
-  if (!impactIds.length) return null;
+  if (!impactIds.length) return baselineFallback();
   const { data: runs, error: runError } = await service
     .from("preflight_runs")
     .select("id")
@@ -67,7 +127,7 @@ async function repositoryEvidence(
     .limit(200);
   if (runError) fail("deployment_evidence_unavailable");
   const runIds = (runs ?? []).map((row) => row.id as string);
-  if (!runIds.length) return null;
+  if (!runIds.length) return baselineFallback();
   const { data: findings, error: findingError } = await service
     .from("preflight_findings")
     .select("id,commit_sha,preflight_run_id")
@@ -80,7 +140,14 @@ async function repositoryEvidence(
     .limit(1);
   if (findingError) fail("deployment_evidence_unavailable");
   const finding = findings?.[0];
-  return finding ? { id: finding.id as string, commitSha: finding.commit_sha as string } : null;
+  if (finding)
+    return {
+      source: "finding" as const,
+      id: finding.id as string,
+      commitSha: finding.commit_sha as string,
+    };
+
+  return baselineFallback();
 }
 
 async function upsertObservation(
@@ -167,7 +234,8 @@ async function persistProductEvidence(
       deployment_surface_id: input.surfaceId,
       deployment_observation_id: input.observationId,
       repository_id: input.repositoryId,
-      preflight_finding_id: proof?.id ?? null,
+      preflight_finding_id: proof?.source === "finding" ? proof.id : null,
+      baseline_preflight_evidence_id: proof?.source === "baseline" ? proof.id : null,
       verification_state: state,
       verified_commit_sha: proof?.commitSha ?? null,
       observed_at: input.observation.observedAt,
