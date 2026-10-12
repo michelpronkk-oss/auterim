@@ -6,7 +6,7 @@ import { SupabaseCustomerImpactRepository } from "@/lib/impact/impact-repository
 
 export const IMPACT_ENGINE_VERSION = "customer-impact-v1";
 export const IMPACT_SCHEMA_VERSION = 1;
-export const IMPACT_PROMPT_VERSION = "tenant-impact-v1";
+export const IMPACT_PROMPT_VERSION = "tenant-impact-v2";
 
 export const dependencyCriticalitySchema = z.enum(["critical", "important", "normal"]);
 export const dependencyUsageSchema = z.enum([

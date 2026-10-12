@@ -6,6 +6,7 @@ import {
   buildCustomerImpactPrompt,
   createImpactContextFingerprint,
   customerImpactSchema,
+  IMPACT_PROMPT_VERSION,
   OpenAIImpactClassifierError,
   OpenAICustomerImpactClassifier,
   type CustomerImpact,
@@ -670,6 +671,7 @@ describe("offline customer impact evaluation", () => {
 
     expect(prompt).toContain("never copy provider-side affected entities");
     expect(prompt).toContain("If no usage area is recorded, return an empty affectedAreas array");
+    expect(IMPACT_PROMPT_VERSION).toBe("tenant-impact-v2");
   });
 
   it("rejects ungrounded evidence and inconsistent schema output", () => {
