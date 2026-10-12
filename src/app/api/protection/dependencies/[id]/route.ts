@@ -53,7 +53,7 @@ export async function GET(request: Request, routeContext: { params: Promise<{ id
   const { data: dependency, error } = await auth.client
     .from("workspace_dependencies")
     .select(
-      "id,protected_product_id,dependency_id,origin,monitoring_enabled,created_at,dependency_catalog(name,slug,category,description),dependency_context(criticality,production_critical,used_for,context_note)",
+      "id,protected_product_id,dependency_id,origin,monitoring_enabled,created_at,dependency_catalog(name,slug,category),dependency_context(criticality,production_critical,used_for,context_note)",
     )
     .eq("id", id)
     .eq("workspace_id", workspaceId.data)
