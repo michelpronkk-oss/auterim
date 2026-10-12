@@ -36,6 +36,7 @@ function readAuterimEnvironment() {
 }
 
 const baseline: CustomerImpactPacket = {
+  evaluationMode: "live",
   dependencyName: "OpenAI",
   globalChange: {
     sourceType: "pricing",

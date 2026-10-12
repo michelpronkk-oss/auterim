@@ -8,6 +8,7 @@ describe("customer impact queue fan-out", () => {
       workspace_dependency_id: `10000000-0000-4000-8000-${index.toString().padStart(12, "0")}`,
       source_change_classification_id: "20000000-0000-4000-8000-000000000001",
       context_revision: 1,
+      evaluation_mode: (index % 2 === 0 ? "live" : "baseline") as "live" | "baseline",
     }));
     const dispatched = new Set<string>();
     const triggered: string[] = [];

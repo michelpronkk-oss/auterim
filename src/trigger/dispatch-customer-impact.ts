@@ -29,6 +29,7 @@ export const dispatchCustomerImpactTask = schemaTask({
           queueId: item.queue_id,
           workspaceDependencyId: item.workspace_dependency_id,
           sourceChangeClassificationId: item.source_change_classification_id,
+          evaluationMode: item.evaluation_mode,
         }),
       triggerContinuation: () =>
         tasks.trigger<typeof dispatchCustomerImpactTask>("dispatch-customer-impact", {

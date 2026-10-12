@@ -84,4 +84,26 @@ describe("product dependency API", () => {
       p_dependency_slug: "openai",
     });
   });
+
+  it("requests an explicit bounded baseline assessment for a Product dependency", async () => {
+    const workspaceDependencyId = "33333333-3333-4333-8333-333333333333";
+    const response = await POST(
+      new Request(`https://auterim.com/api/products/${productId}/dependencies`, {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "baseline_assessment",
+          workspaceId,
+          workspaceDependencyId,
+        }),
+      }),
+      { params: Promise.resolve({ id: productId }) },
+    );
+    expect(response.status).toBe(200);
+    expect(mocks.rpc).toHaveBeenCalledWith("request_product_dependency_baseline_assessment", {
+      p_workspace_id: workspaceId,
+      p_product_id: productId,
+      p_workspace_dependency_id: workspaceDependencyId,
+    });
+  });
 });

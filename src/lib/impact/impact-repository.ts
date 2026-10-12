@@ -49,10 +49,15 @@ const beginResultSchema = z.discriminatedUnion("status", [
 export class SupabaseCustomerImpactRepository implements CustomerImpactRepository {
   private readonly client = createSupabaseServerClient();
 
-  async loadPacket(workspaceDependencyId: string, sourceChangeClassificationId: string) {
-    const { data, error } = await this.client.rpc("load_customer_impact_packet", {
+  async loadPacket(
+    workspaceDependencyId: string,
+    sourceChangeClassificationId: string,
+    evaluationMode: "live" | "baseline",
+  ) {
+    const { data, error } = await this.client.rpc("load_customer_impact_packet_for_mode", {
       p_workspace_dependency_id: workspaceDependencyId,
       p_source_change_classification_id: sourceChangeClassificationId,
+      p_evaluation_mode: evaluationMode,
     });
     throwOnError(error);
     return data;
@@ -61,6 +66,7 @@ export class SupabaseCustomerImpactRepository implements CustomerImpactRepositor
   async begin(input: {
     workspaceDependencyId: string;
     sourceChangeClassificationId: string;
+    evaluationMode: "live" | "baseline";
     contextFingerprint: string;
     impactEngineVersion: string;
     schemaVersion: number;
@@ -69,7 +75,7 @@ export class SupabaseCustomerImpactRepository implements CustomerImpactRepositor
     triggerRunId: string;
     attemptNumber: number;
   }): Promise<ImpactAssessmentStart> {
-    const { data, error } = await this.client.rpc("begin_customer_impact_assessment", {
+    const { data, error } = await this.client.rpc("begin_customer_impact_assessment_for_mode", {
       p_workspace_dependency_id: input.workspaceDependencyId,
       p_source_change_classification_id: input.sourceChangeClassificationId,
       p_context_fingerprint: input.contextFingerprint,
@@ -79,6 +85,7 @@ export class SupabaseCustomerImpactRepository implements CustomerImpactRepositor
       p_provider: input.provider,
       p_trigger_run_id: input.triggerRunId,
       p_attempt_number: input.attemptNumber,
+      p_evaluation_mode: input.evaluationMode,
     });
     throwOnError(error);
     return beginResultSchema.parse(data);
@@ -143,6 +150,7 @@ const impactQueueItemSchema = z.object({
   workspace_dependency_id: z.string().uuid(),
   source_change_classification_id: z.string().uuid(),
   context_revision: z.number().int().nonnegative(),
+  evaluation_mode: z.enum(["live", "baseline"]),
 });
 
 export async function listCustomerImpactQueueItems(sourceChangeId?: string) {

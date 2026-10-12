@@ -22,15 +22,22 @@ type Protection = {
 };
 type Dependency = {
   id: string;
+  product?: { id?: string; name?: string; status?: string } | null;
   dependencyId: string;
   provider?: { name?: string; category?: string; slug?: string } | null;
   origin?: string;
+  protected?: boolean;
   criticality?: string;
   productionCritical?: boolean;
   usedFor?: string[];
   authoritativeSources?: number;
   sourcesWithBaseline?: number;
-  latestMaterialChange?: { relevant?: boolean; severity?: string; assessedAt?: string } | null;
+  latestMaterialChange?: {
+    relevant?: boolean;
+    severity?: string;
+    assessedAt?: string;
+    evaluationMode?: "live" | "baseline";
+  } | null;
   lastCheckedAt?: string | null;
   protectionState?: string;
   createdAt?: string;
@@ -57,6 +64,7 @@ type Change = {
     recommendedAction?: string;
     actionRequired?: boolean;
   } | null;
+  evaluationMode?: "live" | "baseline";
   preflight?: {
     verifiedImpact?: string;
     deadline?: string | null;
@@ -276,6 +284,8 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
   const [githubConnecting, setGithubConnecting] = useState(false);
   const githubConnectPending = useRef(false);
   const [filters, setFilters] = useState("all");
+  const [baselineAssessmentBusy, setBaselineAssessmentBusy] = useState(false);
+  const [baselineAssessmentMessage, setBaselineAssessmentMessage] = useState("");
   const reloadConnectors = connectors.reload;
   const reloadAccountStatus = accountStatus.reload;
 
@@ -495,6 +505,38 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
       setNotice(messageFor(error));
     } finally {
       setBusy(false);
+    }
+  }
+  async function requestBaselineAssessment(productId: string, workspaceDependencyId: string) {
+    setBaselineAssessmentBusy(true);
+    setBaselineAssessmentMessage("");
+    try {
+      const result = await api<{
+        evaluationMode: "baseline";
+        lookbackDays: number;
+        eligibleClassifications: number;
+        newlyQueued: number;
+      }>(`/api/products/${encodeURIComponent(productId)}/dependencies`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "baseline_assessment",
+          workspaceId,
+          workspaceDependencyId,
+        }),
+      });
+      setBaselineAssessmentMessage(
+        result.newlyQueued > 0
+          ? `Checking up to ${result.lookbackDays} days of historical changes (${result.newlyQueued} queued). This is a baseline review, not a new change alert.`
+          : result.eligibleClassifications > 0
+            ? "Recent historical changes have already been queued for baseline review."
+            : `No eligible material changes were found in the ${result.lookbackDays}-day baseline window.`,
+      );
+      await detail.reload();
+    } catch (error) {
+      setBaselineAssessmentMessage(messageFor(error));
+    } finally {
+      setBaselineAssessmentBusy(false);
     }
   }
   async function markRead(notificationId?: string) {
@@ -849,12 +891,34 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
                   <p className="card-kicker">ASSESSED EVIDENCE</p>
                   <h2>Recent customer impact</h2>
                 </div>
+                {item.product?.status === "protected" &&
+                  item.protected !== false &&
+                  (workspace.role === "owner" || workspace.role === "admin") && (
+                    <button
+                      className="button-secondary"
+                      disabled={baselineAssessmentBusy}
+                      onClick={() => {
+                        if (item.product?.id)
+                          void requestBaselineAssessment(item.product.id, item.id);
+                      }}
+                    >
+                      {baselineAssessmentBusy ? "Checking…" : "Check recent changes"}
+                    </button>
+                  )}
               </div>
+              {baselineAssessmentMessage && (
+                <p className="success-note" role="status">
+                  {baselineAssessmentMessage}
+                </p>
+              )}
               {(item.recentAssessments ?? []).length ? (
                 (item.recentAssessments ?? []).map((impact) => (
                   <div className="impact-evidence" key={String(impact.id)}>
                     <Severity value={String(impact.severity ?? "normal")} />
                     <div>
+                      {impact.evaluation_mode === "baseline" && (
+                        <small>Historical baseline assessment</small>
+                      )}
                       <strong>{String(impact.impact_summary ?? "Impact assessment")}</strong>
                       <p>{String(impact.why_it_matters ?? "")}</p>
                     </div>
@@ -929,7 +993,7 @@ export function DashboardPage({ kind, id }: { kind: PageKind; id?: string }) {
             </Link>
             <PageHeading
               kind={kind}
-              eyebrow={`ASSESSED ${date(item.assessedAt)}`}
+              eyebrow={`${item.evaluationMode === "baseline" ? "HISTORICAL BASELINE" : "ASSESSED"} ${date(item.assessedAt)}`}
               subtitle="Customer impact is grounded in your confirmed dependency and context."
             />
             <div className="change-detail-head">
@@ -1515,6 +1579,7 @@ function ChangeRows({ items }: { items: Change[] }) {
                 change.customerImpact?.summary ??
                 "Assessed material change"}
             </strong>
+            {change.evaluationMode === "baseline" && <small>Historical baseline assessment</small>}
             <small>
               {change.dependency?.dependency_catalog?.name ?? "Dependency"} ·{" "}
               {change.change?.category?.replaceAll("_", " ") ?? "Change"} ·{" "}

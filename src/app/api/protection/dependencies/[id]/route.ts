@@ -77,7 +77,7 @@ export async function GET(request: Request, routeContext: { params: Promise<{ id
     auth.client
       .from("impact_assessments")
       .select(
-        "id,relevant,severity,impact_summary,why_it_matters,recommended_action,assessed_at,status",
+        "id,relevant,severity,impact_summary,why_it_matters,recommended_action,assessed_at,status,evaluation_mode",
       )
       .eq("workspace_id", workspaceId.data)
       .eq("workspace_dependency_id", dependency.id)

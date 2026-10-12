@@ -14,6 +14,7 @@ import {
 } from "@/lib/impact/impact";
 
 const pricingPacket: CustomerImpactPacket = {
+  evaluationMode: "live",
   dependencyName: "OpenAI",
   globalChange: {
     sourceType: "pricing",
@@ -639,6 +640,20 @@ describe("offline customer impact evaluation", () => {
     expect(packet).toEqual(pricingPacket);
     expect(packet).not.toHaveProperty("workspaceId");
     expect(packet).not.toHaveProperty("workspaceDependencyId");
+  });
+
+  it("keeps baseline provenance explicit and tells the classifier not to claim a new detection", () => {
+    const packet = buildCustomerImpactPacket({
+      ...pricingPacket,
+      evaluationMode: "baseline",
+    });
+    expect(packet.evaluationMode).toBe("baseline");
+    expect(buildCustomerImpactPrompt(packet)).toContain(
+      "explicitly requested historical baseline review",
+    );
+    expect(createImpactContextFingerprint(packet)).not.toBe(
+      createImpactContextFingerprint(pricingPacket),
+    );
   });
 
   it("rejects ungrounded evidence and inconsistent schema output", () => {

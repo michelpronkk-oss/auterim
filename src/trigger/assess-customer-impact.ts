@@ -12,6 +12,7 @@ export const assessCustomerImpactTask = schemaTask({
     queueId: z.string().uuid(),
     workspaceDependencyId: z.string().uuid(),
     sourceChangeClassificationId: z.string().uuid(),
+    evaluationMode: z.enum(["live", "baseline"]),
   }),
   retry: {
     maxAttempts: 3,
@@ -21,11 +22,15 @@ export const assessCustomerImpactTask = schemaTask({
     randomize: true,
   },
   concurrency: { total: 4 },
-  run: async ({ queueId, workspaceDependencyId, sourceChangeClassificationId }, { ctx }) => {
+  run: async (
+    { queueId, workspaceDependencyId, sourceChangeClassificationId, evaluationMode },
+    { ctx },
+  ) => {
     try {
       const result = await assessCustomerImpact({
         workspaceDependencyId,
         sourceChangeClassificationId,
+        evaluationMode,
         triggerRunId: ctx.run.id,
         attemptNumber: ctx.attempt.number,
       });
