@@ -72,11 +72,21 @@ type ReadModel = {
       baselineObservation: string;
     };
     repositories: Array<{
+      id: string;
       owner: string;
       name: string;
       status: string;
       mappingState: string;
       verificationCapabilityAvailable: boolean;
+      baselineVerification?: Array<{
+        runId: string;
+        evidenceId: string;
+        mode: "baseline";
+        verificationState: "verified";
+        commitSha: string;
+        verifiedAt: string;
+        observedAt: string;
+      }>;
     }>;
     localDiscovery?: {
       latestScan: null | {
@@ -283,6 +293,17 @@ export function OnboardingV2Panel({
   async function selectProduct(nextId: string) {
     setProductId(nextId);
     await load(nextId);
+  }
+
+  async function verifyCurrentCode(repositoryId: string) {
+    await run(async () => {
+      await api(`/api/products/${productId}/preflight/baseline`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, repositoryId }),
+      });
+      await load(productId);
+    });
   }
 
   async function createProduct() {
@@ -655,6 +676,42 @@ export function OnboardingV2Panel({
               ) : (
                 <p>Graph data is not available yet.</p>
               )}
+              {model.product.status === "protected" &&
+              model.protectionGraph?.repositories.length ? (
+                <section aria-label="Repository baseline verification">
+                  <h4>Repository verification</h4>
+                  <p>
+                    Verify the repository’s current default-branch commit for this protected
+                    Product. This records repository state only; it does not report a provider
+                    change or create a customer-impact assessment.
+                  </p>
+                  {model.protectionGraph.repositories.map((repository) => {
+                    const baseline = repository.baselineVerification?.[0];
+                    return (
+                      <div className="onboarding-fields" key={repository.id}>
+                        <strong>
+                          {repository.owner}/{repository.name}
+                        </strong>
+                        <span>
+                          {baseline
+                            ? `Baseline verified at ${new Date(baseline.verifiedAt).toLocaleString()}`
+                            : "No baseline commit verified yet"}
+                          {baseline ? ` · ${baseline.commitSha}` : ""}
+                        </span>
+                        {canManageProducts && repository.mappingState === "active" ? (
+                          <button
+                            type="button"
+                            disabled={busy || !repository.verificationCapabilityAvailable}
+                            onClick={() => void verifyCurrentCode(repository.id)}
+                          >
+                            {busy ? "Verifying…" : "Verify current code"}
+                          </button>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </section>
+              ) : null}
               {model.protectionGraph?.localDiscovery?.observations.length ? (
                 <section aria-label="Locally detected dependencies">
                   <h4>Detected locally</h4>
