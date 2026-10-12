@@ -656,6 +656,22 @@ describe("offline customer impact evaluation", () => {
     );
   });
 
+  it("keeps provider-side entities out of affected areas when customer usage context is absent", () => {
+    const packet = buildCustomerImpactPacket({
+      ...pricingPacket,
+      context: {
+        ...pricingPacket.context,
+        usedFor: [],
+        contextNote: "",
+        usageMetadata: {},
+      },
+    });
+    const prompt = buildCustomerImpactPrompt(packet);
+
+    expect(prompt).toContain("never copy provider-side affected entities");
+    expect(prompt).toContain("If no usage area is recorded, return an empty affectedAreas array");
+  });
+
   it("rejects ungrounded evidence and inconsistent schema output", () => {
     const bad = output({ evidenceRefs: [{ source: "global_evidence", excerpt: "made up fact" }] });
     expect(() => applyCustomerImpactPolicy(bad, pricingPacket)).toThrow(
