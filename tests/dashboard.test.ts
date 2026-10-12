@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { getDashboardHealthPresentation } from "@/lib/protection/dashboard-health";
 import {
   notifyWorkspaceUpdated,
+  settleUnresolvedWorkspaceBootstrap,
   shouldShowWorkspaceSelector,
   WORKSPACE_UPDATED_EVENT,
 } from "@/lib/app/workspace-bootstrap";
@@ -55,6 +56,29 @@ describe("workspace selector visibility", () => {
     notifyWorkspaceUpdated();
 
     expect(refreshShell).toHaveBeenCalledOnce();
+  });
+});
+
+describe("workspace bootstrap terminal state", () => {
+  it("turns an unresolved current request into the bounded retry state", () => {
+    expect(settleUnresolvedWorkspaceBootstrap({ state: "LOADING", requestIsCurrent: true })).toBe(
+      "ERROR",
+    );
+  });
+
+  it("does not replace a newer request's loading state when an older request finishes", () => {
+    expect(settleUnresolvedWorkspaceBootstrap({ state: "LOADING", requestIsCurrent: false })).toBe(
+      "LOADING",
+    );
+  });
+
+  it("preserves an explicit success or failure state", () => {
+    expect(settleUnresolvedWorkspaceBootstrap({ state: "READY", requestIsCurrent: true })).toBe(
+      "READY",
+    );
+    expect(settleUnresolvedWorkspaceBootstrap({ state: "ERROR", requestIsCurrent: true })).toBe(
+      "ERROR",
+    );
   });
 });
 

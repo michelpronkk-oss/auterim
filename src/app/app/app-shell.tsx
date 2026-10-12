@@ -16,6 +16,7 @@ import type { Session } from "@supabase/supabase-js";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import {
   resolveWorkspaceBootstrapState,
+  settleUnresolvedWorkspaceBootstrap,
   type WorkspaceBootstrapState,
   WORKSPACE_UPDATED_EVENT,
 } from "@/lib/app/workspace-bootstrap";
@@ -172,6 +173,15 @@ export function AppShell({ children }: { children: ReactNode }) {
         return;
       }
       setBootstrapState(resolveWorkspaceBootstrapState({ authenticated: true, failed: true }));
+    } finally {
+      // A stale-session response can be intentionally ignored above. If no
+      // newer request owns the state, settle the shell into its safe retry UI.
+      setBootstrapState((state) =>
+        settleUnresolvedWorkspaceBootstrap({
+          state,
+          requestIsCurrent: requestId === bootstrapRequestId.current,
+        }),
+      );
     }
   }, [api, session]);
 
