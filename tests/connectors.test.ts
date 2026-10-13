@@ -5,7 +5,13 @@ import {
   normalizeProviderFailure,
   safeConnectorResource,
 } from "@/lib/connectors/model";
-import { connectorStateHash, newOAuthSecrets } from "@/lib/connectors/service";
+import {
+  connectorStateHash,
+  decryptStoredCredentialValue,
+  encryptCredentialValue,
+  getFreshProviderCredentials,
+  newOAuthSecrets,
+} from "@/lib/connectors/service";
 import {
   createLinearIssue,
   normalizeSlackApiFailure,
@@ -15,6 +21,215 @@ import {
 } from "@/lib/connectors/providers";
 
 describe("connector platform safety contracts", () => {
+  it("decrypts a healthy non-expiring credential from a snake_case database row without refresh", async () => {
+    const workspaceId = "workspace-credential-row";
+    const accountId = "vercel-team-credential-row";
+    vi.stubEnv(
+      "CONNECTOR_CREDENTIAL_ENCRYPTION_KEYS",
+      JSON.stringify({ "1": Buffer.alloc(32, 17).toString("base64") }),
+    );
+    vi.stubEnv("CONNECTOR_CREDENTIAL_ACTIVE_KEY_VERSION", "1");
+    try {
+      const expected = {
+        accessToken: "fixture-access-token",
+        refreshToken: null,
+        expiresAt: null,
+        refreshExpiresAt: null,
+        scopes: ["project:read"],
+      };
+      const encrypted = encryptCredentialValue(expected, workspaceId, "vercel", accountId);
+      const row = {
+        ciphertext: encrypted.ciphertext,
+        nonce: encrypted.nonce,
+        authentication_tag: encrypted.authenticationTag,
+        key_version: encrypted.keyVersion,
+        access_expires_at: null,
+        refresh_expires_at: null,
+        credential_version: 1,
+      };
+      const query = {
+        select: vi.fn(),
+        eq: vi.fn(),
+        maybeSingle: vi.fn(async () => ({ data: row, error: null })),
+      };
+      query.select.mockReturnValue(query);
+      query.eq.mockReturnValue(query);
+      const rpc = vi.fn();
+
+      await expect(
+        getFreshProviderCredentials(
+          { from: vi.fn(() => query), rpc } as never,
+          {
+            id: "installation-credential-row",
+            workspace_id: workspaceId,
+            provider: "vercel",
+            external_account_id: accountId,
+            lifecycle_state: "connected",
+            health_state: "healthy",
+          } as never,
+        ),
+      ).resolves.toEqual(expected);
+      expect(rpc).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("maps refresh-lease snake_case fields into decryptor metadata", () => {
+    const workspaceId = "workspace-refresh-lease";
+    const accountId = "slack-team-refresh-lease";
+    vi.stubEnv(
+      "CONNECTOR_CREDENTIAL_ENCRYPTION_KEYS",
+      JSON.stringify({ "1": Buffer.alloc(32, 29).toString("base64") }),
+    );
+    vi.stubEnv("CONNECTOR_CREDENTIAL_ACTIVE_KEY_VERSION", "1");
+    try {
+      const expected = {
+        accessToken: "fixture-access-token",
+        refreshToken: "fixture-refresh-token",
+        expiresAt: "2026-10-12T00:00:00.000Z",
+        refreshExpiresAt: null,
+        scopes: ["channels:read", "chat:write"],
+      };
+      const encrypted = encryptCredentialValue(expected, workspaceId, "slack", accountId);
+      expect(
+        decryptStoredCredentialValue(
+          {
+            ciphertext: encrypted.ciphertext,
+            nonce: encrypted.nonce,
+            authentication_tag: encrypted.authenticationTag,
+            key_version: encrypted.keyVersion,
+          },
+          workspaceId,
+          "slack",
+          accountId,
+        ),
+      ).toEqual(expected);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("fails closed on missing stored key metadata without logging credentials", () => {
+    vi.stubEnv(
+      "CONNECTOR_CREDENTIAL_ENCRYPTION_KEYS",
+      JSON.stringify({ "1": Buffer.alloc(32, 41).toString("base64") }),
+    );
+    vi.stubEnv("CONNECTOR_CREDENTIAL_ACTIVE_KEY_VERSION", "1");
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      expect(() =>
+        decryptStoredCredentialValue(
+          {
+            ciphertext: "not-a-credential",
+            nonce: "missing",
+            authentication_tag: "missing",
+            key_version: undefined as never,
+          },
+          "workspace-missing-key-version",
+          "vercel",
+          "vercel-account",
+        ),
+      ).toThrow("connector_credential_key_version_unavailable");
+      expect(log).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("preserves refresh behavior for a genuinely expired credential", async () => {
+    const workspaceId = "workspace-expired-credential";
+    const accountId = "slack-team-expired-credential";
+    vi.stubEnv(
+      "CONNECTOR_CREDENTIAL_ENCRYPTION_KEYS",
+      JSON.stringify({ "1": Buffer.alloc(32, 53).toString("base64") }),
+    );
+    vi.stubEnv("CONNECTOR_CREDENTIAL_ACTIVE_KEY_VERSION", "1");
+    vi.stubEnv("SLACK_CLIENT_ID", "fixture-client-id");
+    vi.stubEnv("SLACK_CLIENT_SECRET", "fixture-client-secret");
+    vi.stubEnv("SLACK_REDIRECT_URI", "http://localhost:3000/api/connectors/slack/callback");
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", "http://localhost:3000");
+
+    try {
+      const encrypted = encryptCredentialValue(
+        {
+          accessToken: "fixture-old-access-token",
+          refreshToken: "fixture-refresh-token",
+          expiresAt: "2026-10-12T00:00:00.000Z",
+          refreshExpiresAt: null,
+          scopes: ["channels:read", "chat:write"],
+        },
+        workspaceId,
+        "slack",
+        accountId,
+      );
+      const row = {
+        ciphertext: encrypted.ciphertext,
+        nonce: encrypted.nonce,
+        authentication_tag: encrypted.authenticationTag,
+        key_version: encrypted.keyVersion,
+        access_expires_at: "2026-10-12T00:00:00.000Z",
+        refresh_expires_at: null,
+        credential_version: 1,
+      };
+      const lease = {
+        ...row,
+        lease_token: "fixture-lease",
+        provider: "slack",
+        external_account_id: accountId,
+      };
+      const query = {
+        select: vi.fn(),
+        eq: vi.fn(),
+        maybeSingle: vi.fn(async () => ({ data: row, error: null })),
+      };
+      query.select.mockReturnValue(query);
+      query.eq.mockReturnValue(query);
+      const rpc = vi.fn(async (name: string) => {
+        if (name === "claim_connector_refresh") return { data: [lease], error: null };
+        return { data: true, error: null };
+      });
+      const fetchMock = vi.fn(async () =>
+        Response.json({
+          ok: true,
+          access_token: "fixture-new-access-token",
+          refresh_token: "fixture-rotated-refresh-token",
+          expires_in: 3600,
+          scope: "channels:read,chat:write",
+        }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(
+        getFreshProviderCredentials(
+          { from: vi.fn(() => query), rpc } as never,
+          {
+            id: "installation-expired-credential",
+            workspace_id: workspaceId,
+            provider: "slack",
+            external_account_id: accountId,
+            lifecycle_state: "connected",
+            health_state: "healthy",
+          } as never,
+        ),
+      ).resolves.toMatchObject({
+        accessToken: "fixture-new-access-token",
+        refreshToken: "fixture-rotated-refresh-token",
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+        "claim_connector_refresh",
+        "replace_connector_credential",
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("creates high entropy independent OAuth state and browser binding", () => {
     const first = newOAuthSecrets();
     const second = newOAuthSecrets();
