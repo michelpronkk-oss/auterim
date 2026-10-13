@@ -17,6 +17,7 @@
     "cli:build": "npm --prefix packages/cli run build",
     "cli:typecheck": "npm --prefix packages/cli run typecheck",
     "acceptance:m15": "node --experimental-strip-types scripts/acceptance-m15.mts",
+    "acceptance:m157:baseline": "vitest run --config vitest.m157.config.mts",
     "acceptance:m15:entitlements": "node --experimental-strip-types scripts/m15-validation/trigger-dev-roundtrip.mts --entitlements-only",
     "eval:semantic": "vitest run tests/classification.test.ts",
     "eval:semantic:live": "vitest run --config vitest.live.config.mts",

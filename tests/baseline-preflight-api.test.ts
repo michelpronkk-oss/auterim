@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   rpc: vi.fn(),
   getEnvironment: vi.fn(),
   from: vi.fn(),
+  serviceFrom: vi.fn(),
 }));
 
 vi.mock("@/lib/onboarding/auth", () => ({
@@ -24,7 +25,7 @@ vi.mock("@/lib/preflight/github-provider", () => ({
 }));
 vi.mock("@/lib/env/schema", () => ({ getEnvironment: mocks.getEnvironment }));
 vi.mock("@/lib/connectors/service", () => ({
-  serverConnectors: () => ({ rpc: mocks.rpc }),
+  serverConnectors: () => ({ from: mocks.serviceFrom, rpc: mocks.rpc }),
 }));
 
 import { POST } from "@/app/api/products/[id]/preflight/baseline/route";
@@ -56,6 +57,7 @@ describe("baseline Preflight API", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     const byTable: Record<string, unknown> = {
+      workspace_members: { role: "owner" },
       workspace_products: { id: productId, status: "protected" },
       repositories: {
         id: repositoryId,
@@ -72,6 +74,7 @@ describe("baseline Preflight API", () => {
       repository_connections: { installation_id: 9901, status: "connected" },
     };
     mocks.from.mockImplementation((table: string) => queryResult(byTable[table]));
+    mocks.serviceFrom.mockImplementation((table: string) => queryResult(byTable[table]));
     mocks.authenticate.mockResolvedValue({
       ok: true,
       user: { id: "55555555-5555-4555-8555-555555555555" },
@@ -152,20 +155,36 @@ describe("baseline Preflight API", () => {
   });
 
   it("rejects unprotected products before reading repository state", async () => {
-    mocks.from.mockImplementation((table: string) => {
+    mocks.serviceFrom.mockImplementation((table: string) => {
       const data =
-        table === "workspace_products"
-          ? { id: productId, status: "draft" }
-          : table === "repositories"
-            ? { id: repositoryId }
-            : table === "workspace_product_repositories"
-              ? { repository_id: repositoryId }
-              : null;
+        table === "workspace_members"
+          ? { role: "owner" }
+          : table === "workspace_products"
+            ? { id: productId, status: "draft" }
+            : table === "repositories"
+              ? { id: repositoryId }
+              : table === "workspace_product_repositories"
+                ? { repository_id: repositoryId }
+                : null;
       return queryResult(data);
     });
     const response = await POST(request(), { params: Promise.resolve({ id: productId }) });
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ error: "baseline_preflight_ineligible" });
+    expect(mocks.providerHead).not.toHaveBeenCalled();
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("keeps the public automaticPreflight entitlement gate enforced", async () => {
+    mocks.entitlements.mockResolvedValue({
+      capabilities: { automaticPreflight: false },
+      usage: { preflightRuns: 0 },
+      limits: { preflightRuns: 10 },
+    });
+    const response = await POST(request(), { params: Promise.resolve({ id: productId }) });
+    expect(response.status).toBe(402);
+    expect(await response.json()).toEqual({ error: "preflight_not_entitled" });
+    expect(mocks.serviceFrom).not.toHaveBeenCalled();
     expect(mocks.providerHead).not.toHaveBeenCalled();
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
