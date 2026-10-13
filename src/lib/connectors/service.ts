@@ -24,7 +24,11 @@ export type ConnectorInstallationRow = {
   connected_at: string;
   last_checked_at: string | null;
 };
-type CredentialRow = EncryptedCredential & {
+type CredentialRow = {
+  ciphertext: string;
+  nonce: string;
+  authentication_tag: string;
+  key_version: number;
   access_expires_at: string | null;
   refresh_expires_at: string | null;
   credential_version: number;
@@ -59,6 +63,25 @@ export function decryptCredentialValue<T>(
 ): T {
   const aad = connectorCredentialAad(workspaceId, provider, externalAccountId);
   return JSON.parse(decryptConnectorCredential(value, aad)) as T;
+}
+
+export function decryptStoredCredentialValue<T>(
+  row: Pick<CredentialRow, "ciphertext" | "nonce" | "authentication_tag" | "key_version">,
+  workspaceId: string,
+  provider: string,
+  externalAccountId: string,
+): T {
+  return decryptCredentialValue<T>(
+    {
+      ciphertext: row.ciphertext,
+      nonce: row.nonce,
+      authenticationTag: row.authentication_tag,
+      keyVersion: row.key_version,
+    },
+    workspaceId,
+    provider,
+    externalAccountId,
+  );
 }
 
 export async function loadInstallation(
@@ -172,7 +195,7 @@ export async function getFreshProviderCredentials(
       "Reconnect this connector.",
     );
   const credentialRow = row as CredentialRow;
-  const credentials = decryptCredentialValue<ProviderCredentials>(
+  const credentials = decryptStoredCredentialValue<ProviderCredentials>(
     credentialRow,
     installation.workspace_id,
     installation.provider,
@@ -228,7 +251,7 @@ export async function getFreshProviderCredentials(
       installation.provider,
       "Credential refresh is already in progress.",
     );
-  const leasedCredentials = decryptCredentialValue<ProviderCredentials>(
+  const leasedCredentials = decryptStoredCredentialValue<ProviderCredentials>(
     lease,
     installation.workspace_id,
     installation.provider,
