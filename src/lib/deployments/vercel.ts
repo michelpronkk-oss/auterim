@@ -68,6 +68,7 @@ export type VercelProjectDeploymentSnapshot = {
   project: VercelProject;
   observations: DeploymentObservation[];
   currentProductionDeploymentId: string | null;
+  currentProductionAliases: string[];
 };
 
 function connectorError(status: number) {
@@ -566,11 +567,20 @@ export async function getVercelProjectDeploymentSnapshot(
         `/v4/aliases/${encodeURIComponent(domain)}`,
         teamId,
       ).catch(() => null);
-      return currentDeploymentId(alias);
+      return { domain, deploymentId: currentDeploymentId(alias) };
     }),
   );
-  const currentTargets = [...new Set(aliasTargets.filter((id): id is string => Boolean(id)))];
+  const currentTargets = [
+    ...new Set(
+      aliasTargets.map((target) => target.deploymentId).filter((id): id is string => Boolean(id)),
+    ),
+  ];
   const currentProductionDeploymentId = currentTargets.length === 1 ? currentTargets[0]! : null;
+  const currentProductionAliases = currentProductionDeploymentId
+    ? aliasTargets
+        .filter((target) => target.deploymentId === currentProductionDeploymentId)
+        .map((target) => target.domain)
+    : [];
   const observations = (deploymentsResponse.deployments ?? [])
     .slice(0, MAX_DEPLOYMENTS)
     .flatMap((deployment) => {
@@ -597,7 +607,7 @@ export async function getVercelProjectDeploymentSnapshot(
       });
       return observation ? [observation] : [];
     });
-  return { project, observations, currentProductionDeploymentId };
+  return { project, observations, currentProductionDeploymentId, currentProductionAliases };
 }
 
 export function vercelProjectResource(project: VercelProject) {
