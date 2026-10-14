@@ -1,5 +1,7 @@
 import { it } from "vitest";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getBaselineAcceptanceEnvironment } from "@/lib/m15/baseline-acceptance-environment";
+import { GitHubAppRepositoryProvider } from "@/lib/preflight/github-provider";
+import { createBaselineAcceptanceSupabaseClient } from "@/lib/supabase/baseline-acceptance";
 import { executeBaselinePreflight } from "@/lib/preflight/baseline-executor";
 
 const TARGET = Object.freeze({
@@ -14,19 +16,17 @@ function assertProductionAuterimTarget() {
     throw new Error("m157_acceptance_runner_not_explicitly_enabled");
   if (process.env.AUTERIM_M15_LOCAL_INTEGRATION === "1")
     throw new Error("m157_acceptance_runner_rejects_local_integration_mode");
-  let ref = "";
-  try {
-    ref = new URL(process.env.NEXT_PUBLIC_SUPABASE_URL ?? "").hostname.split(".")[0] ?? "";
-  } catch {
-    throw new Error("m157_acceptance_runner_supabase_target_unavailable");
-  }
-  if (ref !== "lnljaacbptrubppoypaz")
-    throw new Error("m157_acceptance_runner_wrong_supabase_project");
+  getBaselineAcceptanceEnvironment();
 }
 
 it("runs only the fixed M15.7 Test baseline acceptance target", async () => {
   assertProductionAuterimTarget();
-  const service = createSupabaseServerClient();
+  const environment = getBaselineAcceptanceEnvironment();
+  const service = createBaselineAcceptanceSupabaseClient();
+  const repositoryProvider = new GitHubAppRepositoryProvider({
+    appId: environment.GITHUB_APP_ID,
+    privateKey: environment.GITHUB_APP_PRIVATE_KEY,
+  });
   const { data: workspace, error: workspaceError } = await service
     .from("workspaces")
     .select("name")
@@ -84,6 +84,7 @@ it("runs only the fixed M15.7 Test baseline acceptance target", async () => {
     workspaceId: TARGET.workspaceId,
     productId: TARGET.productId,
     repositoryId,
+    repositoryProvider,
   });
   if (
     result.mode !== "baseline" ||
