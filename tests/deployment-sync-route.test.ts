@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   authenticate: vi.fn(),
   role: vi.fn(),
   entitlements: vi.fn(),
+  connectorEntitled: vi.fn(),
   loadInstallation: vi.fn(),
   getCredentials: vi.fn(),
   sync: vi.fn(),
@@ -18,7 +19,7 @@ vi.mock("@/lib/billing/server", () => ({
   resolveWorkspaceEntitlementsForMember: mocks.entitlements,
 }));
 vi.mock("@/lib/connectors/entitlements", () => ({
-  connectorProviderEntitled: () => true,
+  connectorProviderEntitled: mocks.connectorEntitled,
 }));
 vi.mock("@/lib/connectors/service", () => ({
   serverConnectors: () => ({}),
@@ -77,6 +78,7 @@ describe("deployment sync pre-provider diagnostics", () => {
     });
     mocks.role.mockResolvedValue("owner");
     mocks.entitlements.mockResolvedValue({});
+    mocks.connectorEntitled.mockReturnValue(true);
     mocks.loadInstallation.mockResolvedValue({ id: installationId });
     mocks.getCredentials.mockResolvedValue({ accessToken: "test-token" });
     mocks.sync.mockResolvedValue({
@@ -118,5 +120,17 @@ describe("deployment sync pre-provider diagnostics", () => {
     expect(response.status).toBe(503);
     expect(log).not.toHaveBeenCalled();
     log.mockRestore();
+  });
+
+  it("keeps the public Pro entitlement gate ahead of any Vercel provider operation", async () => {
+    mocks.connectorEntitled.mockReturnValue(false);
+
+    const response = await POST(request(), { params: Promise.resolve({ id: productId }) });
+
+    expect(response.status).toBe(402);
+    expect(await response.json()).toEqual({ error: "connector_not_entitled" });
+    expect(mocks.loadInstallation).not.toHaveBeenCalled();
+    expect(mocks.getCredentials).not.toHaveBeenCalled();
+    expect(mocks.sync).not.toHaveBeenCalled();
   });
 });

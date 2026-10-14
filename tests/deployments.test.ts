@@ -444,6 +444,7 @@ describe("M15.7 deployment evidence", () => {
         "team_auterim",
       );
       expect(result.currentProductionDeploymentId).toBe("dpl_current");
+      expect(result.currentProductionAliases).toEqual(["auterim.com"]);
       expect(
         result.observations.find((deployment) => deployment.providerDeploymentId === "dpl_current")
           ?.isCurrentProduction,

@@ -32,5 +32,10 @@
     "trigger.config.ts",
     ".next/dev/types/**/*.ts"
   ],
-  "exclude": ["node_modules", "packages/cli/fixtures"]
+  "exclude": [
+    "node_modules",
+    "packages/cli/fixtures",
+    "release-worktrees",
+    ".m157-clean-validation"
+  ]
 }

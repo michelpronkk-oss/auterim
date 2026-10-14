@@ -13,6 +13,9 @@ const eslintConfig = defineConfig([
     ".next/**",
     "out/**",
     "build/**",
+    // Local release worktrees and validation fixtures are not part of this checkout.
+    "release-worktrees/**",
+    ".m157-clean-validation/**",
     // Trigger.dev bundles third-party dependencies here; lint authored task sources only.
     ".trigger/**",
     "next-env.d.ts",
