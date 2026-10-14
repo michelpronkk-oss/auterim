@@ -1,6 +1,7 @@
 import "server-only";
 import { getEnvironment } from "@/lib/env/schema";
 import {
+  decryptStoredCredentialValue,
   getFreshProviderCredentials,
   loadInstallation,
   serverConnectors,
@@ -86,6 +87,11 @@ type CredentialMetadataRow = {
   access_expires_at: string | null;
   credential_version: number;
 };
+type StoredCredentialMetadataRow = CredentialMetadataRow & {
+  ciphertext: string;
+  nonce: string;
+  authentication_tag: string;
+};
 type CredentialVersionRow = { key_version: number; credential_version: number };
 type BaselineRunRow = { id: string; preflight_mode: string; status: string; created_at: string };
 
@@ -134,6 +140,15 @@ async function requiredRow<T>(
 ): Promise<T> {
   const { data, error } = await query;
   return requireQuery(data, error, stage);
+}
+
+async function optionalRow<T>(
+  query: PromiseLike<{ data: T | null; error: QueryError }>,
+  stage: string,
+): Promise<T | null> {
+  const { data, error } = await query;
+  if (error) throw new Error(`m157_acceptance_${stage}`);
+  return data;
 }
 
 function countRows<T>(result: { data: T[] | null; error: QueryError }, stage: string) {
@@ -731,7 +746,8 @@ export async function runM157DeploymentAcceptance() {
     credential: {
       keyVersion: 1,
       decrypt: "PASS",
-      snakeCaseNormalization: "PASS",
+      keyVersionNormalization: "PASS",
+      authenticationTagNormalization: "PASS",
       refreshAttempted: false,
     },
     production: {
@@ -787,4 +803,231 @@ export async function runM157DeploymentAcceptance() {
     billingTouched: false,
     workspaceScope: "Test-only",
   };
+}
+
+/**
+ * Prevents a second pair of internal syncs after the exact current Production
+ * commit already has verified evidence. This reads the provider's current
+ * Production truth before checking persisted evidence; it never performs a sync.
+ */
+export async function isM157CurrentAcceptanceComplete(): Promise<boolean> {
+  let environment: ReturnType<typeof getEnvironment>;
+  try {
+    environment = getEnvironment();
+  } catch {
+    throw new Error("m157_acceptance_self_lock_environment_invalid");
+  }
+  let supabaseUrl: URL;
+  try {
+    supabaseUrl = new URL(environment.NEXT_PUBLIC_SUPABASE_URL ?? "");
+  } catch {
+    throw new Error("m157_acceptance_self_lock_supabase_project_unavailable");
+  }
+  requireCondition(
+    supabaseUrl.hostname === `${TARGET.supabaseProjectRef}.supabase.co`,
+    "self_lock_supabase_project_mismatch",
+  );
+
+  const service = serverConnectors();
+  let installation: Awaited<ReturnType<typeof loadInstallation>>;
+  try {
+    installation = await loadInstallation(
+      service,
+      TARGET.workspaceId,
+      TARGET.installationId,
+      "vercel",
+    );
+  } catch {
+    return false;
+  }
+  if (installation.lifecycle_state !== "connected" || installation.health_state !== "healthy")
+    return false;
+
+  const credentialMetadata = await optionalRow<StoredCredentialMetadataRow>(
+    service
+      .from("connector_credentials")
+      .select(
+        "key_version,access_expires_at,credential_version,ciphertext,nonce,authentication_tag",
+      )
+      .eq("workspace_id", TARGET.workspaceId)
+      .eq("installation_id", TARGET.installationId)
+      .maybeSingle(),
+    "self_lock_credential_unavailable",
+  );
+  if (!credentialMetadata || credentialMetadata.key_version !== 1) return false;
+
+  let credentials: ProviderCredentials;
+  try {
+    credentials = decryptStoredCredentialValue<ProviderCredentials>(
+      credentialMetadata,
+      TARGET.workspaceId,
+      "vercel",
+      installation.external_account_id,
+    );
+  } catch {
+    throw new Error("m157_acceptance_self_lock_credential_unavailable");
+  }
+
+  let snapshot: Awaited<ReturnType<typeof getVercelProjectDeploymentSnapshot>>;
+  try {
+    snapshot = await getVercelProjectDeploymentSnapshot(
+      credentials,
+      TARGET.externalProjectId,
+      TARGET.teamId,
+    );
+  } catch {
+    throw new Error("m157_acceptance_self_lock_provider_unavailable");
+  }
+  if (
+    snapshot.project.id !== TARGET.externalProjectId ||
+    snapshot.project.accountId !== TARGET.teamId ||
+    snapshot.project.repository?.owner !== TARGET.repositoryOwner ||
+    snapshot.project.repository?.name !== TARGET.repositoryName ||
+    !snapshot.currentProductionDeploymentId ||
+    !snapshot.currentProductionAliases.includes("auterim.com")
+  )
+    return false;
+  const current = snapshot.observations.find(
+    (item) => item.providerDeploymentId === snapshot.currentProductionDeploymentId,
+  );
+  if (
+    current?.environment !== "production" ||
+    current.state !== "ready" ||
+    current.sourceRepository?.owner !== TARGET.repositoryOwner ||
+    current.sourceRepository?.name !== TARGET.repositoryName ||
+    typeof current.commitSha !== "string" ||
+    !/^[a-f0-9]{40}$/i.test(current.commitSha)
+  )
+    return false;
+
+  const repository = await optionalRow<{ id: string }>(
+    service
+      .from("repositories")
+      .select("id")
+      .eq("workspace_id", TARGET.workspaceId)
+      .eq("owner", TARGET.repositoryOwner)
+      .eq("name", TARGET.repositoryName)
+      .eq("status", "available")
+      .eq("selected_for_protection", true)
+      .maybeSingle(),
+    "self_lock_repository_unavailable",
+  );
+  if (!repository) return false;
+  const surface = await optionalRow<DeploymentSurfaceRow>(
+    service
+      .from("deployment_surfaces")
+      .select(
+        "id,installation_id,external_project_id,environment_scope,current_production_deployment_id,last_attempt_status",
+      )
+      .eq("workspace_id", TARGET.workspaceId)
+      .eq("installation_id", TARGET.installationId)
+      .eq("provider", "vercel")
+      .eq("external_project_id", TARGET.externalProjectId)
+      .eq("environment_scope", "all")
+      .maybeSingle(),
+    "self_lock_surface_unavailable",
+  );
+  if (!surface) return false;
+  if (
+    surface.current_production_deployment_id !== snapshot.currentProductionDeploymentId ||
+    surface.last_attempt_status !== "succeeded"
+  )
+    return false;
+
+  const mapping = await optionalRow<ProductSurfaceMappingRow>(
+    service
+      .from("workspace_product_deployment_surfaces")
+      .select("id,repository_id,provenance")
+      .eq("workspace_id", TARGET.workspaceId)
+      .eq("protected_product_id", TARGET.productId)
+      .eq("deployment_surface_id", surface.id)
+      .eq("repository_id", repository.id)
+      .maybeSingle(),
+    "self_lock_mapping_unavailable",
+  );
+  if (!mapping) return false;
+  const observation = await optionalRow<DeploymentObservationRow>(
+    service
+      .from("deployment_observations")
+      .select(
+        "id,environment_type,deployment_state,commit_sha,source_repository_owner,source_repository_name,provenance",
+      )
+      .eq("workspace_id", TARGET.workspaceId)
+      .eq("deployment_surface_id", surface.id)
+      .eq("external_deployment_id", snapshot.currentProductionDeploymentId)
+      .maybeSingle(),
+    "self_lock_observation_unavailable",
+  );
+  if (!observation) return false;
+  if (
+    observation.environment_type !== "production" ||
+    observation.deployment_state !== "ready" ||
+    observation.commit_sha?.toLowerCase() !== current.commitSha.toLowerCase() ||
+    observation.source_repository_owner?.toLowerCase() !== TARGET.repositoryOwner ||
+    observation.source_repository_name?.toLowerCase() !== TARGET.repositoryName
+  )
+    return false;
+
+  const evidence = await optionalRow<ProductDeploymentEvidenceRow>(
+    service
+      .from("product_deployment_evidence")
+      .select(
+        "id,baseline_preflight_evidence_id,preflight_finding_id,verification_state,verified_commit_sha,safe_metadata,deployment_observation_id,repository_id",
+      )
+      .eq("workspace_id", TARGET.workspaceId)
+      .eq("protected_product_id", TARGET.productId)
+      .eq("deployment_surface_id", surface.id)
+      .eq("deployment_observation_id", observation.id)
+      .eq("repository_id", repository.id)
+      .maybeSingle(),
+    "self_lock_evidence_unavailable",
+  );
+  if (!evidence) return false;
+  if (
+    evidence.verification_state !== "production_verified" ||
+    evidence.verified_commit_sha?.toLowerCase() !== current.commitSha.toLowerCase() ||
+    !evidence.baseline_preflight_evidence_id ||
+    evidence.preflight_finding_id !== null
+  )
+    return false;
+
+  const baseline = await optionalRow<{
+    id: string;
+    commit_sha: string;
+    verification_state: string;
+    preflight_run_id: string;
+  }>(
+    service
+      .from("baseline_preflight_evidence")
+      .select("id,commit_sha,verification_state,preflight_run_id")
+      .eq("id", evidence.baseline_preflight_evidence_id)
+      .eq("workspace_id", TARGET.workspaceId)
+      .eq("protected_product_id", TARGET.productId)
+      .eq("repository_id", repository.id)
+      .maybeSingle(),
+    "self_lock_baseline_unavailable",
+  );
+  if (!baseline) return false;
+  if (
+    baseline.commit_sha.toLowerCase() !== current.commitSha.toLowerCase() ||
+    baseline.verification_state !== "verified"
+  )
+    return false;
+
+  const baselineRun = await optionalRow<BaselineRunRow>(
+    service
+      .from("preflight_runs")
+      .select("id,preflight_mode,status,created_at")
+      .eq("workspace_id", TARGET.workspaceId)
+      .eq("id", baseline.preflight_run_id)
+      .eq("protected_product_id", TARGET.productId)
+      .maybeSingle(),
+    "self_lock_baseline_run_unavailable",
+  );
+  return Boolean(
+    baselineRun &&
+    mapping.repository_id === repository.id &&
+    baselineRun.preflight_mode === "baseline" &&
+    baselineRun.status === "completed",
+  );
 }
