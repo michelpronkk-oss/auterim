@@ -107,7 +107,7 @@ function main() {
   const vitestEntry = path.join(root, "node_modules", "vitest", "vitest.mjs");
   const child = spawnSync(
     process.execPath,
-    [vitestEntry, "run", "tests/m157-deployment-acceptance.live.test.ts", "--reporter=basic"],
+    [vitestEntry, "run", "tests/m157-deployment-acceptance.live.test.ts", "--reporter=dot"],
     { cwd: root, env: m157ChildEnvironment(process.env), stdio: "inherit" },
   );
   if (child.error) fail("vitest_start_failed");
