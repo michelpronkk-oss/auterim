@@ -6,6 +6,7 @@ import {
   type PolicyThresholds,
 } from "@/lib/intelligence/policy";
 import { buildIntelligenceEvidence } from "@/lib/intelligence/evidence";
+import { enqueueIntelligenceRoute } from "@/lib/intelligence/router-queue";
 import {
   requestJevDecision,
   JevDecisionError,
@@ -13,6 +14,7 @@ import {
   JEV_MODEL,
   JEV_PROVIDER,
 } from "@/lib/intelligence/jev";
+import type { IntelligenceRoute, ProposedPolicyState } from "@/lib/intelligence/taxonomy";
 import {
   SupabaseChangeIntelligenceRepository,
   type ChangeIntelligenceRepository,
@@ -45,9 +47,19 @@ export async function evaluateSourceChangeIntelligence(
 ) {
   const repository = dependencies.repository ?? new SupabaseChangeIntelligenceRepository();
   const start = await repository.begin(input);
+  if (start.status === "completed") {
+    await enqueueIntelligenceRoute(input.sourceChangeId);
+    return start;
+  }
   if (start.status !== "processing") return start;
   const change = start.change as ClassificationChange;
   const evidence = buildIntelligenceEvidence(change);
+  let completed: {
+    status: "completed";
+    sourceChangeId: string;
+    route: IntelligenceRoute;
+    proposedState: ProposedPolicyState;
+  };
   try {
     const judgment = await (dependencies.evaluator ?? requestJevDecision)(evidence);
     let classifier = null;
@@ -71,7 +83,7 @@ export async function evaluateSourceChangeIntelligence(
       quality: evidence.quality,
       policy,
     });
-    return {
+    completed = {
       status: "completed" as const,
       sourceChangeId: input.sourceChangeId,
       route: policy.route,
@@ -89,6 +101,10 @@ export async function evaluateSourceChangeIntelligence(
     });
     throw error;
   }
+  // A dispatch failure must leave the immutable completed decision intact.
+  // Trigger retry replays begin() and re-enqueues this idempotent router task.
+  await enqueueIntelligenceRoute(input.sourceChangeId);
+  return completed;
 }
 
 export const intelligenceEngineIdentity = {

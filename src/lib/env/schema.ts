@@ -123,6 +123,10 @@ export const environmentSchema = z
       emptyToUndefined,
       z.literal("typesafe/jev-1.14").default("typesafe/jev-1.14"),
     ),
+    AUTERIM_INTELLIGENCE_ROUTER_ENABLED: z.preprocess(
+      emptyToUndefined,
+      z.enum(["0", "1"]).default("0"),
+    ),
     AUTERIM_CLASSIFIER_PROVIDER: z.preprocess(
       emptyToUndefined,
       z.enum(["openai"]).default("openai"),

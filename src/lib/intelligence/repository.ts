@@ -117,7 +117,7 @@ export class SupabaseChangeIntelligenceRepository implements ChangeIntelligenceR
     quality: EvidenceQuality;
     policy: PolicyDecision;
   }) {
-    const { error } = await this.client.rpc("record_source_change_intelligence", {
+    const { error } = await this.client.rpc("record_source_change_intelligence_v2", {
       p_source_change_id: input.sourceChangeId,
       p_evidence_fingerprint: input.evidenceFingerprint,
       p_trigger_run_id: input.triggerRunId,
@@ -127,6 +127,8 @@ export class SupabaseChangeIntelligenceRepository implements ChangeIntelligenceR
       p_confidence: input.judgment.confidence,
       p_evidence_quality: input.quality,
       p_proposed_policy_state: input.policy.state,
+      p_policy_reason: input.policy.reason,
+      p_response_model: input.judgment.responseModel || null,
       p_latency_ms: input.judgment.latencyMs,
       p_input_tokens: input.judgment.inputTokens,
       p_output_tokens: input.judgment.outputTokens,

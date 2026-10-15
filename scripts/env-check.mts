@@ -95,6 +95,9 @@ try {
   );
   console.log(`  Provider: ${environment.AUTERIM_INTELLIGENCE_PROVIDER}`);
   console.log(`  Model: ${environment.AUTERIM_INTELLIGENCE_MODEL}`);
+  console.log(
+    `Intelligence Router: ${environment.AUTERIM_INTELLIGENCE_ROUTER_ENABLED === "1" ? "enabled (internal only)" : "disabled"}`,
+  );
   console.log(`GitHub App: ${githubAppConfigured ? "configured" : "not configured"}`);
   console.log(
     "  Required server-side settings: App ID, slug, OAuth client ID/secret, private key, webhook secret",
