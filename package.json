@@ -28,6 +28,7 @@
     "eval:technology": "vitest run tests/technology-observation.test.ts",
     "eval:discovery:live": "vitest run --config vitest.discovery-live.config.mts",
     "eval:impact": "vitest run tests/impact.test.ts",
+    "eval:impact-graph": "vitest run tests/impact-graph.test.ts",
     "eval:impact:live": "vitest run --config vitest.impact-live.config.mts",
     "eval:preflight": "vitest run tests/preflight.test.ts tests/database.test.ts",
     "eval:preflight:live": "vitest run --config vitest.preflight-live.config.mts",
@@ -44,6 +45,7 @@
     "env:check": "node --experimental-strip-types scripts/env-check.mts",
     "project:check": "node --experimental-strip-types scripts/project-check.mts",
     "acceptance:m1576:docker": "node scripts/acceptance-m1576-docker.mjs",
+    "acceptance:m1577:docker": "node scripts/acceptance-m1577-docker.mjs",
     "eval:code-intelligence": "vitest run tests/code-intelligence.test.ts"
   },
   "dependencies": {

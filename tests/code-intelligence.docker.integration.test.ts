@@ -13,6 +13,8 @@ import {
   failCodeAnalysisRun,
   persistCodeAnalysis,
 } from "@/lib/code-intelligence/service";
+import { buildImpactGraph } from "@/lib/impact-graph/repository";
+import { queryImpactGraph } from "@/lib/impact-graph/query";
 
 const enabled = process.env.AUTERIM_M1576_DOCKER_ACCEPTANCE === "1";
 const url = process.env.AUTERIM_M1576_EXPECTED_URL ?? "";
@@ -107,6 +109,11 @@ async function createProtectedRepoFixture(client: SupabaseClient) {
       .select("id")
       .single(),
   );
+  await writeNoResult(client.from("workspace_members").insert({
+    workspace_id: workspace.id,
+    user_id: userId,
+    role: "owner",
+  }));
   const product = await write<{ id: string }>(
     client
       .from("workspace_products")
@@ -176,19 +183,21 @@ async function createCanonicalRouteIntent(
   client: SupabaseClient,
   route: IntelligenceRoute,
   fixture: Awaited<ReturnType<typeof createProtectedRepoFixture>>,
+  dependencyIdentity?: { slug: string; name: string; websiteUrl: string },
 ) {
   const nonce = randomUUID();
-  const dependency = await write<{ id: string }>(
-    client
-      .from("dependency_catalog")
-      .insert({
-        slug: `m1576-${nonce.slice(0, 16)}`,
-        name: "M15.76 local fixture dependency",
-        category: "developer-tools",
-        website_url: "https://fixture.invalid",
-      })
-      .select("id")
-      .single(),
+  const dependencySlug = dependencyIdentity?.slug ?? `m1576-${nonce.slice(0, 16)}`;
+  const existingDependency = dependencyIdentity
+    ? await client.from("dependency_catalog").select("id").eq("slug", dependencySlug).maybeSingle()
+    : { data: null, error: null };
+  if (existingDependency.error) throw new Error("m1576_local_fixture_dependency_read_failed");
+  const dependency = existingDependency.data ?? await write<{ id: string }>(
+    client.from("dependency_catalog").insert({
+      slug: dependencySlug,
+      name: dependencyIdentity?.name ?? "M15.76 local fixture dependency",
+      category: "developer-tools",
+      website_url: dependencyIdentity?.websiteUrl ?? "https://fixture.invalid",
+    }).select("id").single(),
   );
   await writeNoResult(
     client.from("workspace_dependencies").insert({
@@ -365,17 +374,199 @@ async function createCanonicalRouteIntent(
     }),
   );
   if (routeIntent.routeStatus !== "pending") throw new Error("m1576_canonical_route_not_pending");
-  return routeIntent as { id: string; routeTarget: string; routeStatus: string };
+  return { ...routeIntent, sourceChangeId: change.id } as { id: string; routeTarget: string; routeStatus: string; sourceChangeId: string };
 }
 
 describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
   beforeAll(() => {
-    expect(url).toBe("http://127.0.0.1:57421");
+    expect(url).toMatch(/^http:\/\/127\.0\.0\.1:57\d{3}$/);
     expect(serviceKey.length).toBeGreaterThan(20);
     expect(anonKey.length).toBeGreaterThan(20);
     expect(commitSha).toMatch(/^[a-f0-9]{40,64}$/);
     expect(previousCommitSha).toMatch(/^[a-f0-9]{40,64}$/);
   });
+
+  it("M15.77 builds an exact-commit graph from canonical route and code-analysis evidence", async () => {
+    const client = requireAdmin();
+    const fixture = await createProtectedRepoFixture(client);
+    const route = await createCanonicalRouteIntent(client, "sdk_change", fixture, {
+      slug: "openai",
+      name: "OpenAI",
+      websiteUrl: "https://api.openai.com",
+    });
+    const claim = await claimCodeAnalysisRun(
+      { ...fixture, commitSha, routeIntentId: route.id },
+      client,
+    );
+    expect(claim.status).toBe("claimed");
+    if (claim.status !== "claimed" || !claim.claimToken)
+      throw new Error("m1577_analysis_claim_missing");
+    const analysis = analyzeCodeSnapshot(snapshotAt(commitSha));
+    await persistCodeAnalysis(
+      { analysisRunId: claim.analysisRunId, ...fixture, commitSha, claimToken: claim.claimToken, result: analysis },
+      client,
+    );
+
+    const first = await buildImpactGraph({
+      routeIntentId: route.id,
+      analysisRunId: claim.analysisRunId,
+      productId: fixture.productId,
+      repositoryId: fixture.repositoryId,
+    });
+    expect(first.status).toBe("completed");
+    expect(first.commitSha).toBe(commitSha);
+    expect(first.nodeCount).toBeGreaterThan(0);
+    expect(first.edgeCount).toBeGreaterThan(0);
+
+    const graph = await write<{ id: string; workspace_id: string; commit_sha: string; status: string; production_exposure_state: string; workspace_dependency_id: string }>(
+      client.from("impact_graph_builds")
+        .select("id,workspace_id,commit_sha,status,production_exposure_state,workspace_dependency_id")
+        .eq("id", first.graphBuildId).single(),
+    );
+    expect(graph).toMatchObject({
+      workspace_id: fixture.workspaceId,
+      commit_sha: commitSha,
+      status: "completed",
+      production_exposure_state: "unknown",
+    });
+    const dependencyMapping = await write<{ id: string; workspace_id: string; protected_product_id: string; dependency_id: string; monitoring_enabled: boolean }>(
+      client.from("workspace_dependencies")
+        .select("id,workspace_id,protected_product_id,dependency_id,monitoring_enabled")
+        .eq("id", graph.workspace_dependency_id).single(),
+    );
+    expect(dependencyMapping).toMatchObject({
+      workspace_id: fixture.workspaceId,
+      protected_product_id: fixture.productId,
+      monitoring_enabled: true,
+    });
+    const unrelatedFixture = await createProtectedRepoFixture(client);
+    const rows = await write<Array<{ edge_type: string; edge_kind: string; evidence_type: string }>>(
+      client.from("impact_graph_edges").select("edge_type,edge_kind,evidence_type")
+        .eq("graph_build_id", first.graphBuildId),
+    );
+    expect(rows.some((edge) => edge.edge_type === "REFERENCES_EXTERNAL" && edge.edge_kind === "observed")).toBe(true);
+    const ownerClient = createClient(url, anonKey, { auth: { autoRefreshToken: false, persistSession: false } });
+    const ownerSession = await ownerClient.auth.signInWithPassword({ email: fixture.email, password: fixture.password });
+    expect(ownerSession.error).toBeNull();
+    const ownerRequest = new Request("http://localhost/api/internal/impact-graph", {
+      headers: { Authorization: `Bearer ${ownerSession.data.session!.access_token}` },
+    });
+    const graphRead = await queryImpactGraph({ workspaceId: fixture.workspaceId, sourceChangeId: route.sourceChangeId }, ownerRequest);
+    expect(graphRead.builds.some((build) => build["id"] === first.graphBuildId && build["workspace_id"] === fixture.workspaceId)).toBe(true);
+    expect(graphRead.blastRadius.productionExposure).toBe("unknown");
+    expect(graphRead.blastRadius.potentiallyAffectedProductCount).toBe(0);
+    await expect(queryImpactGraph({ workspaceId: unrelatedFixture.workspaceId, sourceChangeId: route.sourceChangeId }, ownerRequest))
+      .rejects.toThrow("impact_graph_forbidden");
+    const unrelatedClient = createClient(url, anonKey, { auth: { autoRefreshToken: false, persistSession: false } });
+    const unrelatedSession = await unrelatedClient.auth.signInWithPassword({ email: unrelatedFixture.email, password: unrelatedFixture.password });
+    expect(unrelatedSession.error).toBeNull();
+    const unrelatedRequest = new Request("http://localhost/api/internal/impact-graph", {
+      headers: { Authorization: `Bearer ${unrelatedSession.data.session!.access_token}` },
+    });
+    const isolatedGraphRead = await queryImpactGraph({
+      workspaceId: unrelatedFixture.workspaceId,
+      sourceChangeId: route.sourceChangeId,
+    }, unrelatedRequest);
+    expect(isolatedGraphRead.builds).toHaveLength(0);
+
+    const replay = await buildImpactGraph({
+      routeIntentId: route.id,
+      analysisRunId: claim.analysisRunId,
+      productId: fixture.productId,
+      repositoryId: fixture.repositoryId,
+    });
+    expect(replay).toMatchObject({ graphBuildId: first.graphBuildId, status: "completed", replayed: true });
+
+    const raceA = await write<Record<string, unknown>>(client.rpc("claim_impact_graph_build", {
+      p_route_intent_id: route.id, p_analysis_run_id: claim.analysisRunId, p_product_id: fixture.productId,
+      p_repository_id: fixture.repositoryId, p_graph_builder_version: "impact-graph-race-a",
+    }));
+    const raceB = await write<Record<string, unknown>>(client.rpc("claim_impact_graph_build", {
+      p_route_intent_id: route.id, p_analysis_run_id: claim.analysisRunId, p_product_id: fixture.productId,
+      p_repository_id: fixture.repositoryId, p_graph_builder_version: "impact-graph-race-b",
+    }));
+    expect(raceA.status).toBe("claimed");
+    expect(raceB.status).toBe("claimed");
+    const completedB = await client.rpc("complete_impact_graph_build", {
+      p_graph_build_id: raceB.graphBuildId, p_claim_token: raceB.claimToken,
+      p_expected_nodes: 0, p_expected_edges: 0, p_assessment_state: "unknown_incomplete",
+    });
+    expect(completedB.error).toBeNull();
+    expect(completedB.data).toBe(true);
+
+    const staleFrom = await write<{ id: string }>(client.from("impact_graph_nodes").insert({
+      graph_build_id: raceA.graphBuildId, workspace_id: fixture.workspaceId, node_type: "provider_change",
+      identity_key: "1".repeat(64), normalized_label: "stale temporal fixture", analysis_run_id: claim.analysisRunId,
+    }).select("id").single());
+    const staleTo = await write<{ id: string }>(client.from("impact_graph_nodes").insert({
+      graph_build_id: raceA.graphBuildId, workspace_id: fixture.workspaceId, node_type: "dependency",
+      identity_key: "2".repeat(64), normalized_label: "stale dependency fixture", analysis_run_id: claim.analysisRunId,
+    }).select("id").single());
+    await writeNoResult(client.from("impact_graph_edges").insert({
+      graph_build_id: raceA.graphBuildId, workspace_id: fixture.workspaceId, analysis_run_id: claim.analysisRunId,
+      source_change_id: route.sourceChangeId, product_id: fixture.productId, repository_id: fixture.repositoryId,
+      commit_sha: commitSha, from_node_id: staleFrom.id, to_node_id: staleTo.id,
+      edge_type: "CHANGE_AFFECTS_DEPENDENCY", edge_kind: "inferred", evidence_type: "dependency_mapping",
+      evidence_chain: [{ type: "dependency_mapping", id: "temporal-race" }], policy_version: "test-policy",
+      graph_builder_version: "impact-graph-race-a", confidence_class: "exact", edge_fingerprint: "3".repeat(64),
+      valid_from: "2000-01-01T00:00:00.000Z",
+    }));
+    const completedA = await client.rpc("complete_impact_graph_build", {
+      p_graph_build_id: raceA.graphBuildId, p_claim_token: raceA.claimToken,
+      p_expected_nodes: 2, p_expected_edges: 1, p_assessment_state: "evidence_present",
+    });
+    expect(completedA.error).toBeNull();
+    expect(completedA.data).toBe(true);
+    const [staleEdge, latestBuild, staleBuild] = await Promise.all([
+      write<{ valid_from: string; valid_until: string | null }>(client.from("impact_graph_edges")
+        .select("valid_from,valid_until").eq("graph_build_id", raceA.graphBuildId).single()),
+      write<{ completed_at: string }>(client.from("impact_graph_builds")
+        .select("completed_at").eq("id", raceB.graphBuildId).single()),
+      write<{ created_at: string }>(client.from("impact_graph_builds")
+        .select("created_at").eq("id", raceA.graphBuildId).single()),
+    ]);
+    expect(Date.parse(staleEdge.valid_from)).toBe(Date.parse(staleBuild.created_at));
+    expect(Date.parse(staleEdge.valid_until ?? "")).toBe(Date.parse(latestBuild.completed_at));
+    const activeStaleEdges = await write<Array<{ id: string }>>(client.from("impact_graph_edges")
+      .select("id").eq("graph_build_id", raceA.graphBuildId).is("valid_until", null));
+    expect(activeStaleEdges).toHaveLength(0);
+    const currentGraph = await queryImpactGraph({ workspaceId: fixture.workspaceId, sourceChangeId: route.sourceChangeId }, ownerRequest);
+    expect(currentGraph.builds.flatMap((build) => build.edges).some((edge) => edge.graph_build_id === raceA.graphBuildId)).toBe(false);
+
+    const disabled = await ownerClient.rpc("disable_workspace_dependency", {
+      p_workspace_id: fixture.workspaceId,
+      p_workspace_dependency_id: dependencyMapping.id,
+    });
+    expect(disabled.error).toBeNull();
+    await expect(buildImpactGraph({
+      routeIntentId: route.id,
+      analysisRunId: claim.analysisRunId,
+      productId: fixture.productId,
+      repositoryId: fixture.repositoryId,
+    })).rejects.toThrow("impact_graph_claim_failed");
+
+    const anonymous = createClient(url, anonKey, { auth: { autoRefreshToken: false, persistSession: false } });
+    const denied = await anonymous.from("impact_graph_builds").select("id").eq("id", first.graphBuildId);
+    expect(denied.error).not.toBeNull();
+    const secondWorkspace = createClient(url, anonKey, { auth: { autoRefreshToken: false, persistSession: false } });
+    const secondSession = await secondWorkspace.auth.signInWithPassword({
+      email: unrelatedFixture.email,
+      password: unrelatedFixture.password,
+    });
+    expect(secondSession.error).toBeNull();
+    const crossWorkspaceRead = await secondWorkspace.from("impact_graph_builds").select("id")
+      .eq("id", first.graphBuildId);
+    expect(crossWorkspaceRead.error).not.toBeNull();
+    const crossWorkspaceWrite = await secondWorkspace.from("impact_graph_nodes").insert({
+      graph_build_id: first.graphBuildId,
+      workspace_id: unrelatedFixture.workspaceId,
+      node_type: "provider_change",
+      identity_key: "a".repeat(64),
+      normalized_label: "unauthorized fixture write",
+      analysis_run_id: claim.analysisRunId,
+    });
+    expect(crossWorkspaceWrite.error).not.toBeNull();
+  }, 180_000);
 
   it("persists canonical route handoffs and reusable exact-commit structural facts", async () => {
     const client = requireAdmin();
