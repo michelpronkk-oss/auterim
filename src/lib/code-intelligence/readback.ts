@@ -2,10 +2,6 @@ import type { CoverageState } from "@/lib/code-intelligence/analyzer";
 import ts from "typescript";
 import { collectHttpClientOrigins, isRecognizedHttpCall } from "@/lib/code-intelligence/http-call";
 
-export const CODE_ANALYSIS_READBACK_WORKSPACE = "e140d48e-9dc0-4552-a9a4-a81fe3872422";
-export const CODE_ANALYSIS_READBACK_REPOSITORY = "3b4f4fe6-cbbd-4bbd-a340-71f7c268e2c4";
-export const CODE_ANALYSIS_READBACK_PRODUCT = "de1f2a12-de3c-4644-8892-b6c2d458a300";
-
 export const EXTERNAL_REFERENCE_TYPES = [
   "package",
   "import",
