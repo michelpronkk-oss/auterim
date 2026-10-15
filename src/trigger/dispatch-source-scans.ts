@@ -1,6 +1,8 @@
 import { idempotencyKeys, schedules } from "@trigger.dev/sdk";
 import { z } from "zod";
 import { enqueueSemanticClassification } from "@/lib/monitoring/classification-queue";
+import { enqueueSourceChangeIntelligence } from "@/lib/intelligence/queue";
+import { SupabaseChangeIntelligenceRepository } from "@/lib/intelligence/repository";
 import { SupabaseChangeClassificationRepository } from "@/lib/monitoring/classification-repository";
 import { SupabaseMonitoringRepository } from "@/lib/monitoring/repository";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -116,13 +118,29 @@ export const dispatchSourceScans = schedules.task({
         });
       }
     }
+    const queuedIntelligence =
+      await new SupabaseChangeIntelligenceRepository().getQueuedSourceChangeIds(100);
+    let intelligenceDispatched = 0;
+    for (const changeId of queuedIntelligence) {
+      try {
+        await enqueueSourceChangeIntelligence(changeId);
+        intelligenceDispatched++;
+      } catch {
+        console.warn("Could not enqueue source-change shadow intelligence.", {
+          changeId,
+          errorCategory: "enqueue_error",
+        });
+      }
+    }
     console.info("Dispatched due Auterim work", {
       scans: dueSourceIds.length,
       classifications: classificationsDispatched,
+      intelligence: intelligenceDispatched,
     });
     return {
       dispatchedScans: dueSourceIds.length,
       dispatchedClassifications: classificationsDispatched,
+      dispatchedIntelligence: intelligenceDispatched,
     };
   },
 });
