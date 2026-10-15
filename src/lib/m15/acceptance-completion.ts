@@ -1,3 +1,8 @@
+import {
+  ProductProtectionReadError,
+  productProtectionReadStage,
+} from "@/lib/protection/read-stage";
+
 type CompletionAttempt = {
   id: string;
   status: string;
@@ -56,6 +61,10 @@ export async function withM157AcceptanceStage<T>(
     return await operation();
   } catch (error) {
     if (error instanceof Error && /^m157_acceptance_[a-z0-9_]+$/.test(error.message)) throw error;
+    if (error instanceof ProductProtectionReadError) {
+      const graphStage = stage.replace(/_unavailable$/, "");
+      throw new Error(`m157_acceptance_${graphStage}_${productProtectionReadStage(error)}`);
+    }
     throw new Error(`m157_acceptance_${stage}`);
   }
 }
