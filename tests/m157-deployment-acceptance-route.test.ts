@@ -103,6 +103,14 @@ describe("fixed-target M15.7 production acceptance route", () => {
     expect(mocks.run).toHaveBeenCalledWith(userId);
   });
 
+  it("accepts an empty POST body stream from a bodyless browser fetch", async () => {
+    const result = await POST(request(undefined, ""));
+
+    expect(result.status).toBe(200);
+    expect(mocks.selfLock).toHaveBeenCalledOnce();
+    expect(mocks.run).toHaveBeenCalledOnce();
+  });
+
   it("self-locks when exact current evidence already exists", async () => {
     mocks.selfLock.mockResolvedValue(true);
 
