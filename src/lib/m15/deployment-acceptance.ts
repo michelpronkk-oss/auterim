@@ -7,7 +7,7 @@ import {
   serverConnectors,
 } from "@/lib/connectors/service";
 import { ConnectorError } from "@/lib/connectors/model";
-import { getProductProtectionGraph } from "@/lib/protection/product-graph";
+import { loadProductDeploymentProtectionGraph } from "@/lib/protection/deployment-graph";
 import { GitHubAppRepositoryProvider } from "@/lib/preflight/github-provider";
 import type { RepositoryTarget } from "@/lib/preflight/preflight";
 import {
@@ -180,13 +180,13 @@ async function currentRepoQuota(service: ReturnType<typeof serverConnectors>) {
 }
 
 async function graphEvidence(service: ReturnType<typeof serverConnectors>, externalId: string) {
-  const graph = await getProductProtectionGraph(service, {
+  const graph = await loadProductDeploymentProtectionGraph(service, {
     workspaceId: TARGET.workspaceId,
     productId: TARGET.productId,
     verificationCapabilityAvailable: true,
   });
   requireCondition(graph, "protection_graph_missing");
-  const surface = graph.deployments.surfaces.find(
+  const surface = graph.surfaces.find(
     (item) => item.provider === "vercel" && item.projectId === TARGET.externalProjectId,
   );
   requireCondition(surface, "protection_graph_surface_missing");
@@ -195,6 +195,7 @@ async function graphEvidence(service: ReturnType<typeof serverConnectors>, exter
   requireCondition(
     observation.verification.state === "production_verified" &&
       observation.verification.exactCommitMatch &&
+      observation.verification.baselinePreflightEvidenceId !== null &&
       observation.currentProduction,
     "protection_graph_evidence_mismatch",
   );
