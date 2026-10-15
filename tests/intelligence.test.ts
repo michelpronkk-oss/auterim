@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildIntelligenceEvidence, measureEvidenceQuality } from "@/lib/intelligence/evidence";
-import { INTELLIGENCE_GOLDEN_FIXTURES } from "@/lib/intelligence/golden-fixtures";
+import {
+  INTELLIGENCE_CALIBRATION_FIXTURE_IDS,
+  INTELLIGENCE_GOLDEN_FIXTURES,
+  INTELLIGENCE_HOLDOUT_FIXTURE_IDS,
+} from "@/lib/intelligence/golden-fixtures";
 import { applyIntelligencePolicy, type PolicyThresholds } from "@/lib/intelligence/policy";
 import type { IntelligenceProbabilities } from "@/lib/intelligence/taxonomy";
 
@@ -45,11 +49,42 @@ function probabilities(
 
 describe("M15.75A intelligence reliability lab", () => {
   it("keeps the complete versioned golden suite", () => {
-    expect(INTELLIGENCE_GOLDEN_FIXTURES).toHaveLength(24);
+    expect(INTELLIGENCE_GOLDEN_FIXTURES).toHaveLength(64);
     expect(INTELLIGENCE_GOLDEN_FIXTURES.map((item) => item.id)).toContain("truncated-deprecation");
     expect(INTELLIGENCE_GOLDEN_FIXTURES.map((item) => item.id)).toContain(
       "prompt-injection-in-docs",
     );
+  });
+
+  it("uses an explicit disjoint stratified calibration and holdout split", () => {
+    const byId = new Map(INTELLIGENCE_GOLDEN_FIXTURES.map((item) => [item.id, item]));
+    const calibrationIds = new Set<string>(INTELLIGENCE_CALIBRATION_FIXTURE_IDS);
+    const holdoutIds = new Set<string>(INTELLIGENCE_HOLDOUT_FIXTURE_IDS);
+    expect(calibrationIds.size).toBe(32);
+    expect(holdoutIds.size).toBe(32);
+    expect([...calibrationIds].filter((id) => holdoutIds.has(id))).toEqual([]);
+    expect(new Set([...calibrationIds, ...holdoutIds])).toEqual(new Set(byId.keys()));
+
+    for (const ids of [calibrationIds, holdoutIds]) {
+      const fixtures = [...ids].map((id) => byId.get(id));
+      expect(fixtures.every(Boolean)).toBe(true);
+      const rows = fixtures.filter(
+        (item): item is (typeof INTELLIGENCE_GOLDEN_FIXTURES)[number] => !!item,
+      );
+      expect(rows.some((item) => item.expected.material && item.expected.critical)).toBe(true);
+      expect(rows.some((item) => item.expected.material && !item.expected.critical)).toBe(true);
+      expect(rows.some((item) => item.expected.docsNoise)).toBe(true);
+      expect(rows.some((item) => item.expected.route === "deprecation")).toBe(true);
+      expect(rows.some((item) => item.expected.route === "breaking_api_change")).toBe(true);
+      expect(rows.some((item) => item.expected.route === "auth_or_security_change")).toBe(true);
+      expect(rows.some((item) => item.expected.route === "schema_or_contract_change")).toBe(true);
+      expect(rows.some((item) => item.expected.route === "limits_or_quota_change")).toBe(true);
+      expect(rows.some((item) => item.expected.route === "pricing_change")).toBe(true);
+      expect(rows.some((item) => !item.expected.evidenceSufficient)).toBe(true);
+      expect(rows.some((item) => item.expected.route === "uncertain")).toBe(true);
+      expect(rows.some((item) => item.diffText.length > 4_000)).toBe(true);
+      expect(rows.some((item) => item.diffText.toLowerCase().includes("ignore"))).toBe(true);
+    }
   });
 
   it("builds provider-neutral bounded evidence without source URL credentials", () => {
@@ -152,6 +187,43 @@ describe("M15.75A intelligence reliability lab", () => {
     });
     expect(result.state).toBe("escalate");
     expect(result.reason).toBe("classifier_jev_disagree_docs_noise");
+  });
+
+  it("escalates a high-risk route when the model also signals docs noise", () => {
+    const item = INTELLIGENCE_GOLDEN_FIXTURES.find((value) => value.id === "endpoint-removal")!;
+    const quality = measureEvidenceQuality({
+      sourceName: item.id,
+      sourceType: item.sourceType,
+      sourceUrl: "https://example.com",
+      dependencyName: "Provider",
+      beforeVersion: 1,
+      afterVersion: 2,
+      diffText: item.diffText,
+      addedLines: item.addedLines,
+      removedLines: item.removedLines,
+      diffTruncated: false,
+      beforeBytes: 10,
+      afterBytes: 10,
+    });
+    const result = applyIntelligencePolicy({
+      classifier: null,
+      judgment: {
+        route: "breaking_api_change",
+        confidence: 0.9,
+        probabilities: probabilities({
+          material: 0.1,
+          criticalChange: 0.1,
+          docsNoise: 0.95,
+          requiresEscalation: 0.1,
+        }),
+      },
+      evidenceQuality: quality,
+      thresholds,
+    });
+    expect(result).toMatchObject({
+      state: "escalate",
+      reason: "high_risk_route_docs_noise_conflict",
+    });
   });
 
   it("routes a material Jev-only result to a candidate without requiring classifier success", () => {

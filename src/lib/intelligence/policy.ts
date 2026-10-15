@@ -30,6 +30,7 @@ export type PolicyDecision = {
     | "classifier_jev_agree_material"
     | "classifier_jev_disagree_material"
     | "classifier_jev_disagree_docs_noise"
+    | "high_risk_route_docs_noise_conflict"
     | "both_non_material_docs_noise"
     | "jev_material_without_classifier"
     | "no_safe_suppression_evidence";
@@ -71,6 +72,21 @@ export function applyIntelligencePolicy(input: {
   const jevMaterial = probability.material >= thresholds.material;
   const jevDocsNoise =
     probability.docsNoise >= thresholds.docsNoise || judgment.route === "docs_noise";
+  const highRiskRoute = [
+    "deprecation",
+    "breaking_api_change",
+    "auth_or_security_change",
+    "schema_or_contract_change",
+    "webhook_or_event_change",
+    "limits_or_quota_change",
+  ].includes(judgment.route);
+  if (highRiskRoute && jevDocsNoise) {
+    return {
+      route: judgment.route,
+      state: "escalate",
+      reason: "high_risk_route_docs_noise_conflict",
+    };
+  }
   if (classifier?.decisionStatus === "review_required") {
     return { route: judgment.route, state: "escalate", reason: "classifier_jev_disagree_material" };
   }

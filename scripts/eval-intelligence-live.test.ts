@@ -1,9 +1,22 @@
 import { loadEnvConfig } from "@next/env";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildIntelligenceEvidence } from "../src/lib/intelligence/evidence";
-import { INTELLIGENCE_GOLDEN_FIXTURES } from "../src/lib/intelligence/golden-fixtures";
+import {
+  buildIntelligenceEvidence,
+  measureEvidenceQuality,
+} from "../src/lib/intelligence/evidence";
+import {
+  INTELLIGENCE_CALIBRATION_FIXTURE_IDS,
+  INTELLIGENCE_GOLDEN_FIXTURES,
+  INTELLIGENCE_HOLDOUT_FIXTURE_IDS,
+} from "../src/lib/intelligence/golden-fixtures";
+import { applyIntelligencePolicy, type PolicyThresholds } from "../src/lib/intelligence/policy";
+import type {
+  IntelligenceProbabilities,
+  IntelligenceRoute,
+} from "../src/lib/intelligence/taxonomy";
 import {
   deriveIncompleteEvidenceThreshold,
   derivePositiveClassThreshold,
@@ -54,6 +67,79 @@ type HistoricalRow = {
   classifier_confidence: number | null;
   classifier_decision_status: "classified" | "review_required" | null;
 };
+
+function fixtureChange(item: (typeof INTELLIGENCE_GOLDEN_FIXTURES)[number]) {
+  const providerExamples: Record<string, string> = {
+    "deprecation-retirement": "OpenAI",
+    "endpoint-removal": "Vercel",
+    "breaking-api-behavior": "GitHub",
+    "authentication-scope": "Supabase",
+    "pricing-increase": "Stripe",
+  };
+  return {
+    sourceName: item.id,
+    sourceType: item.sourceType,
+    sourceUrl: "https://fixture.provider.invalid/source",
+    dependencyName: providerExamples[item.id] ?? "Static provider fixture",
+    beforeVersion: 1,
+    afterVersion: 2,
+    diffText: item.diffText,
+    addedLines: item.addedLines,
+    removedLines: item.removedLines,
+    diffTruncated: item.diffTruncated ?? false,
+    beforeBytes: Buffer.byteLength(item.before),
+    afterBytes: Buffer.byteLength(item.after),
+  };
+}
+
+function splitByIds(ids: readonly string[]) {
+  const selected = new Set(ids);
+  return INTELLIGENCE_GOLDEN_FIXTURES.filter((item) => selected.has(item.id));
+}
+
+function assertExplicitSplit() {
+  const allIds = INTELLIGENCE_GOLDEN_FIXTURES.map((item) => item.id);
+  const calibrationIds = new Set<string>(INTELLIGENCE_CALIBRATION_FIXTURE_IDS);
+  const holdoutIds = new Set<string>(INTELLIGENCE_HOLDOUT_FIXTURE_IDS);
+  if (
+    new Set(allIds).size !== allIds.length ||
+    calibrationIds.size !== INTELLIGENCE_CALIBRATION_FIXTURE_IDS.length ||
+    holdoutIds.size !== INTELLIGENCE_HOLDOUT_FIXTURE_IDS.length ||
+    [...calibrationIds].some((id) => holdoutIds.has(id)) ||
+    allIds.some((id) => !calibrationIds.has(id) && !holdoutIds.has(id)) ||
+    [...calibrationIds, ...holdoutIds].some((id) => !allIds.includes(id))
+  ) {
+    throw new Error("stratified_split_ids_invalid");
+  }
+  for (const split of [
+    splitByIds(INTELLIGENCE_CALIBRATION_FIXTURE_IDS),
+    splitByIds(INTELLIGENCE_HOLDOUT_FIXTURE_IDS),
+  ]) {
+    const routes = new Set(split.map((item) => item.expected.route));
+    const has = (predicate: (item: (typeof split)[number]) => boolean) => split.some(predicate);
+    if (
+      split.length !== 32 ||
+      !has((item) => item.expected.material && item.expected.critical) ||
+      !has((item) => item.expected.material && !item.expected.critical) ||
+      !has((item) => item.expected.docsNoise) ||
+      !has((item) => !item.expected.evidenceSufficient) ||
+      !has((item) => item.diffText.length > 4_000) ||
+      !has((item) => item.id.includes("injection")) ||
+      [
+        "docs_noise",
+        "deprecation",
+        "breaking_api_change",
+        "auth_or_security_change",
+        "schema_or_contract_change",
+        "limits_or_quota_change",
+        "pricing_change",
+        "uncertain",
+      ].some((route) => !routes.has(route as never))
+    ) {
+      throw new Error("stratified_split_route_missing");
+    }
+  }
+}
 
 function readLocalHistoricalRows(): HistoricalRow[] {
   const root = "C:\\Users\\miche\\Desktop\\Auterim";
@@ -120,9 +206,13 @@ describe("M15.75A live Jev reliability eval", () => {
     const environment = getEnvironment();
     if (!isIntegrationConfigured("intelligence", environment))
       throw new Error("Jev shadow integration is not configured.");
+    assertExplicitSplit();
+    const calibrationFixtures = splitByIds(INTELLIGENCE_CALIBRATION_FIXTURE_IDS);
+    const holdoutFixtures = splitByIds(INTELLIGENCE_HOLDOUT_FIXTURE_IDS);
     const predictions: Array<{
       id: string;
       expected: (typeof INTELLIGENCE_GOLDEN_FIXTURES)[number]["expected"];
+      quality: ReturnType<typeof measureEvidenceQuality>;
       prediction: EnginePrediction;
       route: string;
       confidence: number;
@@ -130,37 +220,19 @@ describe("M15.75A live Jev reliability eval", () => {
       probabilities: Record<string, number>;
       usage: { inputTokens: number | null; outputTokens: number | null; costUsd: number | null };
     }> = [];
-    const providerExamples: Record<string, string> = {
-      "deprecation-retirement": "OpenAI",
-      "endpoint-removal": "Vercel",
-      "breaking-api-behavior": "GitHub",
-      "authentication-scope": "Supabase",
-      "pricing-increase": "Stripe",
-    };
     let cursor = 0;
     const worker = async () => {
       while (cursor < INTELLIGENCE_GOLDEN_FIXTURES.length) {
         const index = cursor++;
         const item = INTELLIGENCE_GOLDEN_FIXTURES[index]!;
-        const change = {
-          sourceName: item.id,
-          sourceType: item.sourceType,
-          sourceUrl: "https://fixture.provider.invalid/source",
-          dependencyName: providerExamples[item.id] ?? "Static provider fixture",
-          beforeVersion: 1,
-          afterVersion: 2,
-          diffText: item.diffText,
-          addedLines: item.addedLines,
-          removedLines: item.removedLines,
-          diffTruncated: item.diffTruncated ?? false,
-          beforeBytes: Buffer.byteLength(item.before),
-          afterBytes: Buffer.byteLength(item.after),
-        };
+        const change = fixtureChange(item);
         try {
-          const judgment = await requestJevDecision(buildIntelligenceEvidence(change));
+          const evidence = buildIntelligenceEvidence(change);
+          const judgment = await requestJevDecision(evidence);
           predictions[index] = {
             id: item.id,
             expected: item.expected,
+            quality: evidence.quality,
             prediction: {
               material: false,
               critical: false,
@@ -203,6 +275,10 @@ describe("M15.75A live Jev reliability eval", () => {
       classifierMaterial: boolean | null;
       jevMaterial: number;
       route: string;
+      costUsd: number | null;
+      latencyMs: number;
+      inputTokens: number | null;
+      outputTokens: number | null;
     }> = [];
     const replayWorker = async () => {
       while (historicalCursor < historicalRows.length) {
@@ -226,13 +302,18 @@ describe("M15.75A live Jev reliability eval", () => {
           classifierMaterial: row.classifier_material,
           jevMaterial: judgment.probabilities.material,
           route: judgment.route,
+          costUsd: judgment.costUsd,
+          latencyMs: judgment.latencyMs,
+          inputTokens: judgment.inputTokens,
+          outputTokens: judgment.outputTokens,
         });
       }
     };
     await Promise.all([replayWorker(), replayWorker()]);
 
-    const calibration = predictions.slice(0, 16);
-    const holdout = predictions.slice(16);
+    const byId = new Map(predictions.map((row) => [row.id, row]));
+    const calibration = calibrationFixtures.map((item) => byId.get(item.id)!);
+    const holdout = holdoutFixtures.map((item) => byId.get(item.id)!);
     const materialThreshold = deriveZeroCriticalFalseNegativeThreshold(
       calibration.map((row) => ({
         probability: row.probabilities.material,
@@ -252,25 +333,186 @@ describe("M15.75A live Jev reliability eval", () => {
         .filter((row) => row.expected.escalation)
         .map((row) => row.probabilities.escalation),
     );
-    const heldoutAtCalibratedThreshold = holdout.map((row) => ({
-      expected: row.expected,
-      prediction: {
+    const docsNoiseThreshold = derivePositiveClassThreshold(
+      calibration.filter((row) => row.expected.docsNoise).map((row) => row.probabilities.docsNoise),
+    );
+    const policyThresholds: PolicyThresholds = {
+      material: materialThreshold ?? 1,
+      criticalChange: criticalThreshold ?? 1,
+      evidenceSufficient: evidenceThreshold ?? 1,
+      docsNoise: docsNoiseThreshold ?? 1,
+      requiresEscalation: escalationThreshold ?? 1,
+      routeConfidence:
+        derivePositiveClassThreshold(
+          calibration
+            .filter((row) => row.expected.route !== "uncertain")
+            .map((row) => row.confidence),
+        ) ?? 0.7,
+      calibrationFixtureCount: calibration.length,
+      calibrationVersion: "m1575a-stratified-64-v2",
+    };
+    const heldoutEvaluated = holdout.map((row) => {
+      const routeProbabilities = Object.fromEntries(
+        INTELLIGENCE_GOLDEN_FIXTURES.map((fixture) => [fixture.expected.route, 0]),
+      ) as IntelligenceProbabilities["route"];
+      routeProbabilities[row.route as IntelligenceRoute] = row.confidence;
+      const probabilities: IntelligenceProbabilities = {
+        material: row.probabilities.material,
+        criticalChange: row.probabilities.critical,
+        evidenceSufficient: row.probabilities.evidenceSufficient,
+        docsNoise: row.probabilities.docsNoise,
+        requiresEscalation: row.probabilities.escalation,
+        route: routeProbabilities,
+      };
+      const rawPrediction: EnginePrediction = {
         ...row.prediction,
-        material:
-          materialThreshold === null ? false : row.probabilities.material >= materialThreshold,
-        critical:
-          criticalThreshold === null ? false : row.probabilities.critical >= criticalThreshold,
+        material: probabilities.material >= policyThresholds.material,
+        critical: probabilities.criticalChange >= policyThresholds.criticalChange,
         evidenceInsufficient:
-          evidenceThreshold === null
-            ? false
-            : row.probabilities.evidenceSufficient < evidenceThreshold,
-        escalation:
-          escalationThreshold === null
-            ? false
-            : row.probabilities.escalation >= escalationThreshold,
-      },
-    }));
-    const metrics = summarizeReliability(heldoutAtCalibratedThreshold);
+          probabilities.evidenceSufficient < policyThresholds.evidenceSufficient,
+        escalation: probabilities.requiresEscalation >= policyThresholds.requiresEscalation,
+      };
+      const judgment = {
+        route: row.route as IntelligenceRoute,
+        confidence: row.confidence,
+        probabilities,
+      };
+      const policy = applyIntelligencePolicy({
+        classifier: null,
+        judgment,
+        evidenceQuality: row.quality,
+        thresholds: policyThresholds,
+      });
+      return { ...row, rawPrediction, policy, judgment };
+    });
+    const rawMetrics = summarizeReliability(
+      heldoutEvaluated.map((row) => ({ expected: row.expected, prediction: row.rawPrediction })),
+    );
+    const count = (predicate: (row: (typeof heldoutEvaluated)[number]) => boolean) =>
+      heldoutEvaluated.filter(predicate).length;
+    const criticalRows = heldoutEvaluated.filter((row) => row.expected.critical);
+    const criticalIncompleteRows = criticalRows.filter(
+      (row) => row.quality.sourceCriticality === "critical" && row.quality.incomplete,
+    );
+    const docsNoiseSuppressed = heldoutEvaluated.filter(
+      (row) => row.expected.docsNoise && row.policy.state === "suppress_candidate",
+    );
+    const allSuppressed = heldoutEvaluated.filter(
+      (row) => row.policy.state === "suppress_candidate",
+    );
+    const dangerousSuppressionFalseNegatives = count(
+      (row) =>
+        (row.expected.material || row.expected.critical) &&
+        row.policy.state === "suppress_candidate",
+    );
+    const criticalProtected = criticalRows.filter((row) =>
+      ["continue_candidate", "escalate", "insufficient_evidence"].includes(row.policy.state),
+    ).length;
+    const criticalIncompleteCaught = criticalIncompleteRows.filter(
+      (row) => row.policy.state === "insufficient_evidence",
+    ).length;
+    const routeConfusion = Object.fromEntries(
+      [...new Set(heldoutEvaluated.map((row) => row.expected.route))].sort().map((route) => {
+        const matching = heldoutEvaluated.filter((row) => row.expected.route === route);
+        return [
+          route,
+          {
+            count: matching.length,
+            correct: matching.filter((row) => row.route === route).length,
+            accuracy: matching.length
+              ? matching.filter((row) => row.route === route).length / matching.length
+              : null,
+            predicted: Object.fromEntries(
+              [...new Set(heldoutEvaluated.map((row) => row.route))]
+                .sort()
+                .map((predicted) => [
+                  predicted,
+                  matching.filter((row) => row.route === predicted).length,
+                ]),
+            ),
+          },
+        ];
+      }),
+    );
+    const policyMetrics = {
+      labeledCount: holdout.length,
+      stateCounts: Object.fromEntries(
+        ["suppress_candidate", "continue_candidate", "escalate", "insufficient_evidence"].map(
+          (state) => [state, count((row) => row.policy.state === state)],
+        ),
+      ),
+      dangerousSuppressionFalseNegatives,
+      criticalProtectionCoverage: criticalRows.length
+        ? criticalProtected / criticalRows.length
+        : null,
+      criticalIncompleteEvidenceCoverage: criticalIncompleteRows.length
+        ? criticalIncompleteCaught / criticalIncompleteRows.length
+        : null,
+      docsNoiseSuppressionPrecision: allSuppressed.length
+        ? docsNoiseSuppressed.length / allSuppressed.length
+        : null,
+      docsNoiseMaterialFalseSuppressions: count(
+        (row) =>
+          row.expected.material &&
+          row.route === "docs_noise" &&
+          row.policy.state === "suppress_candidate",
+      ),
+      unnecessaryEscalationRate: heldoutEvaluated.filter(
+        (row) => !row.expected.material && !row.expected.critical,
+      ).length
+        ? heldoutEvaluated.filter(
+            (row) =>
+              !row.expected.material &&
+              !row.expected.critical &&
+              !row.expected.escalation &&
+              row.policy.state === "escalate",
+          ).length /
+          heldoutEvaluated.filter((row) => !row.expected.material && !row.expected.critical).length
+        : null,
+      heldoutPolicyOutcomes: heldoutEvaluated.map((row) => ({
+        id: row.id,
+        expectedRoute: row.expected.route,
+        state: row.policy.state,
+        reason: row.policy.reason,
+      })),
+    };
+    const highRiskRoutes = new Set([
+      "deprecation",
+      "breaking_api_change",
+      "auth_or_security_change",
+      "schema_or_contract_change",
+      "webhook_or_event_change",
+      "limits_or_quota_change",
+    ]);
+    const highRiskRouteCollapse = Object.entries(routeConfusion).filter(
+      ([route, metric]) =>
+        highRiskRoutes.has(route) && (metric as { accuracy: number | null }).accuracy === 0,
+    );
+    const activeRoutingGate = {
+      dangerousSuppressionFalseNegatives: dangerousSuppressionFalseNegatives === 0,
+      criticalProtectionCoverage:
+        criticalRows.length > 0 && criticalProtected === criticalRows.length,
+      docsNoiseNoMaterialFalseSuppression: policyMetrics.docsNoiseMaterialFalseSuppressions === 0,
+      criticalIncompleteEvidenceCatch:
+        criticalIncompleteRows.length > 0 &&
+        criticalIncompleteCaught === criticalIncompleteRows.length,
+      noHighRiskRouteCollapse: highRiskRouteCollapse.length === 0,
+    };
+    const criticalFalseNegativeDiagnostics = heldoutEvaluated
+      .filter((row) => row.expected.critical && !row.rawPrediction.critical)
+      .map((row) => ({
+        fixtureId: row.id,
+        expectedRoute: row.expected.route,
+        jevRoute: row.route,
+        materialProbability: row.probabilities.material,
+        criticalProbability: row.probabilities.critical,
+        evidenceSufficientProbability: row.probabilities.evidenceSufficient,
+        docsNoiseProbability: row.probabilities.docsNoise,
+        escalationProbability: row.probabilities.escalation,
+        evidenceQualityIncomplete: row.quality.incomplete,
+        finalPolicyState: row.policy.state,
+        finalPolicyReason: row.policy.reason,
+      }));
     const totalUsage = predictions.reduce(
       (sum, row) => ({
         inputTokens: sum.inputTokens + (row.usage.inputTokens ?? 0),
@@ -279,69 +521,103 @@ describe("M15.75A live Jev reliability eval", () => {
       }),
       { inputTokens: 0, outputTokens: 0, costUsd: 0 },
     );
-    const reportedCostCount = predictions.filter((row) => row.usage.costUsd !== null).length;
-    console.log(
-      JSON.stringify({
-        model: predictions[0]?.responseModel ?? "typesafe/jev-1.14",
-        schema: [
-          "choice:route",
-          "noul:material",
-          "noul:critical",
-          "noul:evidence_sufficient",
-          "noul:docs_noise",
-          "noul:escalation",
-        ],
-        fixtureCount: predictions.length,
-        historicalReplay: {
-          count: historicalRows.length,
-          currentClassifierCount: historicalRows.filter((row) => row.classifier_material !== null)
-            .length,
-          jevCount: historicalJudgments.length,
-          materialAgreementAtMidpoint: historicalJudgments.filter(
-            (row) =>
-              row.classifierMaterial !== null && row.classifierMaterial === row.jevMaterial >= 0.5,
-          ).length,
-          materialDisagreementAtMidpoint: historicalJudgments.filter(
-            (row) =>
-              row.classifierMaterial !== null && row.classifierMaterial !== row.jevMaterial >= 0.5,
-          ).length,
-          labeledGoldCount: 0,
-          classifierFalseNegatives: null,
-          note: "agreement is not accuracy; historical rows have no independent gold labels, so classifier false-negative rate is not measurable",
+    for (const row of historicalJudgments) {
+      totalUsage.inputTokens += row.inputTokens ?? 0;
+      totalUsage.outputTokens += row.outputTokens ?? 0;
+      totalUsage.costUsd += row.costUsd ?? 0;
+    }
+    const liveDecisionCount = predictions.length + historicalJudgments.length;
+    const reportedCostCount =
+      predictions.filter((row) => row.usage.costUsd !== null).length +
+      historicalJudgments.filter((row) => row.costUsd !== null).length;
+    const report = JSON.stringify({
+      model: predictions[0]?.responseModel ?? "typesafe/jev-1.14",
+      schema: [
+        "choice:route",
+        "noul:material",
+        "noul:critical",
+        "noul:evidence_sufficient",
+        "noul:docs_noise",
+        "noul:escalation",
+      ],
+      fixtureCount: predictions.length,
+      calibrationCount: calibration.length,
+      holdoutCount: holdout.length,
+      splitVersion: "explicit-stratified-64-v2",
+      splitPass: true,
+      historicalReplay: {
+        count: historicalRows.length,
+        currentClassifierCount: historicalRows.filter((row) => row.classifier_material !== null)
+          .length,
+        jevCount: historicalJudgments.length,
+        materialAgreementAtMidpoint: historicalJudgments.filter(
+          (row) =>
+            row.classifierMaterial !== null && row.classifierMaterial === row.jevMaterial >= 0.5,
+        ).length,
+        materialDisagreementAtMidpoint: historicalJudgments.filter(
+          (row) =>
+            row.classifierMaterial !== null && row.classifierMaterial !== row.jevMaterial >= 0.5,
+        ).length,
+        labeledGoldCount: 0,
+        classifierFalseNegatives: null,
+        note: "agreement is not accuracy; historical rows have no independent gold labels",
+      },
+      classifierMetrics: {
+        sameGoldCorpusEvaluated: false,
+        reason:
+          "would require additional live classifier calls not authorized by this Jev-only budget",
+        historicalClassifiedRows: historicalRows.filter((row) => row.classifier_material !== null)
+          .length,
+        historicalGoldLabels: 0,
+      },
+      rawJev: {
+        heldoutMetrics: rawMetrics,
+        perRouteConfusion: routeConfusion,
+        thresholdsDerivedFromCalibration: {
+          material: materialThreshold,
+          critical: criticalThreshold,
+          evidenceSufficient: evidenceThreshold,
+          docsNoise: docsNoiseThreshold,
+          escalation: escalationThreshold,
         },
-        classifierMetrics: {
-          labeledGoldCount: 0,
-          historicalClassifiedRows: historicalRows.filter((row) => row.classifier_material !== null)
-            .length,
-          materialFalseNegatives: null,
-          criticalFalseNegatives: null,
-          note: "false-negative metrics require independently labeled outcomes; historical classifier results are not gold labels",
-        },
-        providerExamples: Object.values(providerExamples),
-        calibrationCount: calibration.length,
-        heldoutCount: holdout.length,
-        calibratedMaterialThreshold: materialThreshold,
-        calibratedCriticalThreshold: criticalThreshold,
-        calibratedEvidenceSufficientThreshold: evidenceThreshold,
-        calibratedEscalationThreshold: escalationThreshold,
-        heldoutMetrics: metrics,
-        totalUsage,
-        reportedCostCount,
-        costPerThousandUsd:
-          reportedCostCount === predictions.length
-            ? (totalUsage.costUsd / predictions.length) * 1000
-            : null,
-        meanLatencyMs:
-          predictions.reduce((sum, row) => sum + (row.prediction.latencyMs ?? 0), 0) /
-          predictions.length,
-        outcomes: predictions.map(({ id, route, confidence, probabilities }) => ({
-          id,
-          route,
-          confidence,
-          probabilities,
-        })),
-      }),
+        currentCriticalFalseNegativeDiagnostics: criticalFalseNegativeDiagnostics,
+      },
+      auterimPolicy: {
+        thresholds: policyThresholds,
+        metrics: policyMetrics,
+        activeRoutingGate,
+        activeRoutingReady: Object.values(activeRoutingGate).every(Boolean),
+        classifierMode:
+          "Jev-only policy evaluation; classifier unavailable for this corpus without additional live requests",
+      },
+      liveJevDecisionCount: liveDecisionCount,
+      liveFixtureDecisionCount: predictions.length,
+      liveHistoricalDecisionCount: historicalJudgments.length,
+      totalUsage,
+      reportedCostCount,
+      costPerThousandUsd:
+        reportedCostCount === liveDecisionCount
+          ? (totalUsage.costUsd / liveDecisionCount) * 1000
+          : null,
+      meanLatencyMs:
+        [
+          ...predictions.map((row) => row.prediction.latencyMs ?? 0),
+          ...historicalJudgments.map((row) => row.latencyMs),
+        ].reduce((sum, value) => sum + value, 0) / liveDecisionCount,
+    });
+    const reportPath = join(
+      process.cwd(),
+      "node_modules",
+      ".cache",
+      "auterim",
+      "intelligence-live-eval.json",
     );
-    expect(predictions).toHaveLength(24);
+    mkdirSync(dirname(reportPath), { recursive: true });
+    writeFileSync(reportPath, `${report}\n`, { encoding: "utf8", mode: 0o600 });
+    process.stdout.write(`${report}\n`);
+    expect(predictions).toHaveLength(64);
+    expect(calibration).toHaveLength(32);
+    expect(holdout).toHaveLength(32);
+    expect(liveDecisionCount).toBeLessThanOrEqual(100);
   }, 180_000);
 });
