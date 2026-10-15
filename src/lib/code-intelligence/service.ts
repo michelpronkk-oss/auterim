@@ -1,6 +1,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createCodeAnalysisIdempotencyKey } from "@/lib/code-intelligence/analyzer";
+import type { CodeAnalysisFailureStage } from "@/lib/code-intelligence/failures";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 const BATCH_SIZE = 250;
@@ -189,17 +190,21 @@ export async function failCodeAnalysisRun(
   input: {
     analysisRunId: string;
     claimToken: string;
+    failureStage: CodeAnalysisFailureStage | null;
     failureCategory: string;
     retryable: boolean;
+    cleanupFailureCategory?: "cleanup_failed";
   },
   client: SupabaseClient = createSupabaseServerClient(),
 ) {
-  const { error } = await client.rpc("fail_code_analysis_run", {
+  const { data, error } = await client.rpc("fail_code_analysis_run", {
     p_analysis_run_id: input.analysisRunId,
     p_claim_token: input.claimToken,
-    p_failure_category:
-      input.failureCategory.replace(/[^a-z0-9_]/g, "_").slice(0, 80) || "analysis_failed",
+    p_failure_category: input.failureCategory,
+    p_failure_stage: input.failureStage,
     p_retryable: input.retryable,
+    p_cleanup_failure_category: input.cleanupFailureCategory ?? null,
   });
   fail(error);
+  if (data !== true) throw new Error("code_intelligence_failure_claim_mismatch");
 }

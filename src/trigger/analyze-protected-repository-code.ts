@@ -1,4 +1,4 @@
-import { schemaTask, AbortTaskRunError } from "@trigger.dev/sdk";
+import { schemaTask, AbortTaskRunError, logger } from "@trigger.dev/sdk";
 import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +14,7 @@ import {
   persistCodeAnalysis,
   claimCodeAnalysisRun,
 } from "@/lib/code-intelligence/service";
+import { executeCodeAnalysisStages } from "@/lib/code-intelligence/failures";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getEnvironment } from "@/lib/env/schema";
 import { GitHubAppRepositoryProvider } from "@/lib/preflight/github-provider";
@@ -208,52 +209,79 @@ export const analyzeProtectedRepositoryCodeTask = schemaTask({
       throw new AbortTaskRunError("Code analysis attempt unavailable");
 
     let temporaryRoot: string | null = null;
-    try {
-      const environment = getEnvironment();
-      const provider = new GitHubAppRepositoryProvider({
-        appId: environment.GITHUB_APP_ID,
-        privateKey: environment.GITHUB_APP_PRIVATE_KEY,
-      });
-      temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "auterim-code-intel-"));
-      await provider.materializeRepository(target, payload.commitSha, temporaryRoot);
-      const files = await collectSnapshotFiles(temporaryRoot);
-      const result = analyzeCodeSnapshot(files);
-      await persistCodeAnalysis({
+    const outcome = await executeCodeAnalysisStages({
+      validateEnvironment: () => getEnvironment(),
+      setupProvider: (environment) =>
+        new GitHubAppRepositoryProvider({
+          appId: environment.GITHUB_APP_ID,
+          privateKey: environment.GITHUB_APP_PRIVATE_KEY,
+        }),
+      materialize: async (provider) => {
+        temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "auterim-code-intel-"));
+        await provider.materializeRepository(target, payload.commitSha, temporaryRoot);
+      },
+      collectSnapshot: async () => {
+        if (!temporaryRoot) throw new Error("code_analysis_snapshot_root_unavailable");
+        return collectSnapshotFiles(temporaryRoot);
+      },
+      analyze: (files) => analyzeCodeSnapshot(files),
+      persist: (result) =>
+        persistCodeAnalysis({
+          analysisRunId: claim.analysisRunId,
+          workspaceId: payload.workspaceId,
+          repositoryId: payload.repositoryId,
+          commitSha: payload.commitSha,
+          claimToken: claim.claimToken!,
+          result,
+        }),
+      cleanup: async () => {
+        if (temporaryRoot) await rm(temporaryRoot, { recursive: true, force: true });
+      },
+    });
+
+    if (outcome.cleanupFailed) {
+      logger.warn("Code analysis temporary cleanup failed", {
         analysisRunId: claim.analysisRunId,
-        workspaceId: payload.workspaceId,
-        repositoryId: payload.repositoryId,
-        commitSha: payload.commitSha,
-        claimToken: claim.claimToken,
-        result,
+        failureCategory: "cleanup_failed",
+        primaryFailureStage: outcome.ok ? null : outcome.failure.stage,
       });
-      return {
-        analysisRunId: claim.analysisRunId,
-        status: "completed",
-        coverageState: result.coverageState,
-        filesDiscovered: result.filesDiscovered,
-        filesAnalyzed: result.filesAnalyzed,
-        filesSkipped: result.filesSkipped,
-        parseFailures: result.parseFailures,
-        packageFacts: result.externalReferences.filter((item) => item.referenceType === "package")
-          .length,
-        importFacts: result.externalReferences.filter((item) => item.referenceType === "import")
-          .length,
-        externalReferences: result.externalReferences.length,
-        relations: result.relations.length,
-      };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "";
-      const retryable = /(?:_408|_425|_429|_5\d\d|provider_unavailable|claim_busy)/.test(message);
-      await failCodeAnalysisRun({
-        analysisRunId: claim.analysisRunId,
-        claimToken: claim.claimToken,
-        failureCategory: retryable ? "github_snapshot_unavailable" : "analysis_failed",
-        retryable,
-      });
-      if (retryable) throw new Error("code_analysis_retryable_failure");
-      throw new AbortTaskRunError("Code analysis failed safely");
-    } finally {
-      if (temporaryRoot) await rm(temporaryRoot, { recursive: true, force: true });
     }
+    if (!outcome.ok) {
+      try {
+        await failCodeAnalysisRun({
+          analysisRunId: claim.analysisRunId,
+          claimToken: claim.claimToken,
+          failureStage: outcome.failure.stage,
+          failureCategory: outcome.failure.category,
+          retryable: outcome.failure.retryable,
+          cleanupFailureCategory: outcome.cleanupFailed ? "cleanup_failed" : undefined,
+        });
+      } catch {
+        logger.error("Code analysis failure state could not be persisted", {
+          analysisRunId: claim.analysisRunId,
+          failureStage: outcome.failure.stage,
+          failureCategory: "failure_state_persistence_failed",
+        });
+      }
+      if (outcome.failure.retryable) throw new Error("code_analysis_retryable_failure");
+      throw new AbortTaskRunError("Code analysis failed safely");
+    }
+
+    const result = outcome.analysis;
+    return {
+      analysisRunId: claim.analysisRunId,
+      status: "completed",
+      coverageState: result.coverageState,
+      filesDiscovered: result.filesDiscovered,
+      filesAnalyzed: result.filesAnalyzed,
+      filesSkipped: result.filesSkipped,
+      parseFailures: result.parseFailures,
+      packageFacts: result.externalReferences.filter((item) => item.referenceType === "package")
+        .length,
+      importFacts: result.externalReferences.filter((item) => item.referenceType === "import")
+        .length,
+      externalReferences: result.externalReferences.length,
+      relations: result.relations.length,
+    };
   },
 });

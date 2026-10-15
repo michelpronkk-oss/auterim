@@ -552,23 +552,71 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
       client.rpc("claim_code_analysis_run", retryArgs),
     );
     expect(firstRetryClaim.status).toBe("claimed");
+    await expect(
+      failCodeAnalysisRun(
+        {
+          analysisRunId: String(firstRetryClaim.analysisRunId),
+          claimToken: "00000000-0000-4000-8000-000000000099",
+          failureStage: "analysis_persistence",
+          failureCategory: "fixture_terminal_failure",
+          retryable: false,
+        },
+        client,
+      ),
+    ).rejects.toThrow("code_intelligence_failure_claim_mismatch");
+    const afterClaimMismatch = await write<{ status: string; failure_stage: string | null }>(
+      client
+        .from("code_analysis_runs")
+        .select("status,failure_stage")
+        .eq("id", firstRetryClaim.analysisRunId)
+        .single(),
+    );
+    expect(afterClaimMismatch).toEqual({ status: "running", failure_stage: null });
     await failCodeAnalysisRun(
       {
         analysisRunId: String(firstRetryClaim.analysisRunId),
         claimToken: String(firstRetryClaim.claimToken),
+        failureStage: "analysis_persistence",
         failureCategory: "fixture_transient_failure",
         retryable: true,
       },
       client,
     );
+    const retryableState = await write<{
+      status: string;
+      failure_stage: string | null;
+      claim_token: string | null;
+      lease_expires_at: string | null;
+    }>(
+      client
+        .from("code_analysis_runs")
+        .select("status,failure_stage,claim_token,lease_expires_at")
+        .eq("id", firstRetryClaim.analysisRunId)
+        .single(),
+    );
+    expect(retryableState).toMatchObject({
+      status: "queued",
+      failure_stage: "analysis_persistence",
+      claim_token: null,
+      lease_expires_at: null,
+    });
     const retryClaim = await write<Record<string, unknown>>(
       client.rpc("claim_code_analysis_run", retryArgs),
     );
     expect(retryClaim.status).toBe("claimed");
+    const newAttemptState = await write<{ failure_stage: string | null }>(
+      client
+        .from("code_analysis_runs")
+        .select("failure_stage")
+        .eq("id", firstRetryClaim.analysisRunId)
+        .single(),
+    );
+    expect(newAttemptState.failure_stage).toBeNull();
     await failCodeAnalysisRun(
       {
         analysisRunId: String(retryClaim.analysisRunId),
         claimToken: String(retryClaim.claimToken),
+        failureStage: "analysis_persistence",
         failureCategory: "fixture_terminal_failure",
         retryable: false,
       },
@@ -582,14 +630,68 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
       analysisRunId: firstRetryClaim.analysisRunId,
       replayed: true,
     });
-    const retryState = await write<{ attempt_count: number; status: string }>(
+    const retryState = await write<{
+      attempt_count: number;
+      status: string;
+      failure_stage: string | null;
+      claim_token: string | null;
+      lease_expires_at: string | null;
+    }>(
       client
         .from("code_analysis_runs")
-        .select("attempt_count,status")
+        .select("attempt_count,status,failure_stage,claim_token,lease_expires_at")
         .eq("id", firstRetryClaim.analysisRunId)
         .single(),
     );
-    expect(retryState).toEqual({ attempt_count: 2, status: "failed" });
+    expect(retryState).toMatchObject({
+      attempt_count: 2,
+      status: "failed",
+      failure_stage: "analysis_persistence",
+      claim_token: null,
+      lease_expires_at: null,
+    });
+
+    const cleanupArgs = {
+      ...retryArgs,
+      p_analyzer_version: "cleanup-failure-fixture-v1",
+      p_analysis_profile: "cleanup-failure-fixture-v1",
+      p_idempotency_key: `cleanup-fixture:${fixture.repositoryId}:${commitSha}`,
+    };
+    const cleanupClaim = await write<Record<string, unknown>>(
+      client.rpc("claim_code_analysis_run", cleanupArgs),
+    );
+    expect(cleanupClaim.status).toBe("claimed");
+    await failCodeAnalysisRun(
+      {
+        analysisRunId: String(cleanupClaim.analysisRunId),
+        claimToken: String(cleanupClaim.claimToken),
+        failureStage: null,
+        failureCategory: "analysis_failed",
+        retryable: false,
+        cleanupFailureCategory: "cleanup_failed",
+      },
+      client,
+    );
+    const cleanupState = await write<{
+      status: string;
+      coverage_state: string;
+      failure_stage: string | null;
+      failure_category: string | null;
+      cleanup_failure_category: string | null;
+    }>(
+      client
+        .from("code_analysis_runs")
+        .select("status,coverage_state,failure_stage,failure_category,cleanup_failure_category")
+        .eq("id", cleanupClaim.analysisRunId)
+        .single(),
+    );
+    expect(cleanupState).toEqual({
+      status: "failed",
+      coverage_state: "failed",
+      failure_stage: null,
+      failure_category: "analysis_failed",
+      cleanup_failure_category: "cleanup_failed",
+    });
 
     const anonymous = createClient(url, anonKey, {
       auth: { autoRefreshToken: false, persistSession: false },
