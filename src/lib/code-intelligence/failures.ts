@@ -37,6 +37,7 @@ export const CODE_ANALYSIS_FAILURE_CATEGORIES = [
   "static_analysis_failed",
   "parse_budget_exceeded",
   "fact_limit_exceeded",
+  "analysis_watchdog_timeout",
   "analysis_persistence_failed",
   "analysis_failed",
 ] as const;
@@ -161,6 +162,8 @@ export async function executeCodeAnalysisStages<
   materialize: (provider: TProvider) => Promise<void>;
   collectSnapshot: () => Promise<TSnapshot>;
   analyze: (snapshot: TSnapshot) => Promise<TAnalysis> | TAnalysis;
+  analysisWatchdogMs?: number;
+  monotonicNow?: () => number;
   persist: (analysis: TAnalysis) => Promise<void>;
   cleanup: () => Promise<void>;
 }) {
@@ -178,7 +181,14 @@ export async function executeCodeAnalysisStages<
     stage = "snapshot_collection";
     const snapshot = await input.collectSnapshot();
     stage = "static_analysis";
+    const analysisStartedAt = (input.monotonicNow ?? performance.now.bind(performance))();
     analysis = await input.analyze(snapshot);
+    if (
+      input.analysisWatchdogMs !== undefined &&
+      (input.monotonicNow ?? performance.now.bind(performance))() - analysisStartedAt >
+        input.analysisWatchdogMs
+    )
+      throw new CodeAnalysisStageError("analysis_watchdog_timeout");
   } catch (error) {
     primaryFailure = normalizeCodeAnalysisFailure(stage, error);
   }
@@ -213,3 +223,4 @@ export async function executeCodeAnalysisStages<
 
   return { ok: true as const, analysis: analysis as TAnalysis, cleanupFailed: false };
 }
+import { performance } from "node:perf_hooks";

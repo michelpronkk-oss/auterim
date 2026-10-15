@@ -75,11 +75,25 @@ run("cmd.exe", [
   "/d",
   "/s",
   "/c",
-  `npx supabase migration up --local --workdir ${path.relative(repositoryRoot, isolatedSupabaseProject)}`,
+  `npx supabase migration up --local --include-all --workdir ${path.relative(repositoryRoot, isolatedSupabaseProject)}`,
 ]);
+const sourceBodyColumns = run("docker", [
+  "exec",
+  databaseContainer,
+  "psql",
+  "-U",
+  "postgres",
+  "-d",
+  "postgres",
+  "-At",
+  "-c",
+  "select string_agg(column_name, ',') from information_schema.columns where table_schema='public' and table_name = any(array['code_analysis_runs','code_entities','code_relations','code_external_references','code_analysis_skipped_files']) and column_name = any(array['source','source_text','source_content','raw_source','file_content'])",
+]).trim();
+if (sourceBodyColumns) throw new Error("m1576_source_body_column_detected");
 
-const exactHead = run("git", ["rev-parse", "HEAD"]).trim();
-const priorHead = run("git", ["rev-parse", "HEAD^"]).trim();
+const exactHead = "6165f30d4e0c9a37bd7f2cd7579aaaa76d2bfdcc";
+const priorHead = run("git", ["rev-parse", `${exactHead}^`]).trim();
+run("git", ["cat-file", "-e", `${exactHead}^{commit}`]);
 for (const sha of [exactHead, priorHead]) {
   if (!/^[a-f0-9]{40,64}$/.test(sha)) throw new Error("m1576_acceptance_exact_commit_guard_failed");
 }

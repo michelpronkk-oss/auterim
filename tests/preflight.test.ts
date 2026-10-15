@@ -1,4 +1,8 @@
 import { createHmac, generateKeyPairSync } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { gzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
 import {
   createPreflightFingerprint,
@@ -35,6 +39,26 @@ const repository: RepositoryTarget = {
   externalId: 1001,
   installationId: 2001,
 };
+
+function tarEntry(name: string, content = "", kind = "0", linkName = "") {
+  const body = Buffer.from(content, "utf8");
+  const header = Buffer.alloc(512);
+  header.write(name, 0, 100, "utf8");
+  header.write("0000644\0", 100, 8, "ascii");
+  header.write("0000000\0", 108, 8, "ascii");
+  header.write("0000000\0", 116, 8, "ascii");
+  header.write(`${body.byteLength.toString(8).padStart(11, "0")}\0`, 124, 12, "ascii");
+  header.write("00000000000\0", 136, 12, "ascii");
+  header[156] = kind.charCodeAt(0);
+  header.write(linkName, 157, 100, "utf8");
+  header.write("ustar\0", 257, 6, "ascii");
+  return Buffer.concat([
+    header,
+    body,
+    Buffer.alloc((512 - (body.byteLength % 512)) % 512),
+  ]);
+}
+
 const baseChange: PreflightChange = {
   assessmentId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
   workspaceDependencyId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
@@ -807,6 +831,54 @@ describe("offline Preflight evidence evaluation", () => {
       );
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+
+  it("reports archive links as bounded skipped coverage without materializing them", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const archiveBody = gzipSync(
+      Buffer.concat([
+        tarEntry("repo/src/real.ts", "export const real = 1;"),
+        tarEntry("repo/src/linked.ts", "", "2", "../outside.ts"),
+        tarEntry("repo/src/hardlinked.ts", "", "1", "src/real.ts"),
+        Buffer.alloc(1024),
+      ]),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        if (String(input).endsWith("/access_tokens"))
+          return new Response(
+            JSON.stringify({
+              token: "ghs_fixture_ephemeral",
+              expires_at: new Date(Date.now() + 50 * 60_000).toISOString(),
+            }),
+            { status: 201 },
+          );
+        return new Response(archiveBody, { status: 200 });
+      }),
+    );
+    const destination = await mkdtemp(path.join(os.tmpdir(), "auterim-github-archive-"));
+    try {
+      const provider = new GitHubAppRepositoryProvider({
+        appId: "12345",
+        privateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      });
+      const archive = await provider.materializeRepository(repository, shaA, destination);
+      expect(archive).toMatchObject({
+        files: 1,
+        skippedLinks: 2,
+        skippedLinkPaths: ["src/linked.ts", "src/hardlinked.ts"],
+      });
+      await expect(readFile(path.join(destination, "src", "linked.ts"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect(await readFile(path.join(destination, "src", "real.ts"), "utf8")).toContain(
+        "real = 1",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+      await rm(destination, { recursive: true, force: true });
     }
   });
 

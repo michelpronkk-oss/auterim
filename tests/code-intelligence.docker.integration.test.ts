@@ -41,6 +41,30 @@ async function writeNoResult(query: PromiseLike<{ error: { message: string } | n
   if (result.error) throw new Error("m1576_local_fixture_write_failed");
 }
 
+async function exactCount(table: string, analysisRunId: string) {
+  const { count, error } = await requireAdmin()
+    .from(table)
+    .select("id", { count: "exact", head: true })
+    .eq("analysis_run_id", analysisRunId);
+  if (error || count === null) throw new Error("m1576_persisted_count_read_failed");
+  return count;
+}
+
+async function readAll<T>(
+  fetchPage: (
+    from: number,
+    to: number,
+  ) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+) {
+  const rows: T[] = [];
+  for (let offset = 0; offset < 50_001; offset += 1_000) {
+    const page = await write(fetchPage(offset, offset + 999));
+    rows.push(...page);
+    if (page.length < 1_000) return rows;
+  }
+  throw new Error("m1576_readback_row_bound_exceeded");
+}
+
 function snapshotAt(sha: string): SnapshotFile[] {
   const tracked = execFileSync("git", ["ls-tree", "-r", "--name-only", sha], { encoding: "utf8" })
     .split(/\r?\n/)
@@ -466,12 +490,20 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
         files_analyzed: number;
         files_skipped: number;
         parse_failures: number;
+        supported_files_discovered: number;
+        supported_files_analyzed: number;
+        supported_files_skipped_by_bound: number;
+        unsupported_language_files: number;
+        persisted_entity_count: number;
+        persisted_relation_count: number;
+        persisted_reference_count: number;
+        persisted_skip_count: number;
       }>
     >(
       client
         .from("code_analysis_runs")
         .select(
-          "id,commit_sha,product_id,provider_repository_identity,coverage_state,files_discovered,files_analyzed,files_skipped,parse_failures",
+          "id,commit_sha,product_id,provider_repository_identity,coverage_state,files_discovered,files_analyzed,files_skipped,parse_failures,supported_files_discovered,supported_files_analyzed,supported_files_skipped_by_bound,unsupported_language_files,persisted_entity_count,persisted_relation_count,persisted_reference_count,persisted_skip_count",
         )
         .eq("repository_id", fixture.repositoryId)
         .in("commit_sha", [commitSha, previousCommitSha]),
@@ -487,27 +519,81 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
     expect(runRows.every((row) => row.coverage_state !== "failed")).toBe(true);
     expect(runRows.every((row) => row.files_discovered >= row.files_analyzed)).toBe(true);
     expect(runRows.find((row) => row.commit_sha === commitSha)).toMatchObject({
-      coverage_state: "partial",
+      supported_files_discovered: 430,
+      supported_files_analyzed: 430,
+      supported_files_skipped_by_bound: 0,
     });
-    expect(runRows.find((row) => row.commit_sha === commitSha)?.files_skipped).toBeGreaterThan(0);
+    expect(runRows.find((row) => row.commit_sha === commitSha)).toMatchObject({
+      coverage_state: "complete",
+    });
+    expect(runRows.find((row) => row.commit_sha === commitSha)?.files_skipped).toBe(0);
 
-    const entityCount = await write<Array<{ id: string }>>(
-      client.from("code_entities").select("id").eq("analysis_run_id", firstClaim.analysisRunId),
-    );
-    const referenceRows = await write<
-      Array<{ normalized_value: string; redacted: boolean; value_fingerprint: string | null }>
-    >(
+    const entityCount = await exactCount("code_entities", firstClaim.analysisRunId);
+    const referenceRows = await readAll((from, to) =>
       client
         .from("code_external_references")
         .select("normalized_value,redacted,value_fingerprint")
-        .eq("analysis_run_id", firstClaim.analysisRunId),
+        .eq("analysis_run_id", firstClaim.analysisRunId)
+        .order("id")
+        .range(from, to),
     );
-    const relationCount = await write<Array<{ id: string }>>(
-      client.from("code_relations").select("id").eq("analysis_run_id", firstClaim.analysisRunId),
-    );
-    expect(entityCount.length).toBeGreaterThan(0);
-    expect(relationCount.length).toBeGreaterThan(0);
+    const relationCount = await exactCount("code_relations", firstClaim.analysisRunId);
+    expect(entityCount).toBeGreaterThan(0);
+    expect(relationCount).toBeGreaterThan(0);
     expect(referenceRows.length).toBeGreaterThan(0);
+    const exactCounts = await Promise.all(
+      [
+        ["code_entities", "entities"],
+        ["code_relations", "relations"],
+        ["code_external_references", "references"],
+        ["code_analysis_skipped_files", "skips"],
+      ].map(async ([table, label]) => {
+        const { count, error } = await client
+          .from(table!)
+          .select("id", { count: "exact", head: true })
+          .eq("analysis_run_id", firstClaim.analysisRunId);
+        if (error || count === null) throw new Error("m1576_persisted_count_read_failed");
+        return [label!, count] as const;
+      }),
+    );
+    const countMap = Object.fromEntries(exactCounts);
+    const persistedRunCounts = await write<{
+      persisted_entity_count: number;
+      persisted_relation_count: number;
+      persisted_reference_count: number;
+      persisted_skip_count: number;
+      coverage_reason_counts: Record<string, number>;
+    }>(
+      client
+        .from("code_analysis_runs")
+        .select(
+          "persisted_entity_count,persisted_relation_count,persisted_reference_count,persisted_skip_count,coverage_reason_counts",
+        )
+        .eq("id", firstClaim.analysisRunId)
+        .single(),
+    );
+    expect(countMap).toEqual({
+      entities: persistedRunCounts.persisted_entity_count,
+      relations: persistedRunCounts.persisted_relation_count,
+      references: persistedRunCounts.persisted_reference_count,
+      skips: persistedRunCounts.persisted_skip_count,
+    });
+    const missingRelationEvidence = await client
+      .from("code_relations")
+      .select("id", { count: "exact", head: true })
+      .eq("analysis_run_id", firstClaim.analysisRunId)
+      .is("evidence_path", null);
+    expect(missingRelationEvidence.error).toBeNull();
+    expect(missingRelationEvidence.count).toBe(0);
+    for (const column of ["evidence_start_column", "evidence_end_column"] as const) {
+      const missingCoordinate = await client
+        .from("code_relations")
+        .select("id", { count: "exact", head: true })
+        .eq("analysis_run_id", firstClaim.analysisRunId)
+        .is(column, null);
+      expect(missingCoordinate.error).toBeNull();
+      expect(missingCoordinate.count).toBe(0);
+    }
     expect(
       referenceRows.every(
         (row) =>
@@ -524,10 +610,22 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
       ),
     ).toBe(false);
 
-    const factsAfterReplay = await write<Array<{ id: string }>>(
-      client.from("code_entities").select("id").eq("analysis_run_id", firstClaim.analysisRunId),
+    expect(await exactCount("code_entities", firstClaim.analysisRunId)).toBe(entityCount);
+    expect(await exactCount("code_relations", firstClaim.analysisRunId)).toBe(relationCount);
+    expect(await exactCount("code_external_references", firstClaim.analysisRunId)).toBe(
+      countMap.references,
     );
-    expect(factsAfterReplay).toHaveLength(entityCount.length);
+    const referencesMissingCoordinates = await requireAdmin()
+      .from("code_external_references")
+      .select("id", { count: "exact", head: true })
+      .eq("analysis_run_id", firstClaim.analysisRunId)
+      .neq("reference_type", "package")
+      .or("start_column.is.null,end_column.is.null");
+    expect(referencesMissingCoordinates.error).toBeNull();
+    expect(referencesMissingCoordinates.count).toBe(0);
+    expect(await exactCount("code_analysis_skipped_files", firstClaim.analysisRunId)).toBe(
+      countMap.skips,
+    );
     const handoffs = await write<Array<{ route_intent_id: string; status: string }>>(
       client
         .from("code_analysis_route_handoffs")
@@ -737,6 +835,26 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
       p_route_intent_id: null,
     });
     expect(authenticatedDeniedRpc.error).not.toBeNull();
+    const authenticatedDeniedCompletion = await authenticated.rpc("complete_code_analysis_run_v2", {
+      p_analysis_run_id: firstClaim.analysisRunId,
+      p_claim_token: randomUUID(),
+      p_coverage_state: "complete",
+      p_files_discovered: 0,
+      p_files_analyzed: 0,
+      p_files_skipped: 0,
+      p_parse_failures: 0,
+      p_bytes_analyzed: 0,
+      p_supported_files_discovered: 0,
+      p_supported_files_analyzed: 0,
+      p_supported_files_skipped_by_bound: 0,
+      p_unsupported_language_files: 0,
+      p_coverage_reason_counts: {},
+      p_persisted_entity_count: 0,
+      p_persisted_relation_count: 0,
+      p_persisted_reference_count: 0,
+      p_persisted_skip_count: 0,
+    });
+    expect(authenticatedDeniedCompletion.error).not.toBeNull();
 
     const crossWorkspace = await client.rpc("claim_code_analysis_run", {
       p_workspace_id: randomUUID(),
@@ -750,5 +868,292 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
       p_route_intent_id: null,
     });
     expect(crossWorkspace.error).not.toBeNull();
+  }, 120_000);
+
+  it("persists every fact for a synthetic analysis exceeding the PostgREST row cap", async () => {
+    const client = requireAdmin();
+    const fixture = await createProtectedRepoFixture(client);
+    const claim = await claimCodeAnalysisRun({ ...fixture, commitSha }, client);
+    expect(claim.status).toBe("claimed");
+    if (claim.status !== "claimed" || !claim.claimToken)
+      throw new Error("m1576_large_fixture_claim_missing");
+
+    const files: SnapshotFile[] = Array.from({ length: 100 }, (_, fileIndex) => {
+      const imports = Array.from(
+        { length: 12 },
+        (_, importIndex) =>
+          `import { item${importIndex} as alias${importIndex} } from "@fixture/pkg-${fileIndex}-${importIndex}";`,
+      );
+      const functions = Array.from(
+        { length: 10 },
+        (_, index) => `export function file${fileIndex}Function${index}() { return ${index}; }`,
+      );
+      const text = [...imports, ...functions].join("\n");
+      return {
+        path: `src/large-${String(fileIndex).padStart(3, "0")}.ts`,
+        text,
+        size: Buffer.byteLength(text),
+      };
+    });
+    const result = analyzeCodeSnapshot(files);
+    expect(result.entities.length).toBeGreaterThan(1_000);
+    expect(result.externalReferences.length).toBeGreaterThan(1_000);
+    expect(result.relations.length).toBeGreaterThan(1_000);
+    expect(result.coverageState).toBe("complete");
+
+    await persistCodeAnalysis(
+      {
+        analysisRunId: claim.analysisRunId,
+        ...fixture,
+        commitSha,
+        claimToken: claim.claimToken,
+        result,
+      },
+      client,
+    );
+
+    const countRows = async (table: string) => {
+      const { count, error } = await client
+        .from(table)
+        .select("id", { count: "exact", head: true })
+        .eq("analysis_run_id", claim.analysisRunId);
+      if (error || count === null) throw new Error("m1576_large_fixture_count_read_failed");
+      return count;
+    };
+    const [entities, relations, references, skips] = await Promise.all([
+      countRows("code_entities"),
+      countRows("code_relations"),
+      countRows("code_external_references"),
+      countRows("code_analysis_skipped_files"),
+    ]);
+    expect({ entities, relations, references, skips }).toEqual({
+      entities: result.entities.length,
+      relations: result.relations.length,
+      references: result.externalReferences.length,
+      skips: result.skippedFiles.length,
+    });
+    const completed = await write<{
+      status: string;
+      persisted_entity_count: number;
+      persisted_relation_count: number;
+      persisted_reference_count: number;
+      persisted_skip_count: number;
+    }>(
+      client
+        .from("code_analysis_runs")
+        .select(
+          "status,persisted_entity_count,persisted_relation_count,persisted_reference_count,persisted_skip_count",
+        )
+        .eq("id", claim.analysisRunId)
+        .single(),
+    );
+    expect(completed).toEqual({
+      status: "completed",
+      persisted_entity_count: entities,
+      persisted_relation_count: relations,
+      persisted_reference_count: references,
+      persisted_skip_count: skips,
+    });
+    const replay = await claimCodeAnalysisRun({ ...fixture, commitSha }, client);
+    expect(replay).toMatchObject({
+      status: "completed",
+      analysisRunId: claim.analysisRunId,
+      replayed: true,
+    });
+  }, 120_000);
+
+  it("fails closed when a selected relation references a missing entity", async () => {
+    const client = requireAdmin();
+    const fixture = await createProtectedRepoFixture(client);
+    const claim = await claimCodeAnalysisRun({ ...fixture, commitSha }, client);
+    expect(claim.status).toBe("claimed");
+    if (claim.status !== "claimed" || !claim.claimToken)
+      throw new Error("m1576_integrity_fixture_claim_missing");
+    const source = "export function first() {}\nexport function second() { first(); }";
+    const valid = analyzeCodeSnapshot([
+      { path: "src/integrity.ts", text: source, size: Buffer.byteLength(source) },
+    ]);
+    expect(valid.relations.length).toBeGreaterThan(0);
+    const corrupted = {
+      ...valid,
+      relations: valid.relations.map((relation, index) =>
+        index === 0 ? { ...relation, toEntityKey: "missing-entity-key" } : relation,
+      ),
+    };
+    await expect(
+      persistCodeAnalysis(
+        {
+          analysisRunId: claim.analysisRunId,
+          ...fixture,
+          commitSha,
+          claimToken: claim.claimToken,
+          result: corrupted,
+        },
+        client,
+      ),
+    ).rejects.toThrow("code_intelligence_relation_entity_missing");
+    const beforeFailure = await write<{ status: string }>(
+      client.from("code_analysis_runs").select("status").eq("id", claim.analysisRunId).single(),
+    );
+    expect(beforeFailure.status).toBe("running");
+    const mismatchedComplete = await client.rpc("complete_code_analysis_run_v2", {
+      p_analysis_run_id: claim.analysisRunId,
+      p_claim_token: claim.claimToken,
+      p_coverage_state: "complete",
+      p_files_discovered: valid.filesDiscovered,
+      p_files_analyzed: valid.filesAnalyzed,
+      p_files_skipped: valid.filesSkipped,
+      p_parse_failures: valid.parseFailures,
+      p_bytes_analyzed: valid.bytesAnalyzed,
+      p_supported_files_discovered: valid.supportedFilesDiscovered,
+      p_supported_files_analyzed: valid.supportedFilesAnalyzed,
+      p_supported_files_skipped_by_bound: valid.supportedFilesSkippedByBound,
+      p_unsupported_language_files: valid.unsupportedLanguageFiles,
+      p_coverage_reason_counts: valid.coverageReasonCounts,
+      p_persisted_entity_count: 1,
+      p_persisted_relation_count: 0,
+      p_persisted_reference_count: 0,
+      p_persisted_skip_count: 0,
+    });
+    expect(mismatchedComplete.error).not.toBeNull();
+    const afterRejectedCompletion = await write<{ status: string }>(
+      client.from("code_analysis_runs").select("status").eq("id", claim.analysisRunId).single(),
+    );
+    expect(afterRejectedCompletion.status).toBe("running");
+    await failCodeAnalysisRun(
+      {
+        analysisRunId: claim.analysisRunId,
+        claimToken: claim.claimToken,
+        failureStage: "analysis_persistence",
+        failureCategory: "analysis_persistence_failed",
+        retryable: false,
+      },
+      client,
+    );
+    const afterFailure = await write<{ status: string; coverage_state: string }>(
+      client
+        .from("code_analysis_runs")
+        .select("status,coverage_state")
+        .eq("id", claim.analysisRunId)
+        .single(),
+    );
+    expect(afterFailure).toEqual({ status: "failed", coverage_state: "failed" });
+  }, 120_000);
+
+  it("rejects completion when a v2 relation lacks source provenance", async () => {
+    const client = requireAdmin();
+    const fixture = await createProtectedRepoFixture(client);
+    const claim = await claimCodeAnalysisRun({ ...fixture, commitSha }, client);
+    expect(claim.status).toBe("claimed");
+    if (claim.status !== "claimed" || !claim.claimToken)
+      throw new Error("m1576_provenance_fixture_claim_missing");
+    const source = "export function first() {}\nexport function second() { first(); }";
+    const valid = analyzeCodeSnapshot([
+      { path: "src/provenance.ts", text: source, size: Buffer.byteLength(source) },
+    ]);
+    expect(valid.relations.length).toBeGreaterThan(0);
+    const invalidProvenance = {
+      ...valid,
+      relations: valid.relations.map((relation, index) =>
+        index === 0
+          ? {
+              ...relation,
+              evidencePath: null as unknown as string,
+              evidenceStartLine: null as unknown as number,
+              evidenceEndLine: null as unknown as number,
+              extractorType: null as unknown as string,
+            }
+          : relation,
+      ),
+    };
+    await expect(
+      persistCodeAnalysis(
+        {
+          analysisRunId: claim.analysisRunId,
+          ...fixture,
+          commitSha,
+          claimToken: claim.claimToken,
+          result: invalidProvenance,
+        },
+        client,
+      ),
+    ).rejects.toThrow("code_intelligence_persistence_failed");
+    const afterRejectedCompletion = await write<{ status: string }>(
+      client.from("code_analysis_runs").select("status").eq("id", claim.analysisRunId).single(),
+    );
+    expect(afterRejectedCompletion.status).toBe("running");
+    await failCodeAnalysisRun(
+      {
+        analysisRunId: claim.analysisRunId,
+        claimToken: claim.claimToken,
+        failureStage: "analysis_persistence",
+        failureCategory: "analysis_persistence_failed",
+        retryable: false,
+      },
+      client,
+    );
+    const failed = await write<{ status: string; coverage_state: string }>(
+      client
+        .from("code_analysis_runs")
+        .select("status,coverage_state")
+        .eq("id", claim.analysisRunId)
+        .single(),
+    );
+    expect(failed).toEqual({ status: "failed", coverage_state: "failed" });
+  }, 120_000);
+
+  it("rejects v2 completion when a source reference lacks occurrence columns", async () => {
+    const client = requireAdmin();
+    const fixture = await createProtectedRepoFixture(client);
+    const claim = await claimCodeAnalysisRun({ ...fixture, commitSha }, client);
+    expect(claim.status).toBe("claimed");
+    if (claim.status !== "claimed" || !claim.claimToken)
+      throw new Error("m1576_reference_provenance_fixture_claim_missing");
+    const source = 'import Stripe from "stripe";\nconst client = new Stripe("test");';
+    const valid = analyzeCodeSnapshot([
+      { path: "src/reference.ts", text: source, size: Buffer.byteLength(source) },
+    ]);
+    const sourceReferenceIndex = valid.externalReferences.findIndex(
+      (reference) => reference.referenceType !== "package",
+    );
+    expect(sourceReferenceIndex).toBeGreaterThanOrEqual(0);
+    const invalid = {
+      ...valid,
+      externalReferences: valid.externalReferences.map((reference, index) =>
+        index === sourceReferenceIndex
+          ? {
+              ...reference,
+              startColumn: null as unknown as number,
+              endColumn: null as unknown as number,
+            }
+          : reference,
+      ),
+    };
+    await expect(
+      persistCodeAnalysis(
+        {
+          analysisRunId: claim.analysisRunId,
+          ...fixture,
+          commitSha,
+          claimToken: claim.claimToken,
+          result: invalid,
+        },
+        client,
+      ),
+    ).rejects.toThrow("code_intelligence_persistence_failed");
+    const afterRejectedCompletion = await write<{ status: string }>(
+      client.from("code_analysis_runs").select("status").eq("id", claim.analysisRunId).single(),
+    );
+    expect(afterRejectedCompletion.status).toBe("running");
+    await failCodeAnalysisRun(
+      {
+        analysisRunId: claim.analysisRunId,
+        claimToken: claim.claimToken,
+        failureStage: "analysis_persistence",
+        failureCategory: "analysis_persistence_failed",
+        retryable: false,
+      },
+      client,
+    );
   }, 120_000);
 });
