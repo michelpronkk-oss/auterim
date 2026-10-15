@@ -17,6 +17,7 @@ import {
 import { syncSelectedVercelProject } from "@/lib/deployments/service";
 import type { ProviderCredentials } from "@/lib/connectors/providers";
 import { M157_FIXED_TARGET as TARGET } from "../../../scripts/m157-deployment-acceptance.ts";
+import { isM157AcceptanceComplete, withM157AcceptanceStage } from "./acceptance-completion";
 
 type QueryError = { message?: string } | null;
 type DeploymentSurfaceRow = {
@@ -116,6 +117,7 @@ function safeFailureCategory(error: unknown) {
 }
 
 async function runSync(input: {
+  phase: "first" | "second";
   service: ReturnType<typeof serverConnectors>;
   installation: Awaited<ReturnType<typeof loadInstallation>>;
   credentials: ProviderCredentials;
@@ -130,7 +132,10 @@ async function runSync(input: {
       externalProjectId: TARGET.externalProjectId,
     });
   } catch (error) {
-    throw new Error(`m157_acceptance_sync_${safeFailureCategory(error)}`);
+    if (error instanceof Error && /^m157_acceptance_[a-z0-9_]+$/.test(error.message)) throw error;
+    if (error instanceof ConnectorError)
+      throw new Error(`m157_acceptance_${input.phase}_sync_${error.category.toLowerCase()}`);
+    throw new Error(`m157_acceptance_${input.phase}_sync_unavailable`);
   }
 }
 
@@ -315,7 +320,7 @@ async function persistedState(input: {
   };
 }
 
-export async function runM157DeploymentAcceptance(input?: {
+async function runM157DeploymentAcceptanceInternal(input?: {
   freshBaseline?: {
     preflightRunId: string;
     mode: "baseline";
@@ -569,8 +574,9 @@ export async function runM157DeploymentAcceptance(input?: {
       snapshot.currentProductionAliases.includes("auterim.com"),
     "authoritative_production_alias_missing",
   );
+  const currentProductionDeploymentId = snapshot.currentProductionDeploymentId;
   const currentDeployment = snapshot.observations.find(
-    (observation) => observation.providerDeploymentId === snapshot.currentProductionDeploymentId,
+    (observation) => observation.providerDeploymentId === currentProductionDeploymentId,
   );
   requireCondition(
     currentDeployment?.environment === "production" &&
@@ -670,21 +676,25 @@ export async function runM157DeploymentAcceptance(input?: {
     "baseline_history_unavailable",
   ).length;
 
-  const firstResult = await runSync({ service, installation, credentials });
+  const firstResult = await runSync({ phase: "first", service, installation, credentials });
   requireCondition(
     firstResult.observed > 0 &&
       firstResult.mappedProducts === 1 &&
-      firstResult.currentProductionDeploymentId === snapshot.currentProductionDeploymentId,
+      firstResult.currentProductionDeploymentId === currentProductionDeploymentId,
     "first_sync_result_mismatch",
   );
-  const firstState = await persistedState({
-    service,
-    repositoryId: repository.id,
-    deploymentId: snapshot.currentProductionDeploymentId,
-    sha: githubMainSha,
-    baselineEvidenceId: baseline.id,
-  });
-  const firstGraph = await graphEvidence(service, snapshot.currentProductionDeploymentId);
+  const firstState = await withM157AcceptanceStage("first_persisted_state_unavailable", () =>
+    persistedState({
+      service,
+      repositoryId: repository.id,
+      deploymentId: currentProductionDeploymentId,
+      sha: githubMainSha,
+      baselineEvidenceId: baseline.id,
+    }),
+  );
+  const firstGraph = await withM157AcceptanceStage("first_protection_graph_unavailable", () =>
+    graphEvidence(service, currentProductionDeploymentId),
+  );
   requireCondition(
     firstGraph.surfaceId === firstState.surfaceId &&
       firstGraph.mappingProvenance === "protected_repository_identity" &&
@@ -692,48 +702,59 @@ export async function runM157DeploymentAcceptance(input?: {
     "first_protection_graph_mismatch",
   );
 
-  const secondResult = await runSync({ service, installation, credentials });
+  const secondResult = await runSync({ phase: "second", service, installation, credentials });
   requireCondition(
     secondResult.observed === firstResult.observed &&
       secondResult.mappedProducts === 1 &&
-      secondResult.currentProductionDeploymentId === snapshot.currentProductionDeploymentId,
+      secondResult.currentProductionDeploymentId === currentProductionDeploymentId,
     "second_sync_result_mismatch",
   );
-  const secondState = await persistedState({
-    service,
-    repositoryId: repository.id,
-    deploymentId: snapshot.currentProductionDeploymentId,
-    sha: githubMainSha,
-    baselineEvidenceId: baseline.id,
-  });
-  const secondGraph = await graphEvidence(service, snapshot.currentProductionDeploymentId);
-  const quotaAfter = await currentRepoQuota(service);
-  const evidenceHistoryAfter = await service
-    .from("baseline_preflight_evidence")
-    .select("id")
-    .eq("workspace_id", TARGET.workspaceId)
-    .eq("protected_product_id", TARGET.productId)
-    .eq("repository_id", repository.id);
+  const secondState = await withM157AcceptanceStage("second_persisted_state_unavailable", () =>
+    persistedState({
+      service,
+      repositoryId: repository.id,
+      deploymentId: currentProductionDeploymentId,
+      sha: githubMainSha,
+      baselineEvidenceId: baseline.id,
+    }),
+  );
+  const secondGraph = await withM157AcceptanceStage("second_protection_graph_unavailable", () =>
+    graphEvidence(service, currentProductionDeploymentId),
+  );
+  const quotaAfter = await withM157AcceptanceStage("quota_after_second_sync_unavailable", () =>
+    currentRepoQuota(service),
+  );
+  const evidenceHistoryAfter = await withM157AcceptanceStage(
+    "baseline_history_after_sync_unavailable",
+    () =>
+      service
+        .from("baseline_preflight_evidence")
+        .select("id")
+        .eq("workspace_id", TARGET.workspaceId)
+        .eq("protected_product_id", TARGET.productId)
+        .eq("repository_id", repository.id),
+  );
   const baselineCountAfter = countRows(
     evidenceHistoryAfter,
     "baseline_history_after_sync_unavailable",
   ).length;
-  const surfacesAfter = await service
-    .from("deployment_surfaces")
-    .select("id")
-    .eq("workspace_id", TARGET.workspaceId)
-    .eq("installation_id", TARGET.installationId)
-    .eq("external_project_id", TARGET.externalProjectId)
-    .eq("environment_scope", "all");
+  const surfacesAfter = await withM157AcceptanceStage(
+    "deployment_surface_history_after_sync_unavailable",
+    () =>
+      service
+        .from("deployment_surfaces")
+        .select("id")
+        .eq("workspace_id", TARGET.workspaceId)
+        .eq("installation_id", TARGET.installationId)
+        .eq("external_project_id", TARGET.externalProjectId)
+        .eq("environment_scope", "all"),
+  );
   const surfaceCountAfter = countRows(
     surfacesAfter,
     "deployment_surface_history_after_sync_unavailable",
   ).length;
-  const healthAfter = await loadInstallation(
-    service,
-    TARGET.workspaceId,
-    TARGET.installationId,
-    "vercel",
+  const healthAfter = await withM157AcceptanceStage("health_after_second_sync_unavailable", () =>
+    loadInstallation(service, TARGET.workspaceId, TARGET.installationId, "vercel"),
   );
 
   requireCondition(
@@ -784,7 +805,7 @@ export async function runM157DeploymentAcceptance(input?: {
       refreshAttempted: false,
     },
     production: {
-      deploymentId: snapshot.currentProductionDeploymentId,
+      deploymentId: currentProductionDeploymentId,
       ready: true,
       alias: "auterim.com",
       sha: currentDeployment.commitSha,
@@ -838,12 +859,25 @@ export async function runM157DeploymentAcceptance(input?: {
   };
 }
 
+export async function runM157DeploymentAcceptance(
+  input?: Parameters<typeof runM157DeploymentAcceptanceInternal>[0],
+) {
+  try {
+    return await runM157DeploymentAcceptanceInternal(input);
+  } catch (error) {
+    if (error instanceof Error && /^m157_acceptance_[a-z0-9_]+$/.test(error.message)) throw error;
+    if (error instanceof ConnectorError)
+      throw new Error(`m157_acceptance_provider_${error.category.toLowerCase()}`);
+    throw new Error("m157_acceptance_operation_unavailable");
+  }
+}
+
 /**
  * Prevents a second pair of internal syncs after the exact current Production
  * commit already has verified evidence. This reads the provider's current
  * Production truth before checking persisted evidence; it never performs a sync.
  */
-export async function isM157CurrentAcceptanceComplete(): Promise<boolean> {
+async function isM157CurrentAcceptanceCompleteInternal(): Promise<boolean> {
   let environment: ReturnType<typeof getEnvironment>;
   try {
     environment = getEnvironment();
@@ -975,6 +1009,7 @@ export async function isM157CurrentAcceptanceComplete(): Promise<boolean> {
       .eq("protected_product_id", TARGET.productId)
       .eq("deployment_surface_id", surface.id)
       .eq("repository_id", repository.id)
+      .eq("status", "active")
       .maybeSingle(),
     "self_lock_mapping_unavailable",
   );
@@ -1028,11 +1063,12 @@ export async function isM157CurrentAcceptanceComplete(): Promise<boolean> {
     id: string;
     commit_sha: string;
     verification_state: string;
+    observed_at: string;
     preflight_run_id: string;
   }>(
     service
       .from("baseline_preflight_evidence")
-      .select("id,commit_sha,verification_state,preflight_run_id")
+      .select("id,commit_sha,verification_state,preflight_run_id,observed_at")
       .eq("id", evidence.baseline_preflight_evidence_id)
       .eq("workspace_id", TARGET.workspaceId)
       .eq("protected_product_id", TARGET.productId)
@@ -1057,10 +1093,78 @@ export async function isM157CurrentAcceptanceComplete(): Promise<boolean> {
       .maybeSingle(),
     "self_lock_baseline_run_unavailable",
   );
-  return Boolean(
-    baselineRun &&
-    mapping.repository_id === repository.id &&
-    baselineRun.preflight_mode === "baseline" &&
-    baselineRun.status === "completed",
+  if (!baselineRun) return false;
+  const syncAttempts = countRows(
+    await withM157AcceptanceStage("self_lock_sync_attempts_unavailable", () =>
+      service
+        .from("deployment_sync_attempts")
+        .select("id,status,started_at,completed_at")
+        .eq("workspace_id", TARGET.workspaceId)
+        .eq("deployment_surface_id", surface.id)
+        .gte("started_at", baseline.observed_at)
+        .order("started_at", { ascending: false })
+        .order("id", { ascending: false })
+        .limit(2),
+    ),
+    "self_lock_sync_attempts_unavailable",
   );
+
+  return isM157AcceptanceComplete({
+    currentSha: current.commitSha,
+    currentDeploymentId: current.providerDeploymentId,
+    baseline: {
+      id: baseline.id,
+      commitSha: baseline.commit_sha,
+      verificationState: baseline.verification_state,
+      observedAt: baseline.observed_at,
+      preflightRunId: baseline.preflight_run_id,
+    },
+    baselineRun: {
+      id: baselineRun.id,
+      mode: baselineRun.preflight_mode,
+      status: baselineRun.status,
+    },
+    surface: {
+      id: surface.id,
+      currentProductionDeploymentId: surface.current_production_deployment_id,
+      lastAttemptStatus: surface.last_attempt_status,
+    },
+    mapping: {
+      id: mapping.id,
+      repositoryId: mapping.repository_id,
+      provenance: mapping.provenance,
+    },
+    repositoryId: repository.id,
+    observation: {
+      id: observation.id,
+      deploymentId: current.providerDeploymentId,
+      environment: observation.environment_type,
+      state: observation.deployment_state,
+      commitSha: observation.commit_sha,
+      repositoryOwner: observation.source_repository_owner,
+      repositoryName: observation.source_repository_name,
+    },
+    evidence: {
+      id: evidence.id,
+      baselineEvidenceId: evidence.baseline_preflight_evidence_id,
+      preflightFindingId: evidence.preflight_finding_id,
+      verificationState: evidence.verification_state,
+      verifiedCommitSha: evidence.verified_commit_sha,
+      exactCommitMatch: evidence.safe_metadata?.exactCommitMatch === true,
+      deploymentObservationId: evidence.deployment_observation_id,
+      repositoryId: evidence.repository_id,
+    },
+    attempts: syncAttempts,
+    expectedRepositoryOwner: TARGET.repositoryOwner,
+    expectedRepositoryName: TARGET.repositoryName,
+  });
+}
+
+export async function isM157CurrentAcceptanceComplete(): Promise<boolean> {
+  try {
+    return await isM157CurrentAcceptanceCompleteInternal();
+  } catch (error) {
+    if (error instanceof Error && /^m157_acceptance_[a-z0-9_]+$/.test(error.message)) throw error;
+    throw new Error("m157_acceptance_self_lock_state_unavailable");
+  }
 }
