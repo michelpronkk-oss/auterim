@@ -5,6 +5,7 @@ import {
   createCodeAnalysisIdempotencyKey,
   shouldAnalyzeRouteTarget,
 } from "@/lib/code-intelligence/analyzer";
+import { externalReferenceEvidenceMatchesSource } from "@/lib/code-intelligence/readback";
 import { CODE_INTELLIGENCE_GOLDEN_CORPUS } from "./fixtures/code-intelligence/golden-corpus";
 
 const byType = (files: Parameters<typeof analyzeCodeSnapshot>[0], type: string) =>
@@ -127,6 +128,137 @@ describe("deterministic code intelligence", () => {
         (item) => item.referenceType === "dynamic_endpoint" && item.normalizedValue !== "[dynamic]",
       ),
     ).toEqual([]);
+  });
+
+  it("uses the same scoped HTTP-call rules for extraction and source readback", () => {
+    const source = [
+      'import axios from "axios";',
+      'import { get as axiosGet } from "axios";',
+      'import request from "got";',
+      'import fetch from "node-fetch";',
+      "function shadow(fetch: (url: string) => void, axios: unknown) {",
+      '  fetch("https://not-http.example/path");',
+      '  axios.get("https://not-http.example/axios");',
+      "}",
+      'function varShadow() { if (true) { var fetch = localFetch; } fetch("https://not-http.example/var"); }',
+      'fetch("https://api.example.test/global");',
+      'fetch("https://api.example.test/imported-fetch");',
+      'axiosGet("https://api.example.test/named-fetch");',
+      "request(dynamicUrl);",
+      "const api = axios.create({});",
+      'api.get("https://api.example.test/axios-instance");',
+    ].join("\n");
+    const result = analyzeCodeSnapshot([{ path: "src/http.ts", text: source }]);
+    const refs = result.externalReferences.filter((item) =>
+      ["endpoint", "dynamic_endpoint"].includes(item.referenceType),
+    );
+
+    expect(refs.map((item) => item.normalizedValue)).toEqual(
+      expect.arrayContaining([
+        "https://api.example.test/global",
+        "https://api.example.test/imported-fetch",
+        "https://api.example.test/named-fetch",
+        "[dynamic]",
+        "https://api.example.test/axios-instance",
+      ]),
+    );
+    expect(refs.some((item) => item.normalizedValue.includes("not-http.example"))).toBe(false);
+
+    for (const reference of refs) {
+      expect(
+        externalReferenceEvidenceMatchesSource({
+          referenceType: reference.referenceType,
+          normalizedValue: reference.normalizedValue,
+          redacted: reference.redacted,
+          path: reference.path,
+          startLine: reference.startLine,
+          startColumn: reference.startColumn,
+          endLine: reference.endLine,
+          endColumn: reference.endColumn,
+          extractorType: reference.extractorType,
+          source,
+        }),
+      ).toBe(true);
+    }
+  });
+
+  it("keeps CommonJS HTTP client bindings scoped and rejects non-client aliases", () => {
+    const source = [
+      'function localRequest(url: string) { const client = require("axios"); client.get(url); }',
+      'client.get("https://not-http.example/out-of-scope");',
+      'import axios from "axios";',
+      'const { defaults } = require("axios"); defaults.get("https://not-http.example/destructured-defaults");',
+      'const { get: destructuredGet } = require("axios"); destructuredGet("https://api.example.test/destructured-get");',
+      'axios.defaults.get("https://not-http.example/nested-defaults");',
+      "const api = axios.defaults;",
+      'api.get("https://not-http.example/defaults");',
+      'function localCreate() { const localApi = axios.create(); localApi.get("https://api.example.test/local-create"); }',
+      'function reassignedClient() { let client = require("axios"); client = {}; client.get("https://not-http.example/reassigned"); }',
+      'function otherAxios() { const axios = require("got"); axios.get("https://api.example.test/nested-got"); }',
+      'class StaticScope { static { var axios = {}; axios.get("https://not-http.example/static-shadow"); } }',
+      'axios.get("https://api.example.test/outer-axios");',
+      'function fakeRequire(require: (name: string) => unknown) { const fake = require("axios"); fake.get("https://not-http.example/fake-require"); }',
+      'function localFetchClient() { const fetch = require("axios"); fetch.get("https://api.example.test/local-fetch-client"); }',
+      'function localVarFetch() { if (true) { var fetch = localOnly; } fetch("https://not-http.example/var-shadow"); }',
+      'fetch("https://api.example.test/global");',
+    ].join("\n");
+    const result = analyzeCodeSnapshot([{ path: "src/scoped-http.ts", text: source }]);
+    const refs = result.externalReferences.filter((item) =>
+      ["endpoint", "dynamic_endpoint"].includes(item.referenceType),
+    );
+
+    expect(refs.map((item) => [item.referenceType, item.normalizedValue])).toEqual(
+      expect.arrayContaining([
+        ["dynamic_endpoint", "[dynamic]"],
+        ["endpoint", "https://api.example.test/global"],
+        ["endpoint", "https://api.example.test/local-create"],
+        ["endpoint", "https://api.example.test/nested-got"],
+        ["endpoint", "https://api.example.test/outer-axios"],
+        ["endpoint", "https://api.example.test/local-fetch-client"],
+        ["endpoint", "https://api.example.test/destructured-get"],
+      ]),
+    );
+    expect(refs).toHaveLength(7);
+    expect(result.coverageState).toBe("partial");
+    expect(result.skippedFiles).toContainEqual(
+      expect.objectContaining({ reason: "http_client_alias_depth_limit" }),
+    );
+    for (const reference of refs) {
+      expect(
+        externalReferenceEvidenceMatchesSource({
+          referenceType: reference.referenceType,
+          normalizedValue: reference.normalizedValue,
+          redacted: reference.redacted,
+          path: reference.path,
+          startLine: reference.startLine,
+          startColumn: reference.startColumn,
+          endLine: reference.endLine,
+          endColumn: reference.endColumn,
+          extractorType: reference.extractorType,
+          source,
+        }),
+      ).toBe(true);
+    }
+  });
+
+  it("marks coverage partial when HTTP-client alias resolution reaches its deterministic depth bound", () => {
+    const lines = ['import axios from "axios";'];
+    let prior = "axios";
+    for (let index = 0; index < 66; index += 1) {
+      const alias = `client${index}`;
+      lines.push(`const ${alias} = ${prior};`);
+      prior = alias;
+    }
+    lines.push(`${prior}.get("https://api.example.test/deep-alias");`);
+
+    const result = analyzeCodeSnapshot([{ path: "src/deep-alias.ts", text: lines.join("\n") }]);
+    expect(result.coverageState).toBe("partial");
+    expect(result.skippedFiles).toContainEqual(
+      expect.objectContaining({
+        path: "src/deep-alias.ts",
+        reason: "http_client_alias_depth_limit",
+      }),
+    );
   });
 
   it("records source-backed containment and only same-file call candidates", () => {
@@ -532,7 +664,7 @@ describe("deterministic code intelligence", () => {
       ),
     }));
     expect(() => analyzeCodeSnapshot(files)).toThrow("code_intelligence_stage_failed");
-  });
+  }, 90_000);
 
   it("allows only code-intelligence-eligible pending route families", () => {
     const eligible = [

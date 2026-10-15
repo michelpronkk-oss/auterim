@@ -1,5 +1,6 @@
 import type { CoverageState } from "@/lib/code-intelligence/analyzer";
 import ts from "typescript";
+import { collectHttpClientOrigins, isRecognizedHttpCall } from "@/lib/code-intelligence/http-call";
 
 export const CODE_ANALYSIS_READBACK_WORKSPACE = "e140d48e-9dc0-4552-a9a4-a81fe3872422";
 export const CODE_ANALYSIS_READBACK_REPOSITORY = "3b4f4fe6-cbbd-4bbd-a340-71f7c268e2c4";
@@ -233,7 +234,7 @@ export function safeSourceSpanMatch(
       }
     }
     case "dynamic_endpoint":
-      return /\bfetch\s*\(|\baxios\s*\(|\.request\s*\(/.test(span);
+      return matchesDynamicHttpCall(source, path, startLine, endLine);
     case "environment_variable":
       return new RegExp(
         `process\\s*\\.\\s*env\\s*(?:\\.\\s*${normalizedValue}\\b|\\[\\s*[\"']${normalizedValue}[\"']\\s*\\])`,
@@ -243,6 +244,43 @@ export function safeSourceSpanMatch(
     default:
       return false;
   }
+}
+
+function matchesDynamicHttpCall(source: string, path: string, startLine: number, endLine: number) {
+  const parsed = ts.createSourceFile(
+    path,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    /\.tsx$/i.test(path)
+      ? ts.ScriptKind.TSX
+      : /\.jsx?$/i.test(path) || /\.[cm]js$/i.test(path)
+        ? ts.ScriptKind.JS
+        : ts.ScriptKind.TS,
+  );
+  const origins = collectHttpClientOrigins(parsed);
+  const isStaticString = (node: ts.Expression): boolean => {
+    if (ts.isStringLiteralLike(node) || ts.isNoSubstitutionTemplateLiteral(node)) return true;
+    if (ts.isParenthesizedExpression(node)) return isStaticString(node.expression);
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken)
+      return isStaticString(node.left) && isStaticString(node.right);
+    if (ts.isTemplateExpression(node))
+      return node.templateSpans.every((part) => isStaticString(part.expression));
+    return false;
+  };
+  const stack: ts.Node[] = [parsed];
+  while (stack.length) {
+    const node = stack.pop()!;
+    if (ts.isCallExpression(node) && node.arguments[0] && isRecognizedHttpCall(node, origins)) {
+      const start = parsed.getLineAndCharacterOfPosition(node.getStart(parsed)).line + 1;
+      const end = parsed.getLineAndCharacterOfPosition(node.getEnd()).line + 1;
+      if (start >= startLine && end <= endLine) {
+        if (!isStaticString(node.arguments[0]!)) return true;
+      }
+    }
+    node.forEachChild((child) => stack.push(child));
+  }
+  return false;
 }
 
 export type RelationProvenanceEntity = {
@@ -350,6 +388,7 @@ export function relationEvidenceMatchesSource(input: {
       ? ts.ScriptKind.JS
       : ts.ScriptKind.TS;
   const parsed = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKind);
+  const httpClientOrigins = collectHttpClientOrigins(parsed);
   const lines = source.split(/\r?\n/);
   if (endLine > lines.length || startColumn > (lines[startLine - 1]?.length ?? 0) + 1) return false;
   if (endColumn > (lines[endLine - 1]?.length ?? 0) + 1) return false;
@@ -706,13 +745,7 @@ export function relationEvidenceMatchesSource(input: {
         matchingReference.normalizedValue === to.name &&
         exactNodes.some((node) => {
           if (!ts.isCallExpression(node) || !node.arguments[0]) return false;
-          const callableText = node.expression.getText(parsed);
-          if (
-            !["fetch", "axios", "get", "post", "request"].some(
-              (name) => callableText === name || callableText.endsWith(`.${name}`),
-            )
-          )
-            return false;
+          if (!isRecognizedHttpCall(node, httpClientOrigins)) return false;
           if (matchingReference.redacted)
             return (
               matchingReference.normalizedValue === "[redacted]" &&
