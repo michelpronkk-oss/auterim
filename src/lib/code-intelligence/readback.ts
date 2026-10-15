@@ -29,14 +29,18 @@ export const RELATION_TYPES = [
 ] as const;
 
 export function isSafeReadbackPath(value: string) {
+  const safePathSegment =
+    process.platform === "win32" ? /^[A-Za-z0-9_@.\-\[\]]+$/ : /^[A-Za-z0-9_@.:\-\[\]]+$/;
   return (
     value.length > 0 &&
     value.length <= 1024 &&
     !value.startsWith("/") &&
     !value.includes("\\") &&
-    !value.includes("\0") &&
-    value.split("/").every((part) => part !== "" && part !== "." && part !== "..") &&
-    /^[A-Za-z0-9_@.\-/]+$/.test(value)
+    !/[\u0000-\u001f\u007f]/.test(value) &&
+    !/^[A-Za-z]:/.test(value) &&
+    value
+      .split("/")
+      .every((part) => part !== "" && part !== "." && part !== ".." && safePathSegment.test(part))
   );
 }
 
