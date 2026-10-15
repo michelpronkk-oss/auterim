@@ -24,13 +24,19 @@ export const HTTP_CLIENT_METHODS = new Set([
   "request",
 ]);
 
-export type HttpClientOrigin = { packageName: string; path: string; member?: string };
+export type HttpClientOrigin = {
+  packageName: string;
+  path: string;
+  member?: string;
+  namespaceImport?: boolean;
+};
 type Binding = { declaration: ts.Node; origin: HttpClientOrigin | null };
 export type HttpClientOriginIndex = {
   source: ts.SourceFile;
   scopes: Map<ts.Node, Map<string, Binding>>;
   reassigned: Set<Binding>;
   aliasResolutionTruncated: boolean;
+  aliasReassigned: boolean;
   bindingPatternTruncated: boolean;
 };
 
@@ -146,7 +152,8 @@ function bind(
   else if (
     prior.origin?.packageName !== origin?.packageName ||
     prior.origin?.path !== origin?.path ||
-    prior.origin?.member !== origin?.member
+    prior.origin?.member !== origin?.member ||
+    prior.origin?.namespaceImport !== origin?.namespaceImport
   )
     bindings.set(name, { declaration, origin: null });
 }
@@ -160,7 +167,8 @@ function importBindings(
   const bindings: Array<[string, HttpClientOrigin]> = [];
   if (clause.name) bindings.push([clause.name.text, origin]);
   const named = clause.namedBindings;
-  if (named && ts.isNamespaceImport(named)) bindings.push([named.name.text, origin]);
+  if (named && ts.isNamespaceImport(named))
+    bindings.push([named.name.text, { ...origin, namespaceImport: true }]);
   if (named && ts.isNamedImports(named)) {
     for (const element of named.elements) {
       const imported = element.propertyName ?? element.name;
@@ -221,7 +229,7 @@ function originAt(
   if (binding.origin && !index.reassigned.has(binding)) return binding.origin;
   if (index.reassigned.has(binding)) {
     if (binding.origin) {
-      index.aliasResolutionTruncated = true;
+      index.aliasReassigned = true;
       return null;
     }
   }
@@ -283,7 +291,7 @@ function originAt(
 
   visiting.delete(binding);
   if (origin && index.reassigned.has(binding)) {
-    index.aliasResolutionTruncated = true;
+    index.aliasReassigned = true;
     return null;
   }
   if (origin) binding.origin = origin;
@@ -297,6 +305,7 @@ export function collectHttpClientOrigins(source: ts.SourceFile): HttpClientOrigi
     scopes,
     reassigned: new Set(),
     aliasResolutionTruncated: false,
+    aliasReassigned: false,
     bindingPatternTruncated: false,
   };
   const stack: ts.Node[] = [source];
@@ -391,7 +400,9 @@ export function isRecognizedHttpCall(call: ts.CallExpression, origins: HttpClien
   return Boolean(
     origin &&
     HTTP_CLIENT_PACKAGES.has(origin.packageName) &&
-    (origin.member
+    (origin.namespaceImport && callable.path.length === 0
+      ? false
+      : origin.member
       ? HTTP_CLIENT_METHODS.has(origin.member) && callable.path.length === 0
       : callable.path.length === 0 ||
         (callable.path.length === 1 && HTTP_CLIENT_METHODS.has(callable.path[0]!))),

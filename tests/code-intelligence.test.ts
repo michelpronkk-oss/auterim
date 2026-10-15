@@ -187,6 +187,9 @@ describe("deterministic code intelligence", () => {
       'function localRequest(url: string) { const client = require("axios"); client.get(url); }',
       'client.get("https://not-http.example/out-of-scope");',
       'import axios from "axios";',
+      'import * as namespaceAxios from "axios";',
+      'namespaceAxios("https://not-http.example/namespace-call");',
+      'namespaceAxios.get("https://api.example.test/namespace-method");',
       'const { defaults } = require("axios"); defaults.get("https://not-http.example/destructured-defaults");',
       'const { get: destructuredGet } = require("axios"); destructuredGet("https://api.example.test/destructured-get");',
       'axios.defaults.get("https://not-http.example/nested-defaults");',
@@ -216,12 +219,13 @@ describe("deterministic code intelligence", () => {
         ["endpoint", "https://api.example.test/outer-axios"],
         ["endpoint", "https://api.example.test/local-fetch-client"],
         ["endpoint", "https://api.example.test/destructured-get"],
+        ["endpoint", "https://api.example.test/namespace-method"],
       ]),
     );
-    expect(refs).toHaveLength(7);
+    expect(refs).toHaveLength(8);
     expect(result.coverageState).toBe("partial");
     expect(result.skippedFiles).toContainEqual(
-      expect.objectContaining({ reason: "http_client_alias_depth_limit" }),
+      expect.objectContaining({ reason: "http_client_alias_reassigned" }),
     );
     for (const reference of refs) {
       expect(

@@ -1374,6 +1374,14 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
         size: fileSize,
       });
     }
+    if (httpClientOrigins.aliasReassigned) {
+      incomplete = true;
+      skippedFiles.push({
+        path: pathValue.slice(0, 1024),
+        reason: "http_client_alias_reassigned",
+        size: fileSize,
+      });
+    }
     if (httpClientOrigins.bindingPatternTruncated) {
       incomplete = true;
       skippedFiles.push({
