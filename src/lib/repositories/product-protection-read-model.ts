@@ -262,6 +262,7 @@ export async function getProductRepositoryProtection(
       defaultBranch: repository.default_branch,
       isPrivate: repository.private,
       status: repository.status,
+      selectedForProtection: repository.selected_for_protection,
       mappingStatus:
         mapping?.status ??
         (legacyMapping ? "legacy" : mappingRequired ? "mapping_required" : "unmapped"),

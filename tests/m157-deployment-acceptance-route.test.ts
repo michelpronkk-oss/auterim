@@ -20,6 +20,7 @@ vi.mock("@/lib/m15/internal-acceptance", () => ({
 
 import { POST } from "@/app/api/internal/m157/deployment-acceptance/route";
 import { withM157AcceptanceStage } from "../src/lib/m15/acceptance-completion.ts";
+import { ProductProtectionReadError } from "../src/lib/protection/read-stage.ts";
 
 const workspaceId = "e140d48e-9dc0-4552-a9a4-a81fe3872422";
 const userId = "55555555-5555-4555-8555-555555555555";
@@ -160,6 +161,22 @@ describe("fixed-target M15.7 production acceptance route", () => {
     expect(await result.json()).toEqual({
       error: "m157_acceptance_failed",
       category: "first_protection_graph_unavailable",
+    });
+  });
+
+  it("returns the fixed Product Graph substage without provider details", async () => {
+    mocks.run.mockImplementation(() =>
+      withM157AcceptanceStage("first_protection_graph_unavailable", async () => {
+        throw new ProductProtectionReadError("classifications");
+      }),
+    );
+
+    const result = await POST(request());
+
+    expect(result.status).toBe(503);
+    expect(await result.json()).toEqual({
+      error: "m157_acceptance_failed",
+      category: "first_protection_graph_classifications",
     });
   });
 });

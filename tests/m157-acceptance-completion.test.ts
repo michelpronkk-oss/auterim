@@ -3,6 +3,7 @@ import {
   isM157AcceptanceComplete,
   withM157AcceptanceStage,
 } from "../src/lib/m15/acceptance-completion.ts";
+import { ProductProtectionReadError } from "../src/lib/protection/read-stage.ts";
 
 const sha = "2c74b8bab5f2f5d7579c663233d6e548d7c895ef";
 const baselineObservedAt = "2026-10-15T10:00:00.000Z";
@@ -123,5 +124,26 @@ describe("M15.7 acceptance completion self-lock", () => {
         throw new Error("m157_acceptance_first_protection_graph_mismatch");
       }),
     ).rejects.toThrow("m157_acceptance_first_protection_graph_mismatch");
+  });
+
+  it.each(["classifications", "deployment_evidence"] as const)(
+    "preserves only the allowlisted Product Graph substage: %s",
+    async (substage) => {
+      await expect(
+        withM157AcceptanceStage("first_protection_graph_unavailable", async () => {
+          throw new ProductProtectionReadError(substage);
+        }),
+      ).rejects.toThrow(`m157_acceptance_first_protection_graph_${substage}`);
+    },
+  );
+
+  it("does not expose raw Product Graph provider details", async () => {
+    const error = new ProductProtectionReadError("classifications");
+    Object.defineProperty(error, "cause", { value: new Error("private provider response") });
+    await expect(
+      withM157AcceptanceStage("first_protection_graph_unavailable", async () => {
+        throw error;
+      }),
+    ).rejects.toThrow("m157_acceptance_first_protection_graph_classifications");
   });
 });
