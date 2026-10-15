@@ -14,7 +14,13 @@ import { analyzeCodeSnapshot } from "@/lib/code-intelligence/analyzer";
 describe("bounded Code Intelligence readback", () => {
   it("accepts repository-relative paths and rejects traversal and platform separators", () => {
     expect(isSafeReadbackPath("src/payments/client.ts")).toBe(true);
+    expect(isSafeReadbackPath("src/app/api/products/[id]/route.ts")).toBe(true);
+    expect(isSafeReadbackPath("scripts/[name].mts")).toBe(true);
+    expect(isSafeReadbackPath("scripts/[redacted:abc123].mts")).toBe(process.platform !== "win32");
     expect(isSafeReadbackPath("../.env")).toBe(false);
+    expect(isSafeReadbackPath("src/../../.env")).toBe(false);
+    expect(isSafeReadbackPath("C:/Windows/win.ini")).toBe(false);
+    expect(isSafeReadbackPath("src/control\u0001name.ts")).toBe(false);
     expect(isSafeReadbackPath("src\\client.ts")).toBe(false);
     expect(isSafeReadbackPath("/etc/passwd")).toBe(false);
   });
