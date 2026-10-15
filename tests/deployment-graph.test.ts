@@ -177,6 +177,8 @@ describe("canonical Product deployment Protection Graph", () => {
   it("marks only the exact READY current Production deployment with fresh baseline evidence current", async () => {
     const result = await graph(fixtures());
     expect(result?.surfaces[0]).toMatchObject({
+      id: "77777777-7777-4777-8777-777777777777",
+      deploymentSurfaceId: surfaceId,
       provider: "vercel",
       repository: { id: repositoryId, owner: "michelpronkk-oss", name: "auterim" },
       mappingProvenance: "protected_repository_identity",

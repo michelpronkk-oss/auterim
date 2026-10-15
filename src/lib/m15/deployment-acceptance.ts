@@ -96,6 +96,18 @@ type StoredCredentialMetadataRow = CredentialMetadataRow & {
 type CredentialVersionRow = { key_version: number; credential_version: number };
 type BaselineRunRow = { id: string; preflight_mode: string; status: string; created_at: string };
 
+type M157AcceptanceCheckpoint =
+  | "first_sync_complete"
+  | "first_persisted_state_complete"
+  | "first_graph_load_complete"
+  | "first_graph_assertions_complete"
+  | "second_sync_entered";
+
+function recordM157AcceptanceCheckpoint(stage: M157AcceptanceCheckpoint) {
+  // Fixed, allowlisted labels only; never include workspace, provider, or credential data.
+  console.info(`M157_ACCEPTANCE_CHECKPOINT=${stage}`);
+}
+
 function requireCondition(condition: unknown, stage: string): asserts condition {
   if (!condition) throw new Error(`m157_acceptance_${stage}`);
 }
@@ -179,15 +191,30 @@ async function currentRepoQuota(service: ReturnType<typeof serverConnectors>) {
   };
 }
 
-async function graphEvidence(service: ReturnType<typeof serverConnectors>, externalId: string) {
+export async function graphEvidence(
+  service: ReturnType<typeof serverConnectors>,
+  externalId: string,
+  options: {
+    onGraphLoaded?: () => void;
+    target?: {
+      workspaceId: string;
+      productId: string;
+      externalProjectId: string;
+      repositoryOwner: string;
+      repositoryName: string;
+    };
+  } = {},
+) {
+  const target = options.target ?? TARGET;
   const graph = await loadProductDeploymentProtectionGraph(service, {
-    workspaceId: TARGET.workspaceId,
-    productId: TARGET.productId,
+    workspaceId: target.workspaceId,
+    productId: target.productId,
     verificationCapabilityAvailable: true,
   });
+  options.onGraphLoaded?.();
   requireCondition(graph, "protection_graph_missing");
   const surface = graph.surfaces.find(
-    (item) => item.provider === "vercel" && item.projectId === TARGET.externalProjectId,
+    (item) => item.provider === "vercel" && item.projectId === target.externalProjectId,
   );
   requireCondition(surface, "protection_graph_surface_missing");
   const observation = surface.observations.find((item) => item.providerDeploymentId === externalId);
@@ -200,7 +227,7 @@ async function graphEvidence(service: ReturnType<typeof serverConnectors>, exter
     "protection_graph_evidence_mismatch",
   );
   return {
-    surfaceId: surface.id,
+    surfaceId: surface.deploymentSurfaceId,
     mappingProvenance: surface.mappingProvenance,
     repository: surface.repository,
     deploymentId: observation.providerDeploymentId,
@@ -684,6 +711,7 @@ async function runM157DeploymentAcceptanceInternal(input?: {
       firstResult.currentProductionDeploymentId === currentProductionDeploymentId,
     "first_sync_result_mismatch",
   );
+  recordM157AcceptanceCheckpoint("first_sync_complete");
   const firstState = await withM157AcceptanceStage("first_persisted_state_unavailable", () =>
     persistedState({
       service,
@@ -693,8 +721,11 @@ async function runM157DeploymentAcceptanceInternal(input?: {
       baselineEvidenceId: baseline.id,
     }),
   );
+  recordM157AcceptanceCheckpoint("first_persisted_state_complete");
   const firstGraph = await withM157AcceptanceStage("first_protection_graph_unavailable", () =>
-    graphEvidence(service, currentProductionDeploymentId),
+    graphEvidence(service, currentProductionDeploymentId, {
+      onGraphLoaded: () => recordM157AcceptanceCheckpoint("first_graph_load_complete"),
+    }),
   );
   requireCondition(
     firstGraph.surfaceId === firstState.surfaceId &&
@@ -703,6 +734,8 @@ async function runM157DeploymentAcceptanceInternal(input?: {
     "first_protection_graph_mismatch",
   );
 
+  recordM157AcceptanceCheckpoint("first_graph_assertions_complete");
+  recordM157AcceptanceCheckpoint("second_sync_entered");
   const secondResult = await runSync({ phase: "second", service, installation, credentials });
   requireCondition(
     secondResult.observed === firstResult.observed &&

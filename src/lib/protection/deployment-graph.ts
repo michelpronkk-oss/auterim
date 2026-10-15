@@ -459,7 +459,9 @@ export async function loadProductDeploymentProtectionGraph(
       });
     return [
       {
+        // `id` is the Product mapping identity. Consumers that address the provider surface use this separate ID.
         id: mapping.id,
+        deploymentSurfaceId: surface.id,
         provider: surface.provider,
         projectId: surface.external_project_id,
         projectName: surface.project_name,
