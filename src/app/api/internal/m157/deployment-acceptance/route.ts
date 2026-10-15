@@ -16,6 +16,43 @@ function safeFailureCategory(error: unknown) {
   return "unknown_safe";
 }
 
+async function hasNonEmptyBody(request: Request): Promise<boolean> {
+  const body = request.body;
+  if (!body) return false;
+
+  const reader = body.getReader();
+  let emptyChunks = 0;
+  try {
+    while (emptyChunks < 4) {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const result = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("body_read_timeout")), 1_000);
+        }),
+      ]).finally(() => {
+        if (timeout) clearTimeout(timeout);
+      });
+      if (result.done) return false;
+      if (result.value.byteLength > 0) {
+        void reader.cancel().catch(() => undefined);
+        return true;
+      }
+      emptyChunks += 1;
+    }
+    return true;
+  } catch {
+    void reader.cancel().catch(() => undefined);
+    return true;
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // The request stream may already have been closed by the runtime.
+    }
+  }
+}
+
 export async function POST(request: Request) {
   const auth = await authenticateOnboardingRequest(request);
   if (!auth.ok) return auth.response;
@@ -34,7 +71,7 @@ export async function POST(request: Request) {
   } catch {
     return response({ error: "invalid_internal_acceptance_request" }, 400);
   }
-  if (url.search || request.body !== null)
+  if (url.search || (await hasNonEmptyBody(request)))
     return response({ error: "invalid_internal_acceptance_request" }, 400);
 
   try {
