@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 
 const repositoryRoot = path.resolve(process.cwd());
@@ -50,6 +51,32 @@ const localAnonKey = localConfig.get("ANON_KEY") ?? localConfig.get("PUBLISHABLE
 if (localUrl !== "http://127.0.0.1:57421" || !localServiceKey || !localAnonKey) {
   throw new Error("m1576_acceptance_local_supabase_binding_guard_failed");
 }
+
+const isolatedSupabaseProject = path.join(
+  repositoryRoot,
+  "node_modules/.cache/auterim-m1576-local",
+);
+const canonicalMigrationDirectory = path.join(repositoryRoot, "supabase/migrations");
+const isolatedMigrationDirectory = path.join(isolatedSupabaseProject, "supabase/migrations");
+for (const filename of readdirSync(canonicalMigrationDirectory).filter((name) =>
+  name.endsWith(".sql"),
+)) {
+  const source = path.join(canonicalMigrationDirectory, filename);
+  const destination = path.join(isolatedMigrationDirectory, filename);
+  if (existsSync(destination)) {
+    if (!readFileSync(source).equals(readFileSync(destination))) {
+      throw new Error("m1576_acceptance_isolated_migration_drift");
+    }
+  } else {
+    copyFileSync(source, destination);
+  }
+}
+run("cmd.exe", [
+  "/d",
+  "/s",
+  "/c",
+  `npx supabase migration up --local --workdir ${path.relative(repositoryRoot, isolatedSupabaseProject)}`,
+]);
 
 const exactHead = run("git", ["rev-parse", "HEAD"]).trim();
 const priorHead = run("git", ["rev-parse", "HEAD^"]).trim();
