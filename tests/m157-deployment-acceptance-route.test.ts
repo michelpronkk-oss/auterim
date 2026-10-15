@@ -13,7 +13,9 @@ vi.mock("@/lib/onboarding/auth", () => ({
 vi.mock("@/lib/billing/server", () => ({ getWorkspaceRole: mocks.role }));
 vi.mock("@/lib/m15/deployment-acceptance", () => ({
   isM157CurrentAcceptanceComplete: mocks.selfLock,
-  runM157DeploymentAcceptance: mocks.run,
+}));
+vi.mock("@/lib/m15/internal-acceptance", () => ({
+  runM157InternalAcceptance: mocks.run,
 }));
 
 import { POST } from "@/app/api/internal/m157/deployment-acceptance/route";
@@ -90,7 +92,7 @@ describe("fixed-target M15.7 production acceptance route", () => {
     expect(mocks.run).not.toHaveBeenCalled();
   });
 
-  it("runs the fixed acceptance exactly once after the self-lock says incomplete", async () => {
+  it("runs the fixed internal acceptance exactly once after the self-lock says incomplete", async () => {
     const result = await POST(request());
 
     expect(result.status).toBe(200);
@@ -98,7 +100,7 @@ describe("fixed-target M15.7 production acceptance route", () => {
     expect(await result.json()).toEqual({ status: "complete", target: { workspaceName: "Test" } });
     expect(mocks.selfLock).toHaveBeenCalledOnce();
     expect(mocks.run).toHaveBeenCalledOnce();
-    expect(mocks.run).toHaveBeenCalledWith();
+    expect(mocks.run).toHaveBeenCalledWith(userId);
   });
 
   it("self-locks when exact current evidence already exists", async () => {

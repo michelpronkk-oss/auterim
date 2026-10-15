@@ -1,8 +1,6 @@
 import { getWorkspaceRole } from "@/lib/billing/server";
-import {
-  isM157CurrentAcceptanceComplete,
-  runM157DeploymentAcceptance,
-} from "@/lib/m15/deployment-acceptance";
+import { isM157CurrentAcceptanceComplete } from "@/lib/m15/deployment-acceptance";
+import { runM157InternalAcceptance } from "@/lib/m15/internal-acceptance";
 import { authenticateOnboardingRequest } from "@/lib/onboarding/auth";
 
 const TARGET_WORKSPACE_ID = "e140d48e-9dc0-4552-a9a4-a81fe3872422";
@@ -41,7 +39,7 @@ export async function POST(request: Request) {
 
   try {
     if (await isM157CurrentAcceptanceComplete()) return response({ status: "already_completed" });
-    return response(await runM157DeploymentAcceptance());
+    return response(await runM157InternalAcceptance(auth.user.id));
   } catch (error) {
     return response({ error: "m157_acceptance_failed", category: safeFailureCategory(error) }, 503);
   }

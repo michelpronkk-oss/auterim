@@ -315,7 +315,19 @@ async function persistedState(input: {
   };
 }
 
-export async function runM157DeploymentAcceptance() {
+export async function runM157DeploymentAcceptance(input?: {
+  freshBaseline?: {
+    preflightRunId: string;
+    mode: "baseline";
+    evidenceId: string;
+    repositoryId: string;
+    repository: string;
+    verifiedCommitSha: string;
+    verificationState: "verified";
+    observedAt: string;
+    replayed: boolean;
+  };
+}) {
   let environment: ReturnType<typeof getEnvironment>;
   try {
     environment = getEnvironment();
@@ -568,24 +580,44 @@ export async function runM157DeploymentAcceptance() {
       currentDeployment.commitSha === githubMainSha,
     "current_production_deployment_mismatch",
   );
-  const baselineRows = countRows(
-    await service
-      .from("baseline_preflight_evidence")
-      .select(
-        "id,workspace_id,protected_product_id,preflight_run_id,repository_id,commit_sha,verification_state,observed_at",
-      )
-      .eq("workspace_id", TARGET.workspaceId)
-      .eq("protected_product_id", TARGET.productId)
-      .eq("repository_id", repository.id)
+  let baselineQuery = service
+    .from("baseline_preflight_evidence")
+    .select(
+      "id,workspace_id,protected_product_id,preflight_run_id,repository_id,commit_sha,verification_state,observed_at",
+    )
+    .eq("workspace_id", TARGET.workspaceId)
+    .eq("protected_product_id", TARGET.productId)
+    .eq("repository_id", repository.id)
+    .eq("verification_state", "verified");
+  if (input?.freshBaseline) {
+    baselineQuery = baselineQuery.eq("id", input.freshBaseline.evidenceId);
+  } else {
+    baselineQuery = baselineQuery
       .eq("commit_sha", githubMainSha)
-      .eq("verification_state", "verified")
       .order("observed_at", { ascending: false })
-      .limit(5),
-    "baseline_evidence_unavailable",
-  );
+      .limit(5);
+  }
+  const baselineRows = countRows(await baselineQuery, "baseline_evidence_unavailable");
   const baseline = baselineRows[0];
   requireCondition(baseline, "fresh_baseline_for_release_missing");
-  if (githubMainSha === TARGET.initialReleaseSha) {
+  if (input?.freshBaseline) {
+    const deploymentReadyAt = currentDeployment.readyAt
+      ? Date.parse(currentDeployment.readyAt)
+      : NaN;
+    requireCondition(
+      input.freshBaseline.mode === "baseline" &&
+        input.freshBaseline.verificationState === "verified" &&
+        input.freshBaseline.repositoryId === repository.id &&
+        input.freshBaseline.repository === `${TARGET.repositoryOwner}/${TARGET.repositoryName}` &&
+        input.freshBaseline.evidenceId === baseline.id &&
+        input.freshBaseline.preflightRunId === baseline.preflight_run_id &&
+        input.freshBaseline.verifiedCommitSha.toLowerCase() === githubMainSha.toLowerCase() &&
+        baseline.commit_sha.toLowerCase() === githubMainSha.toLowerCase() &&
+        Number.isFinite(deploymentReadyAt) &&
+        Date.parse(baseline.observed_at) >= deploymentReadyAt,
+      "fresh_baseline_sha_mismatch",
+    );
+  } else if (githubMainSha === TARGET.initialReleaseSha) {
     requireCondition(
       baseline.id === TARGET.initialBaselineEvidenceId &&
         baseline.preflight_run_id === TARGET.initialBaselineRunId,
@@ -742,6 +774,7 @@ export async function runM157DeploymentAcceptance() {
       sha: baseline.commit_sha,
       mode: baselineRun.preflight_mode,
       state: baseline.verification_state,
+      ...(input?.freshBaseline ? { replayed: input.freshBaseline.replayed } : {}),
     },
     credential: {
       keyVersion: 1,
