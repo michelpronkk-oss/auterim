@@ -3,7 +3,9 @@ import ts from "typescript";
 import { CodeAnalysisStageError } from "@/lib/code-intelligence/failures";
 
 export const CODE_INTELLIGENCE_VERSION = "code-intelligence-v2";
-export const CODE_INTELLIGENCE_PROFILE = "javascript-typescript-v2";
+// Endpoint call recognition was tightened after the first v2 readback exposed
+// non-HTTP getters (for example URLSearchParams.get) as dynamic endpoints.
+export const CODE_INTELLIGENCE_PROFILE = "javascript-typescript-v2.1";
 export const CODE_SCAN_LIMITS = {
   maxFileBytes: 256_000,
   maxManifestBytes: 5_000_000,
@@ -91,6 +93,28 @@ const SUPPORTED_ROUTE_TARGETS = new Set([
   "repository_dependency_exposure_analysis",
   "contract_repository_exposure_analysis",
   "integration_auth_risk_analysis",
+]);
+const HTTP_CLIENT_PACKAGES = new Set([
+  "axios",
+  "cross-fetch",
+  "got",
+  "isomorphic-fetch",
+  "ky",
+  "needle",
+  "node-fetch",
+  "request",
+  "superagent",
+  "undici",
+]);
+const HTTP_CLIENT_METHODS = new Set([
+  "delete",
+  "get",
+  "head",
+  "options",
+  "patch",
+  "post",
+  "put",
+  "request",
 ]);
 
 export type CoverageState = "complete" | "partial" | "unsupported" | "failed";
@@ -1200,12 +1224,17 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
               endColumn: loc.endColumn,
             });
           }
-          const callableText = node.expression.getText(source);
-          if (
-            ["fetch", "axios", "get", "post", "request"].some(
-              (name) => callableText === name || callableText.endsWith(`.${name}`),
-            )
-          ) {
+          const callable = memberChain(node.expression);
+          const origin = callable ? importOrigins.get(callable.root) : undefined;
+          const isRecognizedHttpCall = Boolean(
+            callable &&
+            ((callable.root === "fetch" && callable.path.length === 0) ||
+              (origin &&
+                HTTP_CLIENT_PACKAGES.has(origin.packageName) &&
+                (callable.path.length === 0 ||
+                  HTTP_CLIENT_METHODS.has(callable.path.at(-1) ?? "")))),
+          );
+          if (isRecognizedHttpCall) {
             const firstArg = node.arguments[0];
             if (firstArg) defer(endpointNodes, { node, value: staticString(firstArg) });
           }

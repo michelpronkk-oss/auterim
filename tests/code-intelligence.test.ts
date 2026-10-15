@@ -100,6 +100,35 @@ describe("deterministic code intelligence", () => {
     ).toContain("stripe.webhooks.constructEvent");
   });
 
+  it("recognizes HTTP client calls without treating ordinary getters as endpoints", () => {
+    const result = analyzeCodeSnapshot([
+      {
+        path: "src/requests.ts",
+        text: [
+          'import axios from "axios";',
+          'const code = new URLSearchParams("code=abc").get("code");',
+          'const value = config.get("endpoint");',
+          'axios.get("https://api.example.test/v1/items");',
+          "fetch(dynamicUrl);",
+        ].join("\n"),
+      },
+    ]);
+
+    expect(result.externalReferences.filter((item) => item.referenceType === "endpoint")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ normalizedValue: "https://api.example.test/v1/items" }),
+      ]),
+    );
+    expect(
+      result.externalReferences.filter((item) => item.referenceType === "dynamic_endpoint"),
+    ).toEqual(expect.arrayContaining([expect.objectContaining({ normalizedValue: "[dynamic]" })]));
+    expect(
+      result.externalReferences.filter(
+        (item) => item.referenceType === "dynamic_endpoint" && item.normalizedValue !== "[dynamic]",
+      ),
+    ).toEqual([]);
+  });
+
   it("records source-backed containment and only same-file call candidates", () => {
     const result = analyzeCodeSnapshot([
       { path: "src/a.ts", text: "export function runJob() { return 1; } runJob();" },
@@ -498,7 +527,9 @@ describe("deterministic code intelligence", () => {
   it("fails closed at the deterministic intermediate fact budget", () => {
     const files = Array.from({ length: 17 }, (_, fileIndex) => ({
       path: `src/endpoint-${String(fileIndex).padStart(2, "0")}.ts`,
-      text: Array.from({ length: 1_000 }, () => 'fetch("https://api.example.com/v1/items");').join("\n"),
+      text: Array.from({ length: 1_000 }, () => 'fetch("https://api.example.com/v1/items");').join(
+        "\n",
+      ),
     }));
     expect(() => analyzeCodeSnapshot(files)).toThrow("code_intelligence_stage_failed");
   });
