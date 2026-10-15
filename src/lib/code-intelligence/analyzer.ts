@@ -1,9 +1,17 @@
 import { createHash } from "node:crypto";
 import ts from "typescript";
 import { CodeAnalysisStageError } from "@/lib/code-intelligence/failures";
+import {
+  collectHttpClientOrigins,
+  isRecognizedHttpCall,
+  memberChain,
+  resolveCreatedClientAlias,
+} from "@/lib/code-intelligence/http-call";
 
 export const CODE_INTELLIGENCE_VERSION = "code-intelligence-v2";
-export const CODE_INTELLIGENCE_PROFILE = "javascript-typescript-v2";
+// Endpoint call recognition was tightened after the first v2 readback exposed
+// non-HTTP getters (for example URLSearchParams.get) as dynamic endpoints.
+export const CODE_INTELLIGENCE_PROFILE = "javascript-typescript-v2.2";
 export const CODE_SCAN_LIMITS = {
   maxFileBytes: 256_000,
   maxManifestBytes: 5_000_000,
@@ -463,24 +471,6 @@ function endpointValue(raw: string) {
   } catch {
     return null;
   }
-}
-
-function memberChain(node: ts.Expression): { root: string; path: string[] } | null {
-  const parts: string[] = [];
-  let current: ts.Expression = node;
-  while (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
-    if (ts.isPropertyAccessExpression(current)) {
-      parts.unshift(current.name.text);
-      current = current.expression;
-    } else {
-      const arg = current.argumentExpression;
-      if (!arg || !ts.isStringLiteralLike(arg)) return null;
-      parts.unshift(arg.text);
-      current = current.expression;
-    }
-  }
-  if (!ts.isIdentifier(current)) return null;
-  return { root: current.text, path: parts };
 }
 
 function isEventDiscriminator(node: ts.Node) {
@@ -960,6 +950,7 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
       extractorType: "typescript-compiler-api:module-containment-v2",
     });
     const importOrigins = new Map<string, { packageName: string; path: string }>();
+    const httpClientOrigins = collectHttpClientOrigins(source);
     const importEntities: Array<{
       key: string;
       packageEntity: string | null;
@@ -1169,6 +1160,8 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
           }
         }
         if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+          const httpAlias = resolveCreatedClientAlias(node.initializer, importOrigins);
+          if (httpAlias) importOrigins.set(node.name.text, httpAlias);
           if (
             ts.isNewExpression(node.initializer) &&
             ts.isIdentifier(node.initializer.expression)
@@ -1200,12 +1193,7 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
               endColumn: loc.endColumn,
             });
           }
-          const callableText = node.expression.getText(source);
-          if (
-            ["fetch", "axios", "get", "post", "request"].some(
-              (name) => callableText === name || callableText.endsWith(`.${name}`),
-            )
-          ) {
+          if (isRecognizedHttpCall(node, httpClientOrigins)) {
             const firstArg = node.arguments[0];
             if (firstArg) defer(endpointNodes, { node, value: staticString(firstArg) });
           }
@@ -1378,6 +1366,30 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
       });
     }
 
+    if (httpClientOrigins.aliasResolutionTruncated) {
+      incomplete = true;
+      skippedFiles.push({
+        path: pathValue.slice(0, 1024),
+        reason: "http_client_alias_depth_limit",
+        size: fileSize,
+      });
+    }
+    if (httpClientOrigins.aliasReassigned) {
+      incomplete = true;
+      skippedFiles.push({
+        path: pathValue.slice(0, 1024),
+        reason: "http_client_alias_reassigned",
+        size: fileSize,
+      });
+    }
+    if (httpClientOrigins.bindingPatternTruncated) {
+      incomplete = true;
+      skippedFiles.push({
+        path: pathValue.slice(0, 1024),
+        reason: "binding_pattern_limit",
+        size: fileSize,
+      });
+    }
     for (const diagnostic of parseDiagnostics) {
       if (diagnostic.category === ts.DiagnosticCategory.Error) parseFailures += 1;
     }
