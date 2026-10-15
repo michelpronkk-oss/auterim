@@ -6,7 +6,9 @@ import {
   persistedCredentialLikeValueCount,
   safeReadbackValue,
   safeSourceSpanMatch,
+  relationEvidenceMatchesSource,
 } from "@/lib/code-intelligence/readback";
+import { analyzeCodeSnapshot } from "@/lib/code-intelligence/analyzer";
 
 describe("bounded Code Intelligence readback", () => {
   it("accepts repository-relative paths and rejects traversal and platform separators", () => {
@@ -57,5 +59,117 @@ describe("bounded Code Intelligence readback", () => {
     expect(classifySkipReason("environment_file_excluded", ".env.local")).toBe(
       "EXPECTED_SECURITY_SKIP",
     );
+  });
+
+  it("proves source provenance for each emitted relation type", () => {
+    const source = [
+      'import Stripe from "stripe";',
+      "function target() {}",
+      "function run(event: { type: string }) {",
+      '  const stripe = new Stripe("test");',
+      '  stripe.webhooks.constructEvent("payload", "signature", "secret");',
+      '  if (event.type === "customer.subscription.updated") {',
+      '    fetch("https://api.example.test/v1/items");',
+      "  }",
+      "  const key = process.env.STRIPE_API_KEY;",
+      "  const schema: PaymentSchema = {} as PaymentSchema;",
+      "  target();",
+      "}",
+    ].join("\n");
+    const analysis = analyzeCodeSnapshot([
+      { path: "src/payment.ts", text: source, size: Buffer.byteLength(source) },
+      {
+        path: "package.json",
+        text: JSON.stringify({ dependencies: { stripe: "^18.0.0" } }),
+        size: 52,
+      },
+    ]);
+    const entities = new Map(analysis.entities.map((entity) => [entity.entityKey, entity]));
+    const present = new Set(analysis.relations.map((relation) => relation.relationType));
+    const required = [
+      "FILE_CONTAINS_SYMBOL",
+      "IMPORTS_PACKAGE",
+      "IMPORTS_SYMBOL",
+      "CALLS_SYMBOL",
+      "REFERENCES_EXTERNAL",
+      "USES_ENV_NAME",
+      "HANDLES_EVENT",
+      "CALLS_ENDPOINT",
+      "REFERENCES_SCHEMA",
+    ];
+    for (const type of required) expect([...present], type).toContain(type);
+    for (const relation of analysis.relations) {
+      const from = entities.get(relation.fromEntityKey)!;
+      const to = entities.get(relation.toEntityKey)!;
+      const matchingExternalReference = analysis.externalReferences.some(
+        (reference) =>
+          reference.entityKey === relation.toEntityKey &&
+          reference.path === relation.evidencePath &&
+          reference.startLine === relation.evidenceStartLine &&
+          reference.endLine === relation.evidenceEndLine &&
+          reference.extractorType === relation.extractorType,
+      );
+      expect(
+        relationEvidenceMatchesSource({
+          relationType: relation.relationType,
+          path: relation.evidencePath,
+          startLine: relation.evidenceStartLine,
+          endLine: relation.evidenceEndLine,
+          extractorType: relation.extractorType,
+          from: {
+            entity_type: from.entityType,
+            name: from.name,
+            path: from.path,
+            start_line: from.startLine,
+            end_line: from.endLine,
+          },
+          to: {
+            entity_type: to.entityType,
+            name: to.name,
+            path: to.path,
+            start_line: to.startLine,
+            end_line: to.endLine,
+          },
+          matchingTargetDeclarations: analysis.entities.filter(
+            (entity) =>
+              entity.path === to.path &&
+              entity.entityType === to.entityType &&
+              entity.name === to.name &&
+              ["function", "method", "class"].includes(entity.entityType),
+          ).length,
+          source,
+          matchingExternalReference,
+        }),
+        `${relation.relationType} ${relation.evidencePath}:${relation.evidenceStartLine}`,
+      ).toBe(true);
+      if (relation.relationType === "CALLS_SYMBOL") {
+        expect(
+          relationEvidenceMatchesSource({
+            relationType: relation.relationType,
+            path: relation.evidencePath,
+            startLine: relation.evidenceStartLine,
+            endLine: relation.evidenceEndLine,
+            extractorType: relation.extractorType,
+            from: {
+              entity_type: from.entityType,
+              name: from.name,
+              path: from.path,
+              start_line: from.startLine,
+              end_line: from.endLine,
+            },
+            to: {
+              entity_type: to.entityType,
+              name: to.name,
+              path: to.path,
+              start_line: relation.evidenceStartLine,
+              end_line: relation.evidenceEndLine,
+            },
+            matchingTargetDeclarations: 1,
+            source,
+            matchingExternalReference,
+          }),
+        ).toBe(false);
+      }
+    }
   });
 });

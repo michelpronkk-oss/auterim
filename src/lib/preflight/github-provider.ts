@@ -1027,6 +1027,8 @@ export class GitHubAppRepositoryProvider implements RepositoryProvider {
     let offset = 0;
     let files = 0;
     let extracted = 0;
+    let skippedLinks = 0;
+    const skippedLinkPaths: string[] = [];
     while (offset + 512 <= tar.length) {
       const header = tar.subarray(offset, offset + 512);
       if (header.every((byte) => byte === 0)) break;
@@ -1057,6 +1059,13 @@ export class GitHubAppRepositoryProvider implements RepositoryProvider {
           await writeFile(entry.target, data, { flag: "wx" });
           extracted += size;
         }
+      } else if (kind === "1" || kind === "2") {
+        const entry = safeArchivePath(destination, archiveName);
+        if (entry) {
+          skippedLinks += 1;
+          if (skippedLinkPaths.length < MAX_ARCHIVE_FILES)
+            skippedLinkPaths.push(entry.relative);
+        }
       }
       offset += 512 + Math.ceil(size / 512) * 512;
     }
@@ -1070,6 +1079,8 @@ export class GitHubAppRepositoryProvider implements RepositoryProvider {
       bytes: extracted,
       compressedBytes: compressed.byteLength,
       expandedBytes: tar.byteLength,
+      skippedLinks,
+      skippedLinkPaths,
     };
   }
 }

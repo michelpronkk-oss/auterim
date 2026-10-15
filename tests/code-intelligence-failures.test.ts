@@ -129,6 +129,34 @@ describe("Code Intelligence failure-stage safety", () => {
     expect(outcome).not.toHaveProperty("analysis");
   });
 
+  it("fails closed when the operational analysis watchdog expires", async () => {
+    let nowCalls = 0;
+    let persistCalls = 0;
+    const outcome = await executeCodeAnalysisStages({
+      validateEnvironment: () => ({ safe: true }),
+      setupProvider: () => ({ provider: true }),
+      materialize: async () => {},
+      collectSnapshot: async () => ["bounded snapshot"],
+      analyze: (snapshot) => ({ snapshot }),
+      analysisWatchdogMs: 1,
+      monotonicNow: () => (nowCalls++ === 0 ? 100 : 102),
+      persist: async () => {
+        persistCalls += 1;
+      },
+      cleanup: async () => {},
+    });
+    expect(outcome).toMatchObject({
+      ok: false,
+      failure: {
+        stage: "static_analysis",
+        category: "analysis_watchdog_timeout",
+        retryable: false,
+      },
+    });
+    expect(persistCalls).toBe(0);
+    expect(outcome).not.toHaveProperty("analysis");
+  });
+
   it("classifies cleanup-only failure without a primary stage", async () => {
     const outcome = await executeCodeAnalysisStages({
       validateEnvironment: () => ({ safe: true }),

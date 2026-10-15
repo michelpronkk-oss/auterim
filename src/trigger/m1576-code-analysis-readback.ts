@@ -5,8 +5,6 @@ import path from "node:path";
 import { z } from "zod";
 import { getEnvironment } from "@/lib/env/schema";
 import {
-  CODE_ANALYSIS_READBACK_COMMIT,
-  CODE_ANALYSIS_READBACK_ID,
   CODE_ANALYSIS_READBACK_PRODUCT,
   CODE_ANALYSIS_READBACK_REPOSITORY,
   CODE_ANALYSIS_READBACK_WORKSPACE,
@@ -18,9 +16,15 @@ import {
   persistedCredentialLikeValueCount,
   safeReadbackValue,
   safeSourceSpanMatch,
+  relationEvidenceMatchesSource,
   type PersistedReadbackRun,
 } from "@/lib/code-intelligence/readback";
-import { CODE_SCAN_LIMITS } from "@/lib/code-intelligence/analyzer";
+import {
+  CODE_INTELLIGENCE_PROFILE,
+  CODE_INTELLIGENCE_VERSION,
+  CODE_SCAN_LIMITS,
+  isExactCommitSha,
+} from "@/lib/code-intelligence/analyzer";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import {
   GitHubAppInstallationError,
@@ -28,12 +32,13 @@ import {
 } from "@/lib/preflight/github-provider";
 import type { RepositoryTarget } from "@/lib/preflight/preflight";
 
-const MAX_ROWS = 20_000;
+const MAX_ROWS = 50_001;
 const PAGE_SIZE = 1_000;
 const MAX_SOURCE_FILES = 20;
 const MAX_SOURCE_BYTES = 2_000_000;
+const stableCompare = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
 
-const schema = z.object({ analysisRunId: z.literal(CODE_ANALYSIS_READBACK_ID) }).strict();
+const schema = z.object({ analysisRunId: z.string().uuid() }).strict();
 
 type ExternalRow = {
   id: string;
@@ -50,6 +55,7 @@ type ExternalRow = {
   confidence_class: string;
   redacted: boolean;
   value_fingerprint: string | null;
+  structural_fingerprint: string;
   extractor_type: string;
 };
 type EntityRow = {
@@ -66,6 +72,7 @@ type EntityRow = {
   end_line: number | null;
   confidence_class: string;
   extractor_type: string;
+  structural_fingerprint: string;
 };
 type RelationRow = {
   id: string;
@@ -74,6 +81,11 @@ type RelationRow = {
   to_entity_id: string;
   relation_type: string;
   confidence_class: string;
+  evidence_path: string | null;
+  evidence_start_line: number | null;
+  evidence_end_line: number | null;
+  extractor_type: string | null;
+  structural_fingerprint: string;
 };
 type SkipRow = { path: string; skip_reason: string; byte_size: number };
 
@@ -117,8 +129,9 @@ function referenceSamples(rows: ExternalRow[]) {
       .filter((row) => safeReadbackValue(type, row.normalized_value) !== null)
       .filter((row) => isSafeReadbackPath(row.path))
       .sort((left, right) =>
-        `${left.path}\0${left.start_line}\0${left.id}`.localeCompare(
-          `${right.path}\0${right.start_line}\0${right.id}`,
+        stableCompare(
+          `${left.path}\0${left.start_line}\0${left.normalized_value}\0${left.extractor_type}`,
+          `${right.path}\0${right.start_line}\0${right.normalized_value}\0${right.extractor_type}`,
         ),
       )
       .slice(0, limits[type] ?? 0),
@@ -162,56 +175,83 @@ async function readSourceSpan(
     : false;
 }
 
-async function readEntitySpan(
+async function readRelationSourceMatch(
   root: string,
-  entity: EntityRow | undefined,
+  relation: RelationRow,
+  from: EntityRow | undefined,
+  to: EntityRow | undefined,
+  entities: EntityRow[],
+  references: ExternalRow[],
+  analysisRunId: string,
   cache: Map<string, string | null>,
   readState: { files: number; bytes: number },
 ) {
-  if (!entity || !isSafeReadbackPath(entity.path) || !entity.start_line || !entity.end_line)
+  if (
+    !from ||
+    !to ||
+    !relation.evidence_path ||
+    !relation.evidence_start_line ||
+    !relation.evidence_end_line ||
+    !relation.extractor_type ||
+    !isSafeReadbackPath(relation.evidence_path)
+  )
     return false;
-  const reference: ExternalRow = {
-    id: entity.id,
-    analysis_run_id: entity.analysis_run_id,
-    entity_id: entity.id,
-    workspace_id: entity.workspace_id,
-    repository_id: entity.repository_id,
-    commit_sha: entity.commit_sha,
-    reference_type: "schema",
-    normalized_value: entity.name,
-    value_fingerprint: null,
-    path: entity.path,
-    start_line: entity.start_line,
-    end_line: entity.end_line,
-    confidence_class: entity.confidence_class,
-    redacted: false,
-    extractor_type: entity.extractor_type,
-  };
-  if (!isSafeReadbackPath(reference.path)) return false;
-  let source = cache.get(reference.path);
+  const sourcePath = relation.evidence_path;
+  let source = cache.get(sourcePath);
   if (source === undefined) {
     if (readState.files >= MAX_SOURCE_FILES) return false;
     const rootReal = await realpath(root);
-    const absolute = path.resolve(rootReal, ...reference.path.split("/"));
+    const absolute = path.resolve(rootReal, ...sourcePath.split("/"));
     if (!absolute.startsWith(`${rootReal}${path.sep}`)) return false;
     const info = await lstat(absolute).catch(() => null);
     if (!info?.isFile() || info.isSymbolicLink()) return false;
     const resolved = await realpath(absolute).catch(() => null);
     if (!resolved || !resolved.startsWith(`${rootReal}${path.sep}`)) return false;
-    const maxBytes = reference.path === "package.json" ? 5_000_000 : CODE_SCAN_LIMITS.maxFileBytes;
+    const maxBytes = sourcePath === "package.json" ? 5_000_000 : CODE_SCAN_LIMITS.maxFileBytes;
     if (info.size > maxBytes || readState.bytes + info.size > MAX_SOURCE_BYTES) return false;
     const content = await readFile(absolute);
     readState.files += 1;
     readState.bytes += content.byteLength;
     source = content.toString("utf8").includes("\uFFFD") ? null : content.toString("utf8");
-    cache.set(reference.path, source);
+    cache.set(sourcePath, source);
   }
   if (!source) return false;
-  const span = source
-    .split(/\r?\n/)
-    .slice(entity.start_line - 1, entity.end_line)
-    .join("\n");
-  return Boolean(span && entity.name && span.includes(entity.name));
+  const matchingExternalReference = references.some(
+    (reference) =>
+      reference.analysis_run_id === analysisRunId &&
+      reference.entity_id === to.id &&
+      reference.path === sourcePath &&
+      reference.start_line === relation.evidence_start_line &&
+      reference.end_line === relation.evidence_end_line &&
+      reference.extractor_type === relation.extractor_type &&
+      !reference.redacted &&
+      safeSourceSpanMatch(
+        reference.reference_type,
+        reference.normalized_value,
+        reference.path,
+        source!,
+        reference.start_line,
+        reference.end_line,
+      ),
+  );
+  return relationEvidenceMatchesSource({
+    relationType: relation.relation_type,
+    path: sourcePath,
+    startLine: relation.evidence_start_line,
+    endLine: relation.evidence_end_line,
+    extractorType: relation.extractor_type,
+    from,
+    to,
+    matchingTargetDeclarations: entities.filter(
+      (entity) =>
+        entity.path === to.path &&
+        entity.entity_type === to.entity_type &&
+        entity.name === to.name &&
+        ["function", "method", "class"].includes(entity.entity_type),
+    ).length,
+    source,
+    matchingExternalReference,
+  });
 }
 
 export const m1576CodeAnalysisReadback = schemaTask({
@@ -227,20 +267,23 @@ export const m1576CodeAnalysisReadback = schemaTask({
     const { data: run, error: runError } = await supabase
       .from("code_analysis_runs")
       .select(
-        "id,workspace_id,product_id,repository_id,commit_sha,status,coverage_state,files_discovered,files_analyzed,files_skipped,parse_failures,bytes_analyzed,analyzer_version,language_profile,analysis_profile",
+        "id,workspace_id,product_id,repository_id,commit_sha,status,coverage_state,files_discovered,files_analyzed,files_skipped,parse_failures,bytes_analyzed,supported_files_discovered,supported_files_analyzed,supported_files_skipped_by_bound,unsupported_language_files,coverage_reason_counts,persisted_entity_count,persisted_relation_count,persisted_reference_count,persisted_skip_count,analyzer_version,language_profile,analysis_profile",
       )
       .eq("id", analysisRunId)
       .maybeSingle();
     if (runError || !run) throw new AbortTaskRunError("analysis_run_read_failed");
     const persistedRun = run as PersistedReadbackRun;
     if (
-      persistedRun.id !== CODE_ANALYSIS_READBACK_ID ||
+      !/^[0-9a-f-]{36}$/.test(persistedRun.id) ||
       persistedRun.workspace_id !== CODE_ANALYSIS_READBACK_WORKSPACE ||
       (persistedRun.product_id !== null &&
         persistedRun.product_id !== CODE_ANALYSIS_READBACK_PRODUCT) ||
       persistedRun.repository_id !== CODE_ANALYSIS_READBACK_REPOSITORY ||
-      persistedRun.commit_sha !== CODE_ANALYSIS_READBACK_COMMIT ||
-      persistedRun.status !== "completed"
+      !isExactCommitSha(persistedRun.commit_sha) ||
+      persistedRun.status !== "completed" ||
+      persistedRun.analyzer_version !== CODE_INTELLIGENCE_VERSION ||
+      persistedRun.language_profile !== CODE_INTELLIGENCE_PROFILE ||
+      persistedRun.analysis_profile !== CODE_INTELLIGENCE_PROFILE
     )
       throw new AbortTaskRunError("analysis_identity_mismatch");
 
@@ -249,7 +292,7 @@ export const m1576CodeAnalysisReadback = schemaTask({
         supabase
           .from("code_entities")
           .select(
-            "id,analysis_run_id,workspace_id,repository_id,commit_sha,entity_type,name,language,path,start_line,end_line,confidence_class,extractor_type",
+            "id,analysis_run_id,workspace_id,repository_id,commit_sha,entity_type,name,language,path,start_line,end_line,confidence_class,extractor_type,structural_fingerprint",
           )
           .eq("analysis_run_id", analysisRunId)
           .order("id")
@@ -259,7 +302,7 @@ export const m1576CodeAnalysisReadback = schemaTask({
         supabase
           .from("code_external_references")
           .select(
-            "id,analysis_run_id,entity_id,workspace_id,repository_id,commit_sha,reference_type,normalized_value,value_fingerprint,path,start_line,end_line,confidence_class,redacted,extractor_type",
+            "id,analysis_run_id,entity_id,workspace_id,repository_id,commit_sha,reference_type,normalized_value,value_fingerprint,path,start_line,end_line,confidence_class,redacted,extractor_type,structural_fingerprint",
           )
           .eq("analysis_run_id", analysisRunId)
           .order("id")
@@ -268,7 +311,9 @@ export const m1576CodeAnalysisReadback = schemaTask({
       readBoundedRows<RelationRow>((from, to) =>
         supabase
           .from("code_relations")
-          .select("id,analysis_run_id,from_entity_id,to_entity_id,relation_type,confidence_class")
+          .select(
+            "id,analysis_run_id,from_entity_id,to_entity_id,relation_type,confidence_class,evidence_path,evidence_start_line,evidence_end_line,extractor_type,structural_fingerprint",
+          )
           .eq("analysis_run_id", analysisRunId)
           .order("id")
           .range(from, to),
@@ -296,23 +341,43 @@ export const m1576CodeAnalysisReadback = schemaTask({
     });
     if (!relationEndpointIntegrity)
       throw new AbortTaskRunError("relation_endpoint_integrity_failed");
+    if (
+      relations.some(
+        (row) =>
+          !row.evidence_path ||
+          !row.evidence_start_line ||
+          !row.evidence_end_line ||
+          !row.extractor_type ||
+          !isSafeReadbackPath(row.evidence_path),
+      )
+    )
+      throw new AbortTaskRunError("relation_provenance_integrity_failed");
     const identityMismatches =
       entities.filter(
         (row) =>
           row.analysis_run_id !== analysisRunId ||
           row.workspace_id !== CODE_ANALYSIS_READBACK_WORKSPACE ||
           row.repository_id !== CODE_ANALYSIS_READBACK_REPOSITORY ||
-          row.commit_sha !== CODE_ANALYSIS_READBACK_COMMIT,
+          row.commit_sha !== persistedRun.commit_sha,
       ).length +
+      (new Set(entities.map((row) => row.structural_fingerprint)).size !== entities.length
+        ? 1
+        : 0) +
       references.filter(
         (row) =>
           row.analysis_run_id !== analysisRunId ||
           !entityById.has(row.entity_id) ||
           row.workspace_id !== CODE_ANALYSIS_READBACK_WORKSPACE ||
           row.repository_id !== CODE_ANALYSIS_READBACK_REPOSITORY ||
-          row.commit_sha !== CODE_ANALYSIS_READBACK_COMMIT,
+          row.commit_sha !== persistedRun.commit_sha,
       ).length +
-      relations.filter((row) => row.analysis_run_id !== analysisRunId).length;
+      (new Set(references.map((row) => row.structural_fingerprint)).size !== references.length
+        ? 1
+        : 0) +
+      relations.filter((row) => row.analysis_run_id !== analysisRunId).length +
+      (new Set(relations.map((row) => row.structural_fingerprint)).size !== relations.length
+        ? 1
+        : 0);
     if (identityMismatches !== 0) throw new AbortTaskRunError("fact_identity_mismatch");
 
     const referenceCounts = Object.fromEntries(
@@ -348,7 +413,8 @@ export const m1576CodeAnalysisReadback = schemaTask({
       skipGroups.set(key, current);
     }
     const skipReasonBreakdown = [...skipGroups.values()].sort((left, right) =>
-      `${left.reason}\0${left.classification}`.localeCompare(
+      stableCompare(
+        `${left.reason}\0${left.classification}`,
         `${right.reason}\0${right.classification}`,
       ),
     );
@@ -356,29 +422,22 @@ export const m1576CodeAnalysisReadback = schemaTask({
       skips.map((row) => ({ reason: row.skip_reason, path: row.path })),
     );
 
-    const sourceLike = (value: string) => /\.(?:[cm]?js|jsx|tsx?|cts|mts)$/i.test(value);
-    const analyzedSourceFiles = entities.filter(
-      (row) => row.entity_type === "file" && ["javascript", "typescript"].includes(row.language),
-    ).length;
-    const directlySkippedSourceFiles = skips.filter((row) => sourceLike(row.path)).length;
-    const knownSourceCandidates = analyzedSourceFiles + directlySkippedSourceFiles;
-    const bounds = new Set([
-      "file_count_limit",
-      "parse_time_budget",
-      "file_size_limit",
-      "repository_byte_limit",
-      "traversal_entry_limit",
-      "fact_count_limit",
-    ]);
-    const supportedSourceSkippedByBounds = skips.filter(
-      (row) => sourceLike(row.path) && bounds.has(row.skip_reason),
-    ).length;
+    const analyzedSourceFiles = persistedRun.supported_files_analyzed;
+    const knownSourceCandidates = persistedRun.supported_files_discovered;
+    const directlySkippedSourceFiles = persistedRun.supported_files_skipped_by_bound;
+    const supportedSourceSkippedByBounds = persistedRun.supported_files_skipped_by_bound;
     const directorySkipCount = skips.filter((row) =>
       row.skip_reason.startsWith("generated_directory:"),
     ).length;
     const supportedSourceCoveragePercent = knownSourceCandidates
       ? Math.round((analyzedSourceFiles / knownSourceCandidates) * 10_000) / 100
       : null;
+    const persistedCountMatches =
+      entities.length === persistedRun.persisted_entity_count &&
+      relations.length === persistedRun.persisted_relation_count &&
+      references.length === persistedRun.persisted_reference_count &&
+      skips.length === persistedRun.persisted_skip_count;
+    if (!persistedCountMatches) throw new AbortTaskRunError("persisted_fact_count_mismatch");
 
     const credentialLikeCount = persistedCredentialLikeValueCount([
       ...entities.flatMap((row) => [row.name, row.path]),
@@ -454,7 +513,7 @@ export const m1576CodeAnalysisReadback = schemaTask({
       defaultBranch: repository.data.default_branch,
       externalId,
       installationId,
-      commitSha: CODE_ANALYSIS_READBACK_COMMIT,
+      commitSha: persistedRun.commit_sha,
     };
     const app = await provider.verifyAppIdentity();
     if (!app.matchesConfiguredAppId) throw new AbortTaskRunError("github_app_identity_mismatch");
@@ -471,7 +530,7 @@ export const m1576CodeAnalysisReadback = schemaTask({
     const access = await provider.verifyRepositoryAccess(target);
     if (!access.matchesCanonicalRepository)
       throw new AbortTaskRunError("github_repository_identity_mismatch");
-    const exactCommit = await provider.verifyExactCommit(target, CODE_ANALYSIS_READBACK_COMMIT);
+    const exactCommit = await provider.verifyExactCommit(target, persistedRun.commit_sha);
     if (!exactCommit.exactShaMatch) throw new AbortTaskRunError("github_exact_commit_unavailable");
 
     let temporaryRoot: string | null = null;
@@ -480,7 +539,7 @@ export const m1576CodeAnalysisReadback = schemaTask({
     let sourceFilesRead = 0;
     try {
       temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "auterim-m1576-readback-"));
-      await provider.materializeRepository(target, CODE_ANALYSIS_READBACK_COMMIT, temporaryRoot);
+      await provider.materializeRepository(target, persistedRun.commit_sha, temporaryRoot);
       const cache = new Map<string, string | null>();
       const readState = { files: 0, bytes: 0 };
       const samples = referenceSamples(references);
@@ -500,37 +559,55 @@ export const m1576CodeAnalysisReadback = schemaTask({
           endLine: row.end_line,
           extractorType: row.extractor_type,
           confidenceClass: row.confidence_class,
-          commitSha: CODE_ANALYSIS_READBACK_COMMIT,
+          commitSha: persistedRun.commit_sha,
           sourceMatch,
         });
       }
-      const relationSamples = [...new Set(relations.map((row) => row.relation_type).sort())]
-        .slice(0, 3)
-        .map((type) => relations.find((row) => row.relation_type === type)!)
-        .map(async (row) => {
-          const from = entityById.get(row.from_entity_id);
-          const to = entityById.get(row.to_entity_id);
-          return {
-            kind: "relation",
-            type: row.relation_type,
-            fromPath: from && isSafeReadbackPath(from.path) ? from.path : "[withheld]",
-            fromLine: from?.start_line ?? null,
-            toPath: to && isSafeReadbackPath(to.path) ? to.path : "[withheld]",
-            toLine: to?.start_line ?? null,
-            confidenceClass: row.confidence_class,
-            commitSha: CODE_ANALYSIS_READBACK_COMMIT,
-            endpointsPersisted: Boolean(
-              from &&
-              to &&
-              from.analysis_run_id === analysisRunId &&
-              to.analysis_run_id === analysisRunId,
+      const relationSamples = RELATION_TYPES.flatMap((type) =>
+        relations
+          .filter((row) => row.relation_type === type)
+          .sort((left, right) =>
+            stableCompare(
+              `${left.evidence_path ?? ""}\0${left.evidence_start_line ?? 0}\0${left.structural_fingerprint}`,
+              `${right.evidence_path ?? ""}\0${right.evidence_start_line ?? 0}\0${right.structural_fingerprint}`,
             ),
-            endpointSourceMatches: [
-              await readEntitySpan(temporaryRoot!, from, cache, readState),
-              await readEntitySpan(temporaryRoot!, to, cache, readState),
-            ],
-          };
-        });
+          )
+          .slice(0, 1),
+      ).map(async (row) => {
+        const from = entityById.get(row.from_entity_id);
+        const to = entityById.get(row.to_entity_id);
+        return {
+          kind: "relation",
+          type: row.relation_type,
+          fromPath: from && isSafeReadbackPath(from.path) ? from.path : "[withheld]",
+          fromLine: from?.start_line ?? null,
+          toPath: to && isSafeReadbackPath(to.path) ? to.path : "[withheld]",
+          toLine: to?.start_line ?? null,
+          confidenceClass: row.confidence_class,
+          commitSha: persistedRun.commit_sha,
+          endpointsPersisted: Boolean(
+            from &&
+            to &&
+            from.analysis_run_id === analysisRunId &&
+            to.analysis_run_id === analysisRunId,
+          ),
+          evidencePath: row.evidence_path,
+          evidenceStartLine: row.evidence_start_line,
+          evidenceEndLine: row.evidence_end_line,
+          extractorType: row.extractor_type,
+          sourceMatch: await readRelationSourceMatch(
+            temporaryRoot!,
+            row,
+            from,
+            to,
+            entities,
+            references,
+            analysisRunId,
+            cache,
+            readState,
+          ),
+        };
+      });
       spotChecks.push(...(await Promise.all(relationSamples)));
       sourceBytesRead = readState.bytes;
       sourceFilesRead = readState.files;
@@ -558,6 +635,17 @@ export const m1576CodeAnalysisReadback = schemaTask({
         filesSkipped: persistedRun.files_skipped,
         parseFailures: persistedRun.parse_failures,
         bytesAnalyzed: persistedRun.bytes_analyzed,
+        supportedFilesDiscovered: persistedRun.supported_files_discovered,
+        supportedFilesAnalyzed: persistedRun.supported_files_analyzed,
+        supportedFilesSkippedByBound: persistedRun.supported_files_skipped_by_bound,
+        unsupportedLanguageFiles: persistedRun.unsupported_language_files,
+        coverageReasonCounts: persistedRun.coverage_reason_counts,
+        persistedFactCounts: {
+          entities: persistedRun.persisted_entity_count,
+          relations: persistedRun.persisted_relation_count,
+          references: persistedRun.persisted_reference_count,
+          skips: persistedRun.persisted_skip_count,
+        },
         analyzerVersion: persistedRun.analyzer_version,
         languageProfile: persistedRun.language_profile,
         analysisProfile: persistedRun.analysis_profile,
@@ -573,12 +661,11 @@ export const m1576CodeAnalysisReadback = schemaTask({
         referenceIdentityMismatches: 0,
         relationEndpointIntegrity,
         matchesCompletionCounters: {
-          packageFacts: referenceCounts.package === 26,
-          importFacts: referenceCounts.import === 122,
-          externalReferences: references.length === 334,
-          relations: relations.length === 1430,
-          skippedFiles: skips.length === persistedRun.files_skipped,
-          parsedFiles: analyzedSourceFiles === persistedRun.files_analyzed,
+          entities: entities.length === persistedRun.persisted_entity_count,
+          externalReferences: references.length === persistedRun.persisted_reference_count,
+          relations: relations.length === persistedRun.persisted_relation_count,
+          skippedFiles: skips.length === persistedRun.persisted_skip_count,
+          supportedFiles: analyzedSourceFiles === persistedRun.supported_files_analyzed,
         },
       },
       skipReasonBreakdown,
@@ -609,10 +696,7 @@ export const m1576CodeAnalysisReadback = schemaTask({
           (item) => item.kind === "relation" && item.endpointsPersisted === true,
         ).length,
         relationSamplesWithSourceMatches: spotChecks.filter(
-          (item) =>
-            item.kind === "relation" &&
-            Array.isArray(item.endpointSourceMatches) &&
-            item.endpointSourceMatches.every((matched) => matched === true),
+          (item) => item.kind === "relation" && item.sourceMatch === true,
         ).length,
         sourceFilesRead,
         sourceBytesRead,

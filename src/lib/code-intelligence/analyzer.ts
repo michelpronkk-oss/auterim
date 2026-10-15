@@ -1,15 +1,18 @@
 import { createHash } from "node:crypto";
 import ts from "typescript";
+import { CodeAnalysisStageError } from "@/lib/code-intelligence/failures";
 
-export const CODE_INTELLIGENCE_VERSION = "code-intelligence-v1";
-export const CODE_INTELLIGENCE_PROFILE = "javascript-typescript-v1";
+export const CODE_INTELLIGENCE_VERSION = "code-intelligence-v2";
+export const CODE_INTELLIGENCE_PROFILE = "javascript-typescript-v2";
 export const CODE_SCAN_LIMITS = {
   maxFileBytes: 256_000,
   maxManifestBytes: 5_000_000,
   maxRepositoryBytes: 10_000_000,
-  maxFiles: 250,
-  maxParseMilliseconds: 1_500,
-  maxPersistedFacts: 20_000,
+  maxFiles: 1_000,
+  maxPersistedFacts: 50_000,
+  maxAstNodes: 1_000_000,
+  maxAstDepth: 512,
+  maxDeferredNodes: 100_000,
 } as const;
 
 const SKIP_DIRS = new Set([
@@ -153,6 +156,10 @@ export type CodeRelation = {
   toEntityKey: string;
   relationType: RelationType;
   confidenceClass: ConfidenceClass;
+  evidencePath: string;
+  evidenceStartLine: number;
+  evidenceEndLine: number;
+  extractorType: string;
 };
 export type ExternalReference = {
   entityKey: string;
@@ -175,6 +182,11 @@ export type AnalysisResult = {
   filesSkipped: number;
   parseFailures: number;
   bytesAnalyzed: number;
+  supportedFilesDiscovered: number;
+  supportedFilesAnalyzed: number;
+  supportedFilesSkippedByBound: number;
+  unsupportedLanguageFiles: number;
+  coverageReasonCounts: Record<string, number>;
   entities: CodeEntity[];
   relations: CodeRelation[];
   externalReferences: ExternalReference[];
@@ -187,6 +199,44 @@ const SAFE_PACKAGE_RANGE = /^[~^<>=*xX0-9A-Za-z.+|:, \-]{1,80}$/;
 const SAFE_IMPORT_SPECIFIER = /^[A-Za-z0-9@._/-]{1,240}$/;
 const tupleKey = (...parts: (string | number | null)[]) =>
   digest(parts.map((x) => x ?? "").join("\0"));
+const stableCompare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+const BOUND_SKIP_REASONS = new Set([
+  "file_count_limit",
+  "file_size_limit",
+  "repository_byte_limit",
+  "ast_node_limit",
+  "ast_depth_limit",
+  "fact_count_limit",
+]);
+
+function addRelation(relations: Map<string, CodeRelation>, relation: CodeRelation) {
+  const key = tupleKey(
+    relation.fromEntityKey,
+    relation.toEntityKey,
+    relation.relationType,
+    relation.evidencePath,
+    relation.evidenceStartLine,
+    relation.evidenceEndLine,
+    relation.extractorType,
+  );
+  relations.set(key, relation);
+}
+
+class BoundedFactMap<K, V> extends Map<K, V> {
+  private readonly account: () => void;
+
+  constructor(account: () => void) {
+    super();
+    this.account = account;
+  }
+
+  override set(key: K, value: V) {
+    const isNew = !this.has(key);
+    super.set(key, value);
+    if (isNew) this.account();
+    return this;
+  }
+}
 const ext = (file: string) => file.slice(file.lastIndexOf(".")).toLowerCase();
 
 function safeRelativePath(value: string) {
@@ -319,12 +369,15 @@ function addExternal(
               : input.referenceType === "import"
                 ? "IMPORTS_PACKAGE"
                 : "REFERENCES_EXTERNAL";
-    const relationKey = tupleKey(input.parentEntityKey, entityKey, relationType);
-    relations.set(relationKey, {
+    addRelation(relations, {
       fromEntityKey: input.parentEntityKey,
       toEntityKey: entityKey,
       relationType,
       confidenceClass: input.confidenceClass,
+      evidencePath: input.path,
+      evidenceStartLine: input.startLine,
+      evidenceEndLine: input.endLine,
+      extractorType: input.extractorType,
     });
   }
   return entityKey;
@@ -577,7 +630,7 @@ function parseManifest(
     const section = parsed[field];
     if (!section || typeof section !== "object" || Array.isArray(section)) continue;
     for (const [name, range] of Object.entries(section as Record<string, unknown>).sort(
-      ([a], [b]) => a.localeCompare(b),
+      ([a], [b]) => stableCompare(a, b),
     )) {
       if (
         typeof range !== "string" ||
@@ -647,10 +700,16 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
   const directorySkips = inputFiles.filter((file) => file.directorySkipReason);
   const files = inputFiles
     .filter((file) => !file.collectionTruncated && !file.directorySkipReason)
-    .sort((a, b) => a.path.localeCompare(b.path));
-  const entities = new Map<string, CodeEntity>();
-  const relations = new Map<string, CodeRelation>();
-  const refs = new Map<string, ExternalReference>();
+    .sort((a, b) => stableCompare(a.path, b.path));
+  let factCount = 0;
+  const accountFact = () => {
+    factCount += 1;
+    if (factCount > CODE_SCAN_LIMITS.maxPersistedFacts)
+      throw new CodeAnalysisStageError("fact_limit_exceeded");
+  };
+  const entities = new BoundedFactMap<string, CodeEntity>(accountFact);
+  const relations = new BoundedFactMap<string, CodeRelation>(accountFact);
+  const refs = new BoundedFactMap<string, ExternalReference>(accountFact);
   const skippedFiles: SkippedFile[] = [];
   let filesAnalyzed = 0;
   let parseFailures = 0;
@@ -673,19 +732,31 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
     skippedFiles.push({ path: pathValue, reason: file.directorySkipReason!, size: 0 });
   }
   let unsupportedCount = 0;
-  const startedAt = Date.now();
-  const symbolEntities = new Map<string, string>();
-  const unresolvedCalls: Array<{ owner: string; callee: string }> = [];
+  const symbolEntities = new Map<string, string[]>();
+  const unresolvedCalls: Array<{
+    owner: string;
+    callee: string;
+    path: string;
+    startLine: number;
+    endLine: number;
+  }> = [];
+  let supportedFilesAnalyzed = 0;
+  let unsupportedLanguageFiles = 0;
+  let astNodesVisited = 0;
+  let astBudgetReached = false;
+  let astBudgetReason = "ast_node_limit";
+  let deferredNodeCount = 0;
+  const defer = <T>(queue: T[], value: T) => {
+    deferredNodeCount += 1;
+    if (deferredNodeCount > CODE_SCAN_LIMITS.maxDeferredNodes)
+      throw new CodeAnalysisStageError("parse_budget_exceeded");
+    queue.push(value);
+  };
 
   const codeCandidates = files.filter((file) =>
     CODE_LANGUAGE_ADAPTERS.some((adapter) => adapter.supports(file.path)),
   );
-  const relevantFiles = files.filter(
-    (file) =>
-      file.path === "package.json" ||
-      CODE_LANGUAGE_ADAPTERS.some((adapter) => adapter.supports(file.path)),
-  );
-  if (relevantFiles.length > CODE_SCAN_LIMITS.maxFiles) incomplete = true;
+  if (codeCandidates.length > CODE_SCAN_LIMITS.maxFiles) incomplete = true;
   let examined = 0;
 
   for (const original of files) {
@@ -748,6 +819,7 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
         reason: "binary_or_non_source",
         size: fileSize,
       });
+      if (CODE_LANGUAGE_ADAPTERS.some((adapter) => adapter.supports(pathValue))) incomplete = true;
       continue;
     }
     if (
@@ -761,6 +833,7 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
     if (!language) {
       if (/\.(?:py|go|rb|php|java|cs|rs|swift|kt|scala|c|h|cpp)$/i.test(pathValue)) {
         unsupportedCount += 1;
+        unsupportedLanguageFiles += 1;
         skippedFiles.push({
           path: pathValue.slice(0, 1024),
           reason: "unsupported_language",
@@ -776,15 +849,8 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
         reason: "file_count_limit",
         size: fileSize,
       });
-      incomplete = true;
-      continue;
-    }
-    if (Date.now() - startedAt > CODE_SCAN_LIMITS.maxParseMilliseconds) {
-      skippedFiles.push({
-        path: pathValue.slice(0, 1024),
-        reason: "parse_time_budget",
-        size: fileSize,
-      });
+      if (CODE_LANGUAGE_ADAPTERS.some((candidate) => candidate.supports(pathValue)))
+        incomplete = true;
       incomplete = true;
       continue;
     }
@@ -801,6 +867,16 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
       skippedFiles.push({
         path: pathValue.slice(0, 1024),
         reason: "repository_byte_limit",
+        size: fileSize,
+      });
+      incomplete = true;
+      continue;
+    }
+
+    if (astBudgetReached) {
+      skippedFiles.push({
+        path: pathValue.slice(0, 1024),
+        reason: "ast_node_limit",
         size: fileSize,
       });
       incomplete = true;
@@ -848,24 +924,33 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
       extractorType: "typescript-compiler-api:module-v1",
       confidenceClass: "structural",
     });
-    relations.set(tupleKey(fileEntity, moduleEntity, "FILE_CONTAINS_SYMBOL"), {
+    addRelation(relations, {
       fromEntityKey: fileEntity,
       toEntityKey: moduleEntity,
       relationType: "FILE_CONTAINS_SYMBOL",
       confidenceClass: "structural",
+      evidencePath: pathValue,
+      evidenceStartLine: 1,
+      evidenceEndLine: source.getLineAndCharacterOfPosition(source.end).line + 1,
+      extractorType: "typescript-compiler-api:module-containment-v2",
     });
     const importOrigins = new Map<string, { packageName: string; path: string }>();
-    const importEntities: Array<{ key: string; packageEntity: string | null }> = [];
-    const declarations: Array<{ node: ts.Node; key: string; name: string }> = [];
-    const callNodes: ts.CallExpression[] = [];
+    const importEntities: Array<{
+      key: string;
+      packageEntity: string | null;
+      startLine: number;
+      endLine: number;
+    }> = [];
+    const callNodes: Array<{ node: ts.CallExpression; owner: string }> = [];
     const envNodes: Array<{ node: ts.Node; name: string }> = [];
     const eventNodes: Array<{ node: ts.StringLiteralLike; value: string }> = [];
     const endpointNodes: Array<{ node: ts.CallExpression; value: string | null }> = [];
     const schemaNodes: Array<{ node: ts.TypeReferenceNode; value: string }> = [];
 
-    const registerImport = (spec: string, localNames: string[]) => {
+    const registerImport = (spec: string, localNames: string[], evidenceNode: ts.Node) => {
       const root = packageRoot(spec);
       if (!root || !SAFE_IMPORT_SPECIFIER.test(spec) || looksSecret(spec)) return;
+      const importLocation = sourceLocation(source, evidenceNode);
       const importSubpath = spec.startsWith(root)
         ? spec.slice(root.length).replace(/^\/+/, "").replaceAll("/", ".")
         : "";
@@ -893,13 +978,22 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
         extractorType: "typescript-compiler-api:package-import-v1",
         confidenceClass: "exact",
       });
-      relations.set(tupleKey(importKey, packageKey, "IMPORTS_PACKAGE"), {
+      addRelation(relations, {
         fromEntityKey: importKey,
         toEntityKey: packageKey,
         relationType: "IMPORTS_PACKAGE",
         confidenceClass: "exact",
+        evidencePath: pathValue,
+        evidenceStartLine: importLocation.startLine,
+        evidenceEndLine: importLocation.endLine,
+        extractorType: "typescript-compiler-api:import-relation-v2",
       });
-      importEntities.push({ key: importKey, packageEntity: packageKey });
+      importEntities.push({
+        key: importKey,
+        packageEntity: packageKey,
+        startLine: importLocation.startLine,
+        endLine: importLocation.endLine,
+      });
       for (const local of localNames) {
         importOrigins.set(local, { packageName: root, path: importSubpath });
         const symbolKey = addEntity(entities, {
@@ -914,19 +1008,40 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
           extractorType: "typescript-compiler-api:imported-symbol-v1",
           confidenceClass: "exact",
         });
-        relations.set(tupleKey(importKey, symbolKey, "IMPORTS_SYMBOL"), {
+        addRelation(relations, {
           fromEntityKey: importKey,
           toEntityKey: symbolKey,
           relationType: "IMPORTS_SYMBOL",
           confidenceClass: "exact",
+          evidencePath: pathValue,
+          evidenceStartLine: importLocation.startLine,
+          evidenceEndLine: importLocation.endLine,
+          extractorType: "typescript-compiler-api:imported-symbol-relation-v2",
         });
       }
       return root;
     };
 
-    const walk = (node: ts.Node, currentOwner: string) => {
+    const walk = (root: ts.Node, rootOwner: string) => {
+      const stack: Array<{ node: ts.Node; owner: string; depth: number }> = [
+        { node: root, owner: rootOwner, depth: 0 },
+      ];
+      while (stack.length > 0 && !astBudgetReached) {
+        const frame = stack.pop()!;
+        const { node, depth } = frame;
+        if (depth > CODE_SCAN_LIMITS.maxAstDepth) {
+          astBudgetReached = true;
+          astBudgetReason = "ast_depth_limit";
+          break;
+        }
+        astNodesVisited += 1;
+        if (astNodesVisited > CODE_SCAN_LIMITS.maxAstNodes) {
+          astBudgetReached = true;
+          astBudgetReason = "ast_node_limit";
+          break;
+        }
       const declared = functionName(node);
-      let owner = currentOwner;
+      let owner = frame.owner;
       if (declared) {
         const kind: EntityType = ts.isClassDeclaration(node)
           ? "class"
@@ -943,14 +1058,20 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
           extractorType: "typescript-compiler-api:symbol-v1",
           confidenceClass: "structural",
         });
-        declarations.push({ node, key: owner, name: declared });
-        relations.set(tupleKey(fileEntity, owner, "FILE_CONTAINS_SYMBOL"), {
+        addRelation(relations, {
           fromEntityKey: fileEntity,
           toEntityKey: owner,
           relationType: "FILE_CONTAINS_SYMBOL",
           confidenceClass: "structural",
+          evidencePath: pathValue,
+          evidenceStartLine: loc.startLine,
+          evidenceEndLine: loc.endLine,
+          extractorType: "typescript-compiler-api:containment-v2",
         });
-        symbolEntities.set(`${pathValue}:${declared}`, owner);
+        const symbolKey = `${pathValue}:${declared}`;
+        const matches = symbolEntities.get(symbolKey);
+        if (matches) matches.push(owner);
+        else symbolEntities.set(symbolKey, [owner]);
       }
 
       if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier)) {
@@ -965,7 +1086,7 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
                   : []),
             ]
           : [];
-        registerImport(node.moduleSpecifier.text, names);
+        registerImport(node.moduleSpecifier.text, names, node);
       }
       if (
         ts.isVariableDeclaration(node) &&
@@ -977,7 +1098,7 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
         node.initializer.arguments[0] &&
         ts.isStringLiteralLike(node.initializer.arguments[0])
       ) {
-        registerImport(node.initializer.arguments[0].text, [node.name.text]);
+        registerImport(node.initializer.arguments[0].text, [node.name.text], node);
       }
       if (
         ts.isVariableDeclaration(node) &&
@@ -993,7 +1114,7 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
         const locals = node.name.elements.flatMap((element) =>
           ts.isIdentifier(element.name) ? [element.name.text] : [],
         );
-        const root = registerImport(specifier, locals);
+        const root = registerImport(specifier, locals, node);
         if (root) {
           const importSubpath = specifier.startsWith(root)
             ? specifier.slice(root.length).replace(/^\/+/, "").replaceAll("/", ".")
@@ -1027,13 +1148,17 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
         }
       }
       if (ts.isCallExpression(node)) {
-        callNodes.push(node);
-        const called = memberChain(node.expression);
-        if (called)
-          unresolvedCalls.push({
+        defer(callNodes, { node, owner });
+        if (ts.isIdentifier(node.expression) && !importOrigins.has(node.expression.text)) {
+          const loc = sourceLocation(source, node);
+          defer(unresolvedCalls, {
             owner,
-            callee: called.path.length ? called.path.at(-1)! : called.root,
+            callee: node.expression.text,
+            path: pathValue,
+            startLine: loc.startLine,
+            endLine: loc.endLine,
           });
+        }
         const callableText = node.expression.getText(source);
         if (
           ["fetch", "axios", "get", "post", "request"].some(
@@ -1041,14 +1166,14 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
           )
         ) {
           const firstArg = node.arguments[0];
-          if (firstArg) endpointNodes.push({ node, value: staticString(firstArg) });
+          if (firstArg) defer(endpointNodes, { node, value: staticString(firstArg) });
         }
       }
       if (
         ts.isPropertyAccessExpression(node) &&
         node.expression.getText(source) === "process.env"
       ) {
-        envNodes.push({ node, name: node.name.text });
+        defer(envNodes, { node, name: node.name.text });
       }
       if (
         ts.isElementAccessExpression(node) &&
@@ -1056,30 +1181,46 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
         node.argumentExpression &&
         ts.isStringLiteralLike(node.argumentExpression)
       ) {
-        envNodes.push({ node, name: node.argumentExpression.text });
+        defer(envNodes, { node, name: node.argumentExpression.text });
       }
       if (ts.isStringLiteralLike(node) && controlledEventString(node))
-        eventNodes.push({ node, value: node.text });
+        defer(eventNodes, { node, value: node.text });
       if (ts.isTypeReferenceNode(node)) {
         const value = node.typeName.getText(source);
         if (/(?:Schema|Contract|Payload|Event)(?:$|[.<])/.test(value))
-          schemaNodes.push({ node, value });
+          defer(schemaNodes, { node, value });
       }
-      ts.forEachChild(node, (child) => walk(child, owner));
+        const children: ts.Node[] = [];
+        ts.forEachChild(node, (child) => {
+          children.push(child);
+        });
+        for (let index = children.length - 1; index >= 0; index -= 1)
+          stack.push({ node: children[index]!, owner, depth: depth + 1 });
+      }
     };
     walk(source, moduleEntity);
+
+    if (astBudgetReached) {
+      skippedFiles.push({
+        path: pathValue.slice(0, 1024),
+        reason: astBudgetReason,
+        size: fileSize,
+      });
+      incomplete = true;
+      continue;
+    }
+    supportedFilesAnalyzed += 1;
 
     for (const item of importEntities) {
       if (item.packageEntity) {
         const entity = entities.get(item.key)!;
-        const locLine = 1;
         addExternal(entities, refs, relations, {
           referenceType: "import",
           normalizedValue: entity.name,
           rawValue: entity.name,
           path: pathValue,
-          startLine: locLine,
-          endLine: locLine,
+          startLine: item.startLine,
+          endLine: item.endLine,
           language,
           confidenceClass: "exact",
           extractorType: "typescript-compiler-api:import-reference-v1",
@@ -1138,7 +1279,7 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
       });
     }
 
-    for (const call of callNodes) {
+    for (const { node: call, owner: callOwner } of callNodes) {
       const chain = memberChain(call.expression);
       if (!chain) continue;
       const origin = importOrigins.get(chain.root);
@@ -1146,16 +1287,6 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
       const member = [...origin.path.split(".").filter(Boolean), ...chain.path].join(".");
       if (!member) continue;
       const loc = sourceLocation(source, call);
-      const caller =
-        declarations
-          .filter(
-            (entry) =>
-              entry.node.getStart(source) <= call.getStart(source) &&
-              entry.node.getEnd() >= call.getEnd(),
-          )
-          .sort(
-            (a, b) => a.node.getEnd() - a.node.getStart() - (b.node.getEnd() - b.node.getStart()),
-          )[0]?.key ?? fileEntity;
       addExternal(entities, refs, relations, {
         referenceType: "sdk_call",
         normalizedValue: `${origin.packageName}.${member}`,
@@ -1165,7 +1296,7 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
         language,
         confidenceClass: "structural",
         extractorType: "typescript-compiler-api:sdk-call-v1",
-        parentEntityKey: caller,
+        parentEntityKey: callOwner,
       });
     }
 
@@ -1202,14 +1333,17 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
 
   incomplete = parseManifest(files, entities, refs, skippedFiles) || incomplete;
   for (const call of unresolvedCalls) {
-    const target = [...symbolEntities.entries()].filter(([key]) => key.endsWith(`:${call.callee}`));
+    const target = symbolEntities.get(`${call.path}:${call.callee}`) ?? [];
     if (target.length === 1) {
-      const relationKey = tupleKey(call.owner, target[0]![1], "CALLS_SYMBOL");
-      relations.set(relationKey, {
+      addRelation(relations, {
         fromEntityKey: call.owner,
-        toEntityKey: target[0]![1],
+        toEntityKey: target[0]!,
         relationType: "CALLS_SYMBOL",
-        confidenceClass: "structural",
+        confidenceClass: "heuristic",
+        evidencePath: call.path,
+        evidenceStartLine: call.startLine,
+        evidenceEndLine: call.endLine,
+        extractorType: "typescript-compiler-api:same-file-call-site-v2",
       });
     }
   }
@@ -1223,36 +1357,36 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
       size: 0,
     });
   }
-  let coverageState: CoverageState = incomplete
+  const coverageState: CoverageState = incomplete
     ? "partial"
     : filesAnalyzed === 0 && (unsupportedCount > 0 || noSupportedSource)
       ? "unsupported"
       : "complete";
-  const entityList = [...entities.values()].sort((a, b) => a.entityKey.localeCompare(b.entityKey));
+  const entityList = [...entities.values()].sort((a, b) =>
+    stableCompare(a.entityKey, b.entityKey),
+  );
   const relationList = [...relations.values()].sort((a, b) =>
-    tupleKey(a.fromEntityKey, a.toEntityKey, a.relationType).localeCompare(
-      tupleKey(b.fromEntityKey, b.toEntityKey, b.relationType),
+    stableCompare(
+      tupleKey(a.fromEntityKey, a.toEntityKey, a.relationType, a.evidencePath, a.evidenceStartLine),
+      tupleKey(b.fromEntityKey, b.toEntityKey, b.relationType, b.evidencePath, b.evidenceStartLine),
     ),
   );
   const referenceList = [...refs.values()].sort((a, b) =>
-    tupleKey(a.referenceType, a.normalizedValue, a.path, a.startLine).localeCompare(
+    stableCompare(
+      tupleKey(a.referenceType, a.normalizedValue, a.path, a.startLine),
       tupleKey(b.referenceType, b.normalizedValue, b.path, b.startLine),
     ),
   );
-  if (
-    entityList.length + relationList.length + referenceList.length >
-    CODE_SCAN_LIMITS.maxPersistedFacts
-  ) {
-    coverageState = "partial";
-    const max = CODE_SCAN_LIMITS.maxPersistedFacts;
-    entityList.length = Math.min(entityList.length, max);
-    relationList.length = Math.min(relationList.length, Math.max(0, max - entityList.length));
-    referenceList.length = Math.min(
-      referenceList.length,
-      Math.max(0, max - entityList.length - relationList.length),
-    );
-    skippedFiles.push({ path: "[analysis]", reason: "fact_count_limit", size: 0 });
-  }
+  const coverageReasonCounts = Object.fromEntries(
+    [...new Set(skippedFiles.map((file) => file.reason))]
+      .sort(stableCompare)
+      .map((reason) => [reason, skippedFiles.filter((file) => file.reason === reason).length]),
+  );
+  const supportedFilesSkippedByBound = skippedFiles.filter(
+    (file) =>
+      BOUND_SKIP_REASONS.has(file.reason) &&
+      CODE_LANGUAGE_ADAPTERS.some((adapter) => adapter.supports(file.path)),
+  ).length;
   return {
     coverageState,
     filesDiscovered: files.length,
@@ -1260,6 +1394,11 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
     filesSkipped: skippedFiles.length,
     parseFailures,
     bytesAnalyzed,
+    supportedFilesDiscovered: codeCandidates.length,
+    supportedFilesAnalyzed,
+    supportedFilesSkippedByBound,
+    unsupportedLanguageFiles,
+    coverageReasonCounts,
     entities: entityList,
     relations: relationList,
     externalReferences: referenceList,

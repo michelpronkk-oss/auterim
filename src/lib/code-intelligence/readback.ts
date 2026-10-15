@@ -1,7 +1,6 @@
 import type { CoverageState } from "@/lib/code-intelligence/analyzer";
+import ts from "typescript";
 
-export const CODE_ANALYSIS_READBACK_ID = "92aa86be-a449-4677-a672-88421f203b4f";
-export const CODE_ANALYSIS_READBACK_COMMIT = "6165f30d4e0c9a37bd7f2cd7579aaaa76d2bfdcc";
 export const CODE_ANALYSIS_READBACK_WORKSPACE = "e140d48e-9dc0-4552-a9a4-a81fe3872422";
 export const CODE_ANALYSIS_READBACK_REPOSITORY = "3b4f4fe6-cbbd-4bbd-a340-71f7c268e2c4";
 export const CODE_ANALYSIS_READBACK_PRODUCT = "de1f2a12-de3c-4644-8892-b6c2d458a300";
@@ -147,6 +146,170 @@ export function safeSourceSpanMatch(
   }
 }
 
+export type RelationProvenanceEntity = {
+  entity_type: string;
+  name: string;
+  path: string;
+  start_line: number | null;
+  end_line: number | null;
+};
+
+function targetDeclarationMatchesSource(input: {
+  path: string;
+  source: string;
+  entityType: string;
+  name: string;
+  startLine: number;
+  endLine: number;
+}) {
+  const { path, source, entityType, name, startLine, endLine } = input;
+  const scriptKind = /\.tsx$/i.test(path)
+    ? ts.ScriptKind.TSX
+    : /\.jsx?$/i.test(path) || /\.[cm]js$/i.test(path)
+      ? ts.ScriptKind.JS
+      : ts.ScriptKind.TS;
+  const parsed = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKind);
+  const stack: ts.Node[] = [parsed];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    const nodeStartLine = parsed.getLineAndCharacterOfPosition(node.getStart(parsed)).line + 1;
+    const nodeEndLine = parsed.getLineAndCharacterOfPosition(node.getEnd()).line + 1;
+    if (nodeStartLine === startLine && nodeEndLine === endLine) {
+      if (
+        entityType === "class" &&
+        ts.isClassDeclaration(node) &&
+        node.name?.text === name
+      )
+        return true;
+      if (
+        entityType === "method" &&
+        ts.isMethodDeclaration(node) &&
+        node.name.getText(parsed) === name
+      )
+        return true;
+      if (
+        entityType === "function" &&
+        ((ts.isFunctionDeclaration(node) && node.name?.text === name) ||
+          ((ts.isArrowFunction(node) || ts.isFunctionExpression(node)) &&
+            ts.isVariableDeclaration(node.parent) &&
+            ts.isIdentifier(node.parent.name) &&
+            node.parent.name.text === name))
+      )
+        return true;
+    }
+    node.forEachChild((child) => {
+      stack.push(child);
+    });
+  }
+  return false;
+}
+
+export function relationEvidenceMatchesSource(input: {
+  relationType: string;
+  path: string;
+  startLine: number;
+  endLine: number;
+  extractorType: string;
+  from: RelationProvenanceEntity;
+  to: RelationProvenanceEntity;
+  matchingTargetDeclarations: number;
+  source: string;
+  matchingExternalReference: boolean;
+}) {
+  const { relationType, path, startLine, endLine, extractorType, from, to, source } = input;
+  if (
+    !isSafeReadbackPath(path) ||
+    startLine < 1 ||
+    endLine < startLine ||
+    endLine - startLine > 200 ||
+    from.path !== path ||
+    to.path !== path
+  )
+    return false;
+  const lines = source.split(/\r?\n/);
+  if (endLine > lines.length) return false;
+  const span = lines.slice(startLine - 1, endLine).join("\n");
+  if (!span) return false;
+  switch (relationType) {
+    case "FILE_CONTAINS_SYMBOL": {
+      if (from.entity_type !== "file") return false;
+      if (to.entity_type === "module")
+        return to.name === path.replace(/\.[^.]+$/, "") && startLine === 1;
+      return (
+        to.start_line !== null &&
+        to.end_line !== null &&
+        to.start_line >= startLine &&
+        to.end_line <= endLine &&
+        lines
+          .slice(to.start_line - 1, to.end_line)
+          .join("\n")
+          .includes(to.name)
+      );
+    }
+    case "IMPORTS_PACKAGE": {
+      const delimiter = to.name.lastIndexOf("@");
+      const packageName = delimiter > 0 ? to.name.slice(0, delimiter) : to.name;
+      if (from.entity_type === "import" && to.entity_type === "package_dependency")
+        return Boolean(packageName) && span.includes(from.name) && span.includes(packageName);
+      if (from.entity_type === "file" && to.entity_type === "schema_reference")
+        return (
+          extractorType === "typescript-compiler-api:import-reference-v1" &&
+          Boolean(to.name) &&
+          span.includes(to.name)
+        );
+      return false;
+    }
+    case "IMPORTS_SYMBOL": {
+      const symbol = to.name.split("#").at(-1) ?? "";
+      return (
+        from.entity_type === "import" &&
+        to.entity_type === "import" &&
+        Boolean(symbol) &&
+        span.includes(symbol)
+      );
+    }
+    case "CALLS_SYMBOL": {
+      if (
+        from.path !== to.path ||
+        !to.name ||
+        !["function", "method", "class"].includes(to.entity_type) ||
+        !["file", "module", "function", "method", "class"].includes(from.entity_type) ||
+        input.matchingTargetDeclarations !== 1 ||
+        from.start_line === null ||
+        from.end_line === null ||
+        to.start_line === null ||
+        to.end_line === null ||
+        from.start_line > startLine ||
+        from.end_line < endLine ||
+        extractorType !== "typescript-compiler-api:same-file-call-site-v2"
+      )
+        return false;
+      const escaped = to.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const targetLines = lines.slice(to.start_line - 1, to.end_line).join("\n");
+      return (
+        targetLines.includes(to.name) &&
+        targetDeclarationMatchesSource({
+          path,
+          source,
+          entityType: to.entity_type,
+          name: to.name,
+          startLine: to.start_line,
+          endLine: to.end_line,
+        }) &&
+        new RegExp(`\\b${escaped}\\s*\\(`).test(span)
+      );
+    }
+    case "REFERENCES_EXTERNAL":
+    case "USES_ENV_NAME":
+    case "HANDLES_EVENT":
+    case "CALLS_ENDPOINT":
+    case "REFERENCES_SCHEMA":
+      return input.matchingExternalReference;
+    default:
+      return false;
+  }
+}
+
 export function histogram<T extends Record<string, unknown>>(rows: T[], key: keyof T) {
   const counts: Record<string, number> = {};
   for (const row of rows) {
@@ -163,12 +326,13 @@ export function classifySkipReason(reason: string, path: string) {
   if (reason === "environment_file_excluded") return "EXPECTED_SECURITY_SKIP" as const;
   if (reason === "binary_or_non_source") return "EXPECTED_NON_SOURCE_SKIP" as const;
   if (reason === "unsupported_language") return "UNSUPPORTED_LANGUAGE_GAP" as const;
-  if (reason === "parse_failed" || reason === "manifest_parse_failed")
+  if (reason === "parse_failed" || reason === "manifest_parse_failed" || reason === "invalid_encoding")
     return "PARSE_COVERAGE_GAP" as const;
   if (
     [
       "file_count_limit",
       "parse_time_budget",
+      "ast_node_limit",
       "file_size_limit",
       "repository_byte_limit",
       "manifest_size_limit",
@@ -198,11 +362,12 @@ export function assessPartialCauses(reasons: Array<{ reason: string; path: strin
     counts.set(key, current);
   }
   const causes = [...counts.values()].sort(
-    (a, b) => b.count - a.count || a.reason.localeCompare(b.reason),
+    (a, b) => b.count - a.count || (a.reason < b.reason ? -1 : a.reason > b.reason ? 1 : 0),
   );
   const sourceBounds = new Set([
     "file_count_limit",
     "parse_time_budget",
+    "ast_node_limit",
     "file_size_limit",
     "repository_byte_limit",
     "traversal_entry_limit",
@@ -237,6 +402,15 @@ export type PersistedReadbackRun = {
   files_skipped: number;
   parse_failures: number;
   bytes_analyzed: number;
+  supported_files_discovered: number;
+  supported_files_analyzed: number;
+  supported_files_skipped_by_bound: number;
+  unsupported_language_files: number;
+  coverage_reason_counts: Record<string, number>;
+  persisted_entity_count: number;
+  persisted_relation_count: number;
+  persisted_reference_count: number;
+  persisted_skip_count: number;
   analyzer_version: string;
   language_profile: string;
   analysis_profile: string;

@@ -100,9 +100,9 @@ describe("deterministic code intelligence", () => {
     ).toContain("stripe.webhooks.constructEvent");
   });
 
-  it("links symbols to files and cross-module calls without resolving ambiguous names", () => {
+  it("records source-backed containment and only same-file call candidates", () => {
     const result = analyzeCodeSnapshot([
-      { path: "src/a.ts", text: "export function runJob() { return 1; }" },
+      { path: "src/a.ts", text: "export function runJob() { return 1; } runJob();" },
       {
         path: "src/b.ts",
         text: 'import { runJob } from "./a"; export const invoke = () => runJob();',
@@ -116,9 +116,24 @@ describe("deterministic code intelligence", () => {
     expect(
       result.relations.some((relation) => relation.relationType === "FILE_CONTAINS_SYMBOL"),
     ).toBe(true);
-    expect(result.relations.some((relation) => relation.relationType === "CALLS_SYMBOL")).toBe(
-      true,
-    );
+    const call = result.relations.find((relation) => relation.relationType === "CALLS_SYMBOL");
+    expect(call).toMatchObject({
+      evidencePath: "src/a.ts",
+      evidenceStartLine: 1,
+      evidenceEndLine: 1,
+      extractorType: "typescript-compiler-api:same-file-call-site-v2",
+      confidenceClass: "heuristic",
+    });
+    expect(
+      result.relations.every((relation) =>
+        Boolean(
+          relation.evidencePath &&
+          relation.evidenceStartLine > 0 &&
+          relation.evidenceEndLine >= relation.evidenceStartLine &&
+          relation.extractorType,
+        ),
+      ),
+    ).toBe(true);
     const sdkImport = analyzeCodeSnapshot([
       {
         path: "src/provider.ts",
@@ -393,7 +408,7 @@ describe("deterministic code intelligence", () => {
     const base = { repositoryId: "repo-id", commitSha: "a".repeat(40) };
     expect(createCodeAnalysisIdempotencyKey(base)).toBe(createCodeAnalysisIdempotencyKey(base));
     expect(createCodeAnalysisIdempotencyKey(base)).not.toBe(
-      createCodeAnalysisIdempotencyKey({ ...base, analyzerVersion: "code-intelligence-v2" }),
+      createCodeAnalysisIdempotencyKey({ ...base, analyzerVersion: "code-intelligence-v3" }),
     );
     expect(createCodeAnalysisIdempotencyKey(base)).not.toBe(
       createCodeAnalysisIdempotencyKey({ ...base, analysisProfile: "other-profile" }),
@@ -401,6 +416,91 @@ describe("deterministic code intelligence", () => {
     expect(() => createCodeAnalysisIdempotencyKey({ ...base, commitSha: "main" })).toThrow(
       /commit_sha_invalid/,
     );
+  });
+
+  it("produces identical coverage and fact identities for the same ordered 430-file snapshot", () => {
+    const files = Array.from({ length: 430 }, (_, index) => ({
+      path: `src/file-${String(index).padStart(3, "0")}.ts`,
+      text: `export function item${index}() { return ${index}; }`,
+    })).reverse();
+    const first = analyzeCodeSnapshot(files);
+    const second = analyzeCodeSnapshot([...files].reverse());
+    expect(first.supportedFilesDiscovered).toBe(430);
+    expect(first.supportedFilesAnalyzed).toBe(430);
+    expect(first.supportedFilesSkippedByBound).toBe(0);
+    expect(first.coverageState).toBe("complete");
+    expect(first.entities.map((row) => row.entityKey)).toEqual(
+      second.entities.map((row) => row.entityKey),
+    );
+    expect(first.relations.map((row) => row.extractorType)).toEqual(
+      second.relations.map((row) => row.extractorType),
+    );
+  });
+
+  it("uses deterministic file and byte bounds and records unsupported coverage", () => {
+    const overFileLimit = Array.from({ length: CODE_SCAN_LIMITS.maxFiles + 1 }, (_, index) => ({
+      path: `src/${String(index).padStart(4, "0")}.ts`,
+      text: `export const value${index} = ${index};`,
+    }));
+    const fileBound = analyzeCodeSnapshot(overFileLimit);
+    expect(fileBound.supportedFilesDiscovered).toBe(CODE_SCAN_LIMITS.maxFiles + 1);
+    expect(fileBound.supportedFilesAnalyzed).toBe(CODE_SCAN_LIMITS.maxFiles);
+    expect(fileBound.supportedFilesSkippedByBound).toBe(1);
+    expect(fileBound.coverageReasonCounts.file_count_limit).toBe(1);
+    expect(fileBound.coverageState).toBe("partial");
+
+    const exactBytes = Array.from({ length: 40 }, (_, index) => ({
+      path: `src/${String(index).padStart(2, "0")}.ts`,
+      text: "x".repeat(250_000),
+    }));
+    const exactBound = analyzeCodeSnapshot(exactBytes);
+    expect(exactBound.supportedFilesAnalyzed).toBe(40);
+    expect(exactBound.coverageState).toBe("complete");
+    const overBytes = [...exactBytes, { path: "src/zz.ts", text: "x" }];
+    const byteBound = analyzeCodeSnapshot(overBytes);
+    expect(byteBound.coverageReasonCounts.repository_byte_limit).toBe(1);
+    expect(byteBound.coverageState).toBe("partial");
+
+    const unsupported = analyzeCodeSnapshot([{ path: "src/main.py", text: "print('x')" }]);
+    expect(unsupported.unsupportedLanguageFiles).toBe(1);
+    expect(unsupported.coverageState).toBe("unsupported");
+
+    const invalidEncoding = analyzeCodeSnapshot([
+      { path: "src/undecodable.ts", text: "", skipReason: "invalid_encoding" },
+    ]);
+    expect(invalidEncoding.supportedFilesDiscovered).toBe(1);
+    expect(invalidEncoding.supportedFilesAnalyzed).toBe(0);
+    expect(invalidEncoding.coverageReasonCounts.invalid_encoding).toBe(1);
+    expect(invalidEncoding.coverageState).toBe("partial");
+
+    for (const sourceFile of [
+      { path: "src/nul.ts", text: "const value = '\0';" },
+      { path: "src/binary.ts", text: "", binary: true },
+    ]) {
+      const omittedSource = analyzeCodeSnapshot([sourceFile]);
+      expect(omittedSource.coverageState).toBe("partial");
+      expect(omittedSource.supportedFilesDiscovered).toBe(1);
+      expect(omittedSource.supportedFilesAnalyzed).toBe(0);
+      expect(omittedSource.coverageReasonCounts.binary_or_non_source).toBe(1);
+    }
+  });
+
+  it("marks deeply nested syntax incomplete without recursive AST traversal", () => {
+    const nested = `${"(".repeat(CODE_SCAN_LIMITS.maxAstDepth + 10)}1${")".repeat(
+      CODE_SCAN_LIMITS.maxAstDepth + 10,
+    )}`;
+    const result = analyzeCodeSnapshot([{ path: "src/deep.ts", text: `const value = ${nested};` }]);
+    expect(result.coverageState).toBe("partial");
+    expect(result.coverageReasonCounts.ast_depth_limit).toBe(1);
+    expect(result.supportedFilesAnalyzed).toBe(0);
+  });
+
+  it("fails closed at the deterministic intermediate fact budget", () => {
+    const files = Array.from({ length: 17 }, (_, fileIndex) => ({
+      path: `src/endpoint-${String(fileIndex).padStart(2, "0")}.ts`,
+      text: Array.from({ length: 1_000 }, () => 'fetch("https://api.example.com/v1/items");').join("\n"),
+    }));
+    expect(() => analyzeCodeSnapshot(files)).toThrow("code_intelligence_stage_failed");
   });
 
   it("allows only code-intelligence-eligible pending route families", () => {

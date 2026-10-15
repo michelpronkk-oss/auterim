@@ -1,5 +1,6 @@
 import { schemaTask, AbortTaskRunError, logger } from "@trigger.dev/sdk";
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, opendir, readFile, rm, stat } from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
@@ -63,22 +64,53 @@ const SKIP_DIRS = new Set([
   "vendor",
 ]);
 
-async function collectSnapshotFiles(root: string): Promise<SnapshotFile[]> {
+const stableCompare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+export async function collectSnapshotFiles(root: string): Promise<SnapshotFile[]> {
   const results: SnapshotFile[] = [];
   const maxEntries = 5_000;
   let visitedEntries = 0;
   let bytesCollected = 0;
   let truncated = false;
-  const visit = async (directory: string) => {
-    const entries = await readdir(directory, { withFileTypes: true });
-    entries.sort((a, b) => a.name.localeCompare(b.name));
+  const visit = async (directory: string, depth = 0) => {
+    if (depth > 128) {
+      results.push({
+        path: path.relative(root, directory).replaceAll("\\", "/"),
+        text: "",
+        size: 0,
+        directorySkipReason: "traversal_depth_limit",
+      });
+      return;
+    }
+    const handle = await opendir(directory);
+    const entries: Dirent[] = [];
+    let overflow = false;
+    const remainingEntries = maxEntries - visitedEntries;
+    try {
+      for await (const entry of handle) {
+        if (entries.length >= remainingEntries) {
+          overflow = true;
+          break;
+        }
+        entries.push(entry);
+      }
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
+    if (overflow) {
+      truncated = true;
+      results.push({
+        path: path.relative(root, directory).replaceAll("\\", "/") || "[repository]",
+        text: "",
+        size: 0,
+        directorySkipReason: "traversal_entry_limit",
+      });
+      return;
+    }
+    entries.sort((a, b) => stableCompare(a.name, b.name));
+    visitedEntries += entries.length;
     for (const entry of entries) {
       if (truncated) return;
-      visitedEntries += 1;
-      if (visitedEntries > maxEntries) {
-        truncated = true;
-        return;
-      }
       const absolute = path.resolve(directory, entry.name);
       if (!absolute.startsWith(`${path.resolve(root)}${path.sep}`)) continue;
       if (entry.isDirectory()) {
@@ -91,7 +123,17 @@ async function collectSnapshotFiles(root: string): Promise<SnapshotFile[]> {
           });
           continue;
         }
-        await visit(absolute);
+        await visit(absolute, depth + 1);
+        continue;
+      }
+      if (entry.isSymbolicLink()) {
+        const relative = path.relative(root, absolute).replaceAll("\\", "/");
+        results.push({
+          path: relative,
+          text: "",
+          size: 0,
+          skipReason: "symlink_excluded",
+        });
         continue;
       }
       if (!entry.isFile()) continue;
@@ -118,9 +160,15 @@ async function collectSnapshotFiles(root: string): Promise<SnapshotFile[]> {
         continue;
       }
       const bytes = await readFile(absolute);
-      const text = bytes.toString("utf8");
-      const invalidUtf8 = text.includes("\uFFFD");
-      results.push({ path: relative, text: invalidUtf8 ? "" : text, size, binary: invalidUtf8 });
+      let text: string;
+      try {
+        text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        results.push({ path: relative, text: "", size, skipReason: "invalid_encoding" });
+        bytesCollected += size;
+        continue;
+      }
+      results.push({ path: relative, text, size });
       bytesCollected += size;
     }
   };
@@ -209,6 +257,8 @@ export const analyzeProtectedRepositoryCodeTask = schemaTask({
       throw new AbortTaskRunError("Code analysis attempt unavailable");
 
     let temporaryRoot: string | null = null;
+    let skippedArchiveLinks: string[] = [];
+    let archiveLinkCount = 0;
     const outcome = await executeCodeAnalysisStages({
       validateEnvironment: () => getEnvironment(),
       setupProvider: (environment) =>
@@ -218,12 +268,29 @@ export const analyzeProtectedRepositoryCodeTask = schemaTask({
         }),
       materialize: async (provider) => {
         temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "auterim-code-intel-"));
-        await provider.materializeRepository(target, payload.commitSha, temporaryRoot);
+        const archive = await provider.materializeRepository(
+          target,
+          payload.commitSha,
+          temporaryRoot,
+        );
+        skippedArchiveLinks = archive.skippedLinkPaths;
+        archiveLinkCount = archive.skippedLinks;
       },
       collectSnapshot: async () => {
         if (!temporaryRoot) throw new Error("code_analysis_snapshot_root_unavailable");
-        return collectSnapshotFiles(temporaryRoot);
+        const files = await collectSnapshotFiles(temporaryRoot);
+        for (const linkPath of skippedArchiveLinks)
+          files.push({ path: linkPath, text: "", size: 0, skipReason: "symlink_excluded" });
+        if (archiveLinkCount > skippedArchiveLinks.length)
+          files.push({
+            path: "[archive-symlink-entries-truncated]",
+            text: "",
+            size: 0,
+            skipReason: "symlink_excluded",
+          });
+        return files;
       },
+      analysisWatchdogMs: 240_000,
       analyze: (files) => analyzeCodeSnapshot(files),
       persist: (result) =>
         persistCodeAnalysis({
@@ -276,6 +343,10 @@ export const analyzeProtectedRepositoryCodeTask = schemaTask({
       filesAnalyzed: result.filesAnalyzed,
       filesSkipped: result.filesSkipped,
       parseFailures: result.parseFailures,
+      supportedFilesDiscovered: result.supportedFilesDiscovered,
+      supportedFilesAnalyzed: result.supportedFilesAnalyzed,
+      supportedFilesSkippedByBound: result.supportedFilesSkippedByBound,
+      unsupportedLanguageFiles: result.unsupportedLanguageFiles,
       packageFacts: result.externalReferences.filter((item) => item.referenceType === "package")
         .length,
       importFacts: result.externalReferences.filter((item) => item.referenceType === "import")
