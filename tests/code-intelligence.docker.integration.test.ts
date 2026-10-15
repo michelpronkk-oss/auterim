@@ -142,12 +142,17 @@ async function createProtectedRepoFixture(client: SupabaseClient) {
     workspaceId: workspace.id,
     productId: product.id,
     repositoryId: repository.id,
+    userId,
     email: `m1576-${nonce}@auterim.local`,
     password,
   };
 }
 
-async function createCanonicalRouteIntent(client: SupabaseClient, route: IntelligenceRoute) {
+async function createCanonicalRouteIntent(
+  client: SupabaseClient,
+  route: IntelligenceRoute,
+  fixture: Awaited<ReturnType<typeof createProtectedRepoFixture>>,
+) {
   const nonce = randomUUID();
   const dependency = await write<{ id: string }>(
     client
@@ -160,6 +165,17 @@ async function createCanonicalRouteIntent(client: SupabaseClient, route: Intelli
       })
       .select("id")
       .single(),
+  );
+  await writeNoResult(
+    client.from("workspace_dependencies").insert({
+      workspace_id: fixture.workspaceId,
+      protected_product_id: fixture.productId,
+      dependency_id: dependency.id,
+      selected_by: fixture.userId,
+      origin: "manual",
+      monitoring_enabled: true,
+      protection_started_at: new Date(Date.now() - 60_000).toISOString(),
+    }),
   );
   const source = await write<{ id: string }>(
     client
@@ -340,13 +356,15 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
   it("persists canonical route handoffs and reusable exact-commit structural facts", async () => {
     const client = requireAdmin();
     const fixture = await createProtectedRepoFixture(client);
-    const firstRoute = await createCanonicalRouteIntent(client, "sdk_change");
-    const secondRoute = await createCanonicalRouteIntent(client, "breaking_api_change");
+    const unrelatedFixture = await createProtectedRepoFixture(client);
+    const firstRoute = await createCanonicalRouteIntent(client, "sdk_change", fixture);
+    const secondRoute = await createCanonicalRouteIntent(client, "breaking_api_change", fixture);
     const firstTargets = await write<Array<Record<string, unknown>>>(
       client.rpc("list_code_intelligence_route_targets", {
         p_route_intent_id: firstRoute.id,
       }),
     );
+    expect(firstTargets).toHaveLength(1);
     expect(firstTargets).toContainEqual(
       expect.objectContaining({
         workspace_id: fixture.workspaceId,
@@ -354,6 +372,13 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
         repository_id: fixture.repositoryId,
         owner: "michelpronkk-oss",
         name: "auterim",
+      }),
+    );
+    expect(firstTargets).not.toContainEqual(
+      expect.objectContaining({
+        workspace_id: unrelatedFixture.workspaceId,
+        product_id: unrelatedFixture.productId,
+        repository_id: unrelatedFixture.repositoryId,
       }),
     );
 

@@ -317,7 +317,19 @@ begin
   return query
     select mapping.workspace_id,mapping.protected_product_id,repository.id,repository.owner,repository.name,
       repository.default_branch,repository.external_id,connection.installation_id
-    from public.workspace_product_repositories mapping
+    from public.intelligence_route_intents intent
+    join public.source_changes source_change on source_change.id=intent.source_change_id
+    join public.source_catalog source on source.id=source_change.source_id
+    join public.dependency_catalog dependency on dependency.id=source.dependency_id and dependency.enabled
+    join public.workspace_dependencies workspace_dependency
+      on workspace_dependency.dependency_id=dependency.id
+        and workspace_dependency.monitoring_enabled
+        and source_change.created_at>=coalesce(workspace_dependency.protection_started_at,workspace_dependency.created_at)
+        and (intent.workspace_id is null or workspace_dependency.workspace_id=intent.workspace_id)
+    join public.workspace_product_repositories mapping
+      on mapping.workspace_id=workspace_dependency.workspace_id
+        and mapping.protected_product_id=workspace_dependency.protected_product_id
+        and mapping.status='active'
     join public.workspace_products product
       on product.id=mapping.protected_product_id and product.workspace_id=mapping.workspace_id and product.status='protected'
     join public.repositories repository
@@ -326,7 +338,7 @@ begin
     join public.repository_connections connection
       on connection.id=repository.connection_id and connection.workspace_id=repository.workspace_id
         and connection.status='connected' and connection.provider='github'
-    where mapping.status='active'
+    where intent.id=p_route_intent_id
     order by mapping.workspace_id,mapping.protected_product_id,repository.id
     limit 51;
 end;
