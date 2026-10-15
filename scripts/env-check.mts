@@ -42,6 +42,7 @@ try {
   const environment = parseEnvironment(readLocalEnvironmentFile());
   const supabaseConfigured = isIntegrationConfigured("supabase", environment);
   const classifierConfigured = isIntegrationConfigured("classifier", environment);
+  const intelligenceConfigured = isIntegrationConfigured("intelligence", environment);
   const githubAppConfigured = isIntegrationConfigured("githubApp", environment);
   const slackConfigured = isIntegrationConfigured("slackApp", environment);
   const linearConfigured = isIntegrationConfigured("linearApp", environment);
@@ -89,6 +90,11 @@ try {
   console.log(`OpenAI classification: ${classifierConfigured ? "configured" : "not configured"}`);
   console.log(`  Provider: ${environment.AUTERIM_CLASSIFIER_PROVIDER}`);
   console.log(`  Model: ${environment.AUTERIM_CLASSIFIER_MODEL ?? "not set"}`);
+  console.log(
+    `Jev shadow intelligence: ${intelligenceConfigured ? "configured" : "not configured"}`,
+  );
+  console.log(`  Provider: ${environment.AUTERIM_INTELLIGENCE_PROVIDER}`);
+  console.log(`  Model: ${environment.AUTERIM_INTELLIGENCE_MODEL}`);
   console.log(`GitHub App: ${githubAppConfigured ? "configured" : "not configured"}`);
   console.log(
     "  Required server-side settings: App ID, slug, OAuth client ID/secret, private key, webhook secret",

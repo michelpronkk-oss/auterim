@@ -114,6 +114,15 @@ export const environmentSchema = z
     AUTERIM_PREFLIGHT_FIXTURE_BRANCH: z.preprocess(emptyToUndefined, z.string().trim().optional()),
     AUTERIM_PREFLIGHT_FIXTURE_ENTITY: z.preprocess(emptyToUndefined, z.string().trim().optional()),
     OPENAI_API_KEY: optionalSecret,
+    OPENROUTER_API_KEY: optionalSecret,
+    AUTERIM_INTELLIGENCE_PROVIDER: z.preprocess(
+      emptyToUndefined,
+      z.enum(["openrouter"]).default("openrouter"),
+    ),
+    AUTERIM_INTELLIGENCE_MODEL: z.preprocess(
+      emptyToUndefined,
+      z.literal("typesafe/jev-1.14").default("typesafe/jev-1.14"),
+    ),
     AUTERIM_CLASSIFIER_PROVIDER: z.preprocess(
       emptyToUndefined,
       z.enum(["openai"]).default("openai"),
@@ -233,6 +242,7 @@ export function isIntegrationConfigured(
     | "trigger"
     | "resend"
     | "classifier"
+    | "intelligence"
     | "githubApp"
     | "slackApp"
     | "linearApp"
@@ -255,6 +265,14 @@ export function isIntegrationConfigured(
       environment.AUTERIM_CLASSIFIER_PROVIDER === "openai" &&
       environment.OPENAI_API_KEY &&
       environment.AUTERIM_CLASSIFIER_MODEL,
+    );
+  }
+
+  if (name === "intelligence") {
+    return Boolean(
+      environment.AUTERIM_INTELLIGENCE_PROVIDER === "openrouter" &&
+      environment.AUTERIM_INTELLIGENCE_MODEL === "typesafe/jev-1.14" &&
+      environment.OPENROUTER_API_KEY,
     );
   }
 

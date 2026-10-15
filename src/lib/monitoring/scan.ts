@@ -2,6 +2,7 @@ import "server-only";
 import { deterministicDiff, hashContent, normalizeContent } from "@/lib/monitoring/content";
 import { fetchHttpSource, SafeFetchError } from "@/lib/monitoring/fetcher";
 import { enqueueSemanticClassification } from "@/lib/monitoring/classification-queue";
+import { enqueueSourceChangeIntelligence } from "@/lib/intelligence/queue";
 import type { MonitoringRepository, Snapshot } from "@/lib/monitoring/repository";
 import { SupabaseMonitoringRepository } from "@/lib/monitoring/repository";
 
@@ -9,6 +10,7 @@ type ScanDependencies = {
   repository?: MonitoringRepository;
   fetcher?: typeof fetchHttpSource;
   enqueueClassifier?: (changeId: string) => Promise<unknown>;
+  enqueueIntelligence?: (changeId: string) => Promise<unknown>;
 };
 
 export async function scanSource(
@@ -94,6 +96,16 @@ export async function scanSource(
             );
           } catch {
             console.warn("Could not enqueue semantic classification; it remains discoverable.", {
+              changeId: outcome.changeId,
+              errorCategory: "enqueue_error",
+            });
+          }
+          try {
+            await (dependencies.enqueueIntelligence ?? enqueueSourceChangeIntelligence)(
+              outcome.changeId,
+            );
+          } catch {
+            console.warn("Could not enqueue shadow intelligence; it remains discoverable.", {
               changeId: outcome.changeId,
               errorCategory: "enqueue_error",
             });
