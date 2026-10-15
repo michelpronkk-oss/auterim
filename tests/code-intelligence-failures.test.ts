@@ -185,6 +185,16 @@ describe("Code Intelligence failure-stage safety", () => {
       retryable: false,
     });
     expect(
+      normalizeCodeAnalysisFailure("repository_materialization", {
+        name: "GitHubAppInstallationError",
+        category: "github_private_key_unparseable",
+      }),
+    ).toEqual({
+      stage: "repository_materialization",
+      category: "github_private_key_unparseable",
+      retryable: false,
+    });
+    expect(
       normalizeCodeAnalysisFailure("github_provider_setup", new Error("github_app_not_configured")),
     ).toEqual({
       stage: "github_provider_setup",

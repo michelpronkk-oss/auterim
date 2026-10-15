@@ -60,6 +60,14 @@ export const environmentSchema = z
     GITHUB_APP_CLIENT_SECRET: optionalSecret,
     GITHUB_APP_PRIVATE_KEY: optionalSecret,
     GITHUB_APP_WEBHOOK_SECRET: optionalSecret,
+    AUTERIM_M1576_GITHUB_PROBE_COMMIT_SHA: z.preprocess(
+      emptyToUndefined,
+      z
+        .string()
+        .trim()
+        .regex(/^[a-f0-9]{40}$/i)
+        .optional(),
+    ),
     SLACK_CLIENT_ID: optionalSecret,
     SLACK_CLIENT_SECRET: optionalSecret,
     SLACK_REDIRECT_URI: optionalUrl,
