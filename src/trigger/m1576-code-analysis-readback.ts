@@ -14,8 +14,10 @@ import {
   histogram,
   isSafeReadbackPath,
   persistedCredentialLikeValueCount,
+  type PackageLockSnapshot,
   safeReadbackValue,
   safeSourceSpanMatch,
+  externalReferenceEvidenceMatchesSource,
   relationEvidenceMatchesSource,
   type PersistedReadbackRun,
 } from "@/lib/code-intelligence/readback";
@@ -51,7 +53,9 @@ type ExternalRow = {
   normalized_value: string;
   path: string;
   start_line: number;
+  start_column: number | null;
   end_line: number;
+  end_column: number | null;
   confidence_class: string;
   redacted: boolean;
   value_fingerprint: string | null;
@@ -83,7 +87,9 @@ type RelationRow = {
   confidence_class: string;
   evidence_path: string | null;
   evidence_start_line: number | null;
+  evidence_start_column: number | null;
   evidence_end_line: number | null;
+  evidence_end_column: number | null;
   extractor_type: string | null;
   structural_fingerprint: string;
 };
@@ -163,16 +169,60 @@ async function readSourceSpan(
     source = content.toString("utf8").includes("\uFFFD") ? null : content.toString("utf8");
     cache.set(reference.path, source);
   }
+  const lockfiles =
+    reference.reference_type === "package" && source
+      ? await readPackageLockfiles(root, cache, readState)
+      : [];
   return source
-    ? safeSourceSpanMatch(
-        reference.reference_type,
-        reference.normalized_value,
-        reference.path,
+    ? externalReferenceEvidenceMatchesSource({
+        referenceType: reference.reference_type,
+        normalizedValue: reference.normalized_value,
+        redacted: reference.redacted,
+        path: reference.path,
+        startLine: reference.start_line,
+        startColumn: reference.start_column,
+        endLine: reference.end_line,
+        endColumn: reference.end_column,
+        extractorType: reference.extractor_type,
         source,
-        reference.start_line,
-        reference.end_line,
-      )
+        lockfiles,
+      })
     : false;
+}
+
+async function readPackageLockfiles(
+  root: string,
+  cache: Map<string, string | null>,
+  readState: { files: number; bytes: number },
+): Promise<PackageLockSnapshot[]> {
+  const rootReal = await realpath(root);
+  for (const relativePath of ["package-lock.json", "pnpm-lock.yaml", "yarn.lock"]) {
+    const absolute = path.resolve(rootReal, relativePath);
+    if (!absolute.startsWith(`${rootReal}${path.sep}`)) return [];
+    const info = await lstat(absolute).catch(() => null);
+    if (!info) continue;
+    if (!info.isFile() || info.isSymbolicLink()) return [];
+    if (
+      cache.get(relativePath) === undefined &&
+      (readState.files >= MAX_SOURCE_FILES ||
+        info.size > CODE_SCAN_LIMITS.maxManifestBytes ||
+        readState.bytes + info.size > MAX_SOURCE_BYTES)
+    )
+      return [];
+    const resolved = await realpath(absolute).catch(() => null);
+    if (!resolved || !resolved.startsWith(`${rootReal}${path.sep}`)) return [];
+    let source = cache.get(relativePath);
+    if (source === undefined) {
+      const content = await readFile(absolute);
+      readState.files += 1;
+      readState.bytes += content.byteLength;
+      source = content.toString("utf8").includes("\uFFFD") ? null : content.toString("utf8");
+      cache.set(relativePath, source);
+    }
+    if (!source) return [];
+    return [{ path: relativePath, source }];
+  }
+  return [];
 }
 
 async function readRelationSourceMatch(
@@ -191,7 +241,9 @@ async function readRelationSourceMatch(
     !to ||
     !relation.evidence_path ||
     !relation.evidence_start_line ||
+    !relation.evidence_start_column ||
     !relation.evidence_end_line ||
+    !relation.evidence_end_column ||
     !relation.extractor_type ||
     !isSafeReadbackPath(relation.evidence_path)
   )
@@ -216,29 +268,45 @@ async function readRelationSourceMatch(
     cache.set(sourcePath, source);
   }
   if (!source) return false;
-  const matchingExternalReference = references.some(
+  const packageLockfiles =
+    sourcePath === "package.json" ? await readPackageLockfiles(root, cache, readState) : [];
+  const matchingReference = references.find(
     (reference) =>
       reference.analysis_run_id === analysisRunId &&
       reference.entity_id === to.id &&
       reference.path === sourcePath &&
-      reference.start_line === relation.evidence_start_line &&
-      reference.end_line === relation.evidence_end_line &&
       reference.extractor_type === relation.extractor_type &&
-      !reference.redacted &&
-      safeSourceSpanMatch(
-        reference.reference_type,
-        reference.normalized_value,
-        reference.path,
-        source!,
-        reference.start_line,
-        reference.end_line,
-      ),
+      (reference.redacted
+        ? reference.normalized_value === "[redacted]" &&
+          (relation.relation_type !== "CALLS_ENDPOINT" ||
+            (reference.start_column === relation.evidence_start_column &&
+              reference.end_column === relation.evidence_end_column))
+        : safeSourceSpanMatch(
+            reference.reference_type,
+            reference.normalized_value,
+            reference.path,
+            source!,
+            reference.start_line,
+            reference.end_line,
+            packageLockfiles,
+          )),
   );
+  const matchingExternalReference = matchingReference
+    ? {
+        referenceType: matchingReference.reference_type,
+        normalizedValue: matchingReference.normalized_value,
+        redacted: matchingReference.redacted,
+        startColumn: matchingReference.start_column,
+        endColumn: matchingReference.end_column,
+      }
+    : null;
   return relationEvidenceMatchesSource({
     relationType: relation.relation_type,
     path: sourcePath,
     startLine: relation.evidence_start_line,
+    startColumn: relation.evidence_start_column,
     endLine: relation.evidence_end_line,
+    endColumn: relation.evidence_end_column,
     extractorType: relation.extractor_type,
     from,
     to,
@@ -302,7 +370,7 @@ export const m1576CodeAnalysisReadback = schemaTask({
         supabase
           .from("code_external_references")
           .select(
-            "id,analysis_run_id,entity_id,workspace_id,repository_id,commit_sha,reference_type,normalized_value,value_fingerprint,path,start_line,end_line,confidence_class,redacted,extractor_type,structural_fingerprint",
+            "id,analysis_run_id,entity_id,workspace_id,repository_id,commit_sha,reference_type,normalized_value,value_fingerprint,path,start_line,start_column,end_line,end_column,confidence_class,redacted,extractor_type,structural_fingerprint",
           )
           .eq("analysis_run_id", analysisRunId)
           .order("id")
@@ -312,7 +380,7 @@ export const m1576CodeAnalysisReadback = schemaTask({
         supabase
           .from("code_relations")
           .select(
-            "id,analysis_run_id,from_entity_id,to_entity_id,relation_type,confidence_class,evidence_path,evidence_start_line,evidence_end_line,extractor_type,structural_fingerprint",
+            "id,analysis_run_id,from_entity_id,to_entity_id,relation_type,confidence_class,evidence_path,evidence_start_line,evidence_start_column,evidence_end_line,evidence_end_column,extractor_type,structural_fingerprint",
           )
           .eq("analysis_run_id", analysisRunId)
           .order("id")
@@ -348,7 +416,9 @@ export const m1576CodeAnalysisReadback = schemaTask({
           !row.evidence_start_line ||
           !row.evidence_end_line ||
           !row.extractor_type ||
-          !isSafeReadbackPath(row.evidence_path),
+          !isSafeReadbackPath(row.evidence_path) ||
+          (persistedRun.analyzer_version === CODE_INTELLIGENCE_VERSION &&
+            (!row.evidence_start_column || !row.evidence_end_column)),
       )
     )
       throw new AbortTaskRunError("relation_provenance_integrity_failed");
@@ -438,6 +508,13 @@ export const m1576CodeAnalysisReadback = schemaTask({
       references.length === persistedRun.persisted_reference_count &&
       skips.length === persistedRun.persisted_skip_count;
     if (!persistedCountMatches) throw new AbortTaskRunError("persisted_fact_count_mismatch");
+    if (
+      persistedRun.analyzer_version === CODE_INTELLIGENCE_VERSION &&
+      references.some(
+        (row) => row.reference_type !== "package" && (!row.start_column || !row.end_column),
+      )
+    )
+      throw new AbortTaskRunError("external_reference_provenance_integrity_failed");
 
     const credentialLikeCount = persistedCredentialLikeValueCount([
       ...entities.flatMap((row) => [row.name, row.path]),
@@ -593,7 +670,9 @@ export const m1576CodeAnalysisReadback = schemaTask({
           ),
           evidencePath: row.evidence_path,
           evidenceStartLine: row.evidence_start_line,
+          evidenceStartColumn: row.evidence_start_column,
           evidenceEndLine: row.evidence_end_line,
+          evidenceEndColumn: row.evidence_end_column,
           extractorType: row.extractor_type,
           sourceMatch: await readRelationSourceMatch(
             temporaryRoot!,
@@ -609,6 +688,17 @@ export const m1576CodeAnalysisReadback = schemaTask({
         };
       });
       spotChecks.push(...(await Promise.all(relationSamples)));
+      if (persistedRun.analyzer_version === CODE_INTELLIGENCE_VERSION) {
+        const referenceChecks = spotChecks.filter((item) => item.kind === "reference");
+        const relationChecks = spotChecks.filter((item) => item.kind === "relation");
+        if (
+          referenceChecks.some((item) => item.sourceMatch !== true) ||
+          relationChecks.some(
+            (item) => item.sourceMatch !== true || item.endpointsPersisted !== true,
+          )
+        )
+          throw new AbortTaskRunError("source_provenance_spot_check_failed");
+      }
       sourceBytesRead = readState.bytes;
       sourceFilesRead = readState.files;
     } catch (error) {

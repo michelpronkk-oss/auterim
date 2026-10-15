@@ -529,12 +529,11 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
     expect(runRows.find((row) => row.commit_sha === commitSha)?.files_skipped).toBe(0);
 
     const entityCount = await exactCount("code_entities", firstClaim.analysisRunId);
-    const referenceRows = await readAll(
-      (from, to) =>
-        client
-          .from("code_external_references")
-          .select("normalized_value,redacted,value_fingerprint")
-          .eq("analysis_run_id", firstClaim.analysisRunId)
+    const referenceRows = await readAll((from, to) =>
+      client
+        .from("code_external_references")
+        .select("normalized_value,redacted,value_fingerprint")
+        .eq("analysis_run_id", firstClaim.analysisRunId)
         .order("id")
         .range(from, to),
     );
@@ -586,6 +585,15 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
       .is("evidence_path", null);
     expect(missingRelationEvidence.error).toBeNull();
     expect(missingRelationEvidence.count).toBe(0);
+    for (const column of ["evidence_start_column", "evidence_end_column"] as const) {
+      const missingCoordinate = await client
+        .from("code_relations")
+        .select("id", { count: "exact", head: true })
+        .eq("analysis_run_id", firstClaim.analysisRunId)
+        .is(column, null);
+      expect(missingCoordinate.error).toBeNull();
+      expect(missingCoordinate.count).toBe(0);
+    }
     expect(
       referenceRows.every(
         (row) =>
@@ -607,6 +615,14 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
     expect(await exactCount("code_external_references", firstClaim.analysisRunId)).toBe(
       countMap.references,
     );
+    const referencesMissingCoordinates = await requireAdmin()
+      .from("code_external_references")
+      .select("id", { count: "exact", head: true })
+      .eq("analysis_run_id", firstClaim.analysisRunId)
+      .neq("reference_type", "package")
+      .or("start_column.is.null,end_column.is.null");
+    expect(referencesMissingCoordinates.error).toBeNull();
+    expect(referencesMissingCoordinates.count).toBe(0);
     expect(await exactCount("code_analysis_skipped_files", firstClaim.analysisRunId)).toBe(
       countMap.skips,
     );
@@ -1084,5 +1100,60 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
         .single(),
     );
     expect(failed).toEqual({ status: "failed", coverage_state: "failed" });
+  }, 120_000);
+
+  it("rejects v2 completion when a source reference lacks occurrence columns", async () => {
+    const client = requireAdmin();
+    const fixture = await createProtectedRepoFixture(client);
+    const claim = await claimCodeAnalysisRun({ ...fixture, commitSha }, client);
+    expect(claim.status).toBe("claimed");
+    if (claim.status !== "claimed" || !claim.claimToken)
+      throw new Error("m1576_reference_provenance_fixture_claim_missing");
+    const source = 'import Stripe from "stripe";\nconst client = new Stripe("test");';
+    const valid = analyzeCodeSnapshot([
+      { path: "src/reference.ts", text: source, size: Buffer.byteLength(source) },
+    ]);
+    const sourceReferenceIndex = valid.externalReferences.findIndex(
+      (reference) => reference.referenceType !== "package",
+    );
+    expect(sourceReferenceIndex).toBeGreaterThanOrEqual(0);
+    const invalid = {
+      ...valid,
+      externalReferences: valid.externalReferences.map((reference, index) =>
+        index === sourceReferenceIndex
+          ? {
+              ...reference,
+              startColumn: null as unknown as number,
+              endColumn: null as unknown as number,
+            }
+          : reference,
+      ),
+    };
+    await expect(
+      persistCodeAnalysis(
+        {
+          analysisRunId: claim.analysisRunId,
+          ...fixture,
+          commitSha,
+          claimToken: claim.claimToken,
+          result: invalid,
+        },
+        client,
+      ),
+    ).rejects.toThrow("code_intelligence_persistence_failed");
+    const afterRejectedCompletion = await write<{ status: string }>(
+      client.from("code_analysis_runs").select("status").eq("id", claim.analysisRunId).single(),
+    );
+    expect(afterRejectedCompletion.status).toBe("running");
+    await failCodeAnalysisRun(
+      {
+        analysisRunId: claim.analysisRunId,
+        claimToken: claim.claimToken,
+        failureStage: "analysis_persistence",
+        failureCategory: "analysis_persistence_failed",
+        retryable: false,
+      },
+      client,
+    );
   }, 120_000);
 });

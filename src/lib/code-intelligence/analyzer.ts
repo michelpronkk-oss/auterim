@@ -158,7 +158,9 @@ export type CodeRelation = {
   confidenceClass: ConfidenceClass;
   evidencePath: string;
   evidenceStartLine: number;
+  evidenceStartColumn: number;
   evidenceEndLine: number;
+  evidenceEndColumn: number;
   extractorType: string;
 };
 export type ExternalReference = {
@@ -167,7 +169,9 @@ export type ExternalReference = {
   normalizedValue: string;
   path: string;
   startLine: number;
+  startColumn: number | null;
   endLine: number;
+  endColumn: number | null;
   language: string;
   confidenceClass: ConfidenceClass;
   redacted: boolean;
@@ -216,7 +220,9 @@ function addRelation(relations: Map<string, CodeRelation>, relation: CodeRelatio
     relation.relationType,
     relation.evidencePath,
     relation.evidenceStartLine,
+    relation.evidenceStartColumn,
     relation.evidenceEndLine,
+    relation.evidenceEndColumn,
     relation.extractorType,
   );
   relations.set(key, relation);
@@ -306,10 +312,19 @@ function addExternal(
   entities: Map<string, CodeEntity>,
   refs: Map<string, ExternalReference>,
   relations: Map<string, CodeRelation>,
-  input: Omit<ExternalReference, "entityKey" | "redacted" | "valueFingerprint"> & {
+  input: Omit<
+    ExternalReference,
+    "entityKey" | "redacted" | "valueFingerprint" | "startColumn" | "endColumn"
+  > & {
     rawValue?: string;
     parentEntityKey?: string;
     forceRedact?: boolean;
+    referenceStartColumn?: number;
+    referenceEndColumn?: number;
+    evidenceStartLine?: number;
+    evidenceStartColumn?: number;
+    evidenceEndLine?: number;
+    evidenceEndColumn?: number;
   },
 ) {
   const secret =
@@ -336,9 +351,9 @@ function addExternal(
     language: input.language,
     path: input.path,
     startLine: input.startLine,
-    startColumn: null,
+    startColumn: input.referenceStartColumn ?? input.evidenceStartColumn ?? 1,
     endLine: input.endLine,
-    endColumn: null,
+    endColumn: input.referenceEndColumn ?? input.evidenceEndColumn ?? 1,
     extractorType: input.extractorType,
     confidenceClass: secret ? "heuristic" : input.confidenceClass,
   });
@@ -349,7 +364,9 @@ function addExternal(
     normalizedValue,
     path: input.path,
     startLine: input.startLine,
+    startColumn: input.referenceStartColumn ?? input.evidenceStartColumn ?? 1,
     endLine: input.endLine,
+    endColumn: input.referenceEndColumn ?? input.evidenceEndColumn ?? 1,
     language: input.language,
     confidenceClass: secret ? "heuristic" : input.confidenceClass,
     redacted: secret,
@@ -375,8 +392,10 @@ function addExternal(
       relationType,
       confidenceClass: input.confidenceClass,
       evidencePath: input.path,
-      evidenceStartLine: input.startLine,
-      evidenceEndLine: input.endLine,
+      evidenceStartLine: input.evidenceStartLine ?? input.startLine,
+      evidenceStartColumn: input.evidenceStartColumn ?? 1,
+      evidenceEndLine: input.evidenceEndLine ?? input.endLine,
+      evidenceEndColumn: input.evidenceEndColumn ?? 1,
       extractorType: input.extractorType,
     });
   }
@@ -683,7 +702,9 @@ function parseManifest(
         normalizedValue: value,
         path: "package.json",
         startLine: 1,
+        startColumn: null,
         endLine: 1,
+        endColumn: null,
         language: "javascript",
         confidenceClass: "exact",
         redacted: false,
@@ -738,7 +759,9 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
     callee: string;
     path: string;
     startLine: number;
+    startColumn: number;
     endLine: number;
+    endColumn: number;
   }> = [];
   let supportedFilesAnalyzed = 0;
   let unsupportedLanguageFiles = 0;
@@ -931,7 +954,9 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
       confidenceClass: "structural",
       evidencePath: pathValue,
       evidenceStartLine: 1,
+      evidenceStartColumn: 1,
       evidenceEndLine: source.getLineAndCharacterOfPosition(source.end).line + 1,
+      evidenceEndColumn: source.getLineAndCharacterOfPosition(source.end).character + 1,
       extractorType: "typescript-compiler-api:module-containment-v2",
     });
     const importOrigins = new Map<string, { packageName: string; path: string }>();
@@ -939,11 +964,14 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
       key: string;
       packageEntity: string | null;
       startLine: number;
+      startColumn: number;
       endLine: number;
+      endColumn: number;
     }> = [];
     const callNodes: Array<{ node: ts.CallExpression; owner: string }> = [];
     const envNodes: Array<{ node: ts.Node; name: string }> = [];
-    const eventNodes: Array<{ node: ts.StringLiteralLike; value: string }> = [];
+    const eventNodes: Array<{ node: ts.StringLiteralLike; evidenceNode: ts.Node; value: string }> =
+      [];
     const endpointNodes: Array<{ node: ts.CallExpression; value: string | null }> = [];
     const schemaNodes: Array<{ node: ts.TypeReferenceNode; value: string }> = [];
 
@@ -985,14 +1013,18 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
         confidenceClass: "exact",
         evidencePath: pathValue,
         evidenceStartLine: importLocation.startLine,
+        evidenceStartColumn: importLocation.startColumn,
         evidenceEndLine: importLocation.endLine,
+        evidenceEndColumn: importLocation.endColumn,
         extractorType: "typescript-compiler-api:import-relation-v2",
       });
       importEntities.push({
         key: importKey,
         packageEntity: packageKey,
         startLine: importLocation.startLine,
+        startColumn: importLocation.startColumn,
         endLine: importLocation.endLine,
+        endColumn: importLocation.endColumn,
       });
       for (const local of localNames) {
         importOrigins.set(local, { packageName: root, path: importSubpath });
@@ -1015,7 +1047,9 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
           confidenceClass: "exact",
           evidencePath: pathValue,
           evidenceStartLine: importLocation.startLine,
+          evidenceStartColumn: importLocation.startColumn,
           evidenceEndLine: importLocation.endLine,
+          evidenceEndColumn: importLocation.endColumn,
           extractorType: "typescript-compiler-api:imported-symbol-relation-v2",
         });
       }
@@ -1040,156 +1074,165 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
           astBudgetReason = "ast_node_limit";
           break;
         }
-      const declared = functionName(node);
-      let owner = frame.owner;
-      if (declared) {
-        const kind: EntityType = ts.isClassDeclaration(node)
-          ? "class"
-          : ts.isMethodDeclaration(node)
-            ? "method"
-            : "function";
-        const loc = sourceLocation(source, node);
-        owner = addEntity(entities, {
-          entityType: kind,
-          name: declared.slice(0, 240),
-          language,
-          path: pathValue.slice(0, 1024),
-          ...loc,
-          extractorType: "typescript-compiler-api:symbol-v1",
-          confidenceClass: "structural",
-        });
-        addRelation(relations, {
-          fromEntityKey: fileEntity,
-          toEntityKey: owner,
-          relationType: "FILE_CONTAINS_SYMBOL",
-          confidenceClass: "structural",
-          evidencePath: pathValue,
-          evidenceStartLine: loc.startLine,
-          evidenceEndLine: loc.endLine,
-          extractorType: "typescript-compiler-api:containment-v2",
-        });
-        const symbolKey = `${pathValue}:${declared}`;
-        const matches = symbolEntities.get(symbolKey);
-        if (matches) matches.push(owner);
-        else symbolEntities.set(symbolKey, [owner]);
-      }
+        const declared = functionName(node);
+        let owner = frame.owner;
+        if (declared) {
+          const kind: EntityType = ts.isClassDeclaration(node)
+            ? "class"
+            : ts.isMethodDeclaration(node)
+              ? "method"
+              : "function";
+          const loc = sourceLocation(source, node);
+          owner = addEntity(entities, {
+            entityType: kind,
+            name: declared.slice(0, 240),
+            language,
+            path: pathValue.slice(0, 1024),
+            ...loc,
+            extractorType: "typescript-compiler-api:symbol-v1",
+            confidenceClass: "structural",
+          });
+          addRelation(relations, {
+            fromEntityKey: fileEntity,
+            toEntityKey: owner,
+            relationType: "FILE_CONTAINS_SYMBOL",
+            confidenceClass: "structural",
+            evidencePath: pathValue,
+            evidenceStartLine: loc.startLine,
+            evidenceStartColumn: loc.startColumn,
+            evidenceEndLine: loc.endLine,
+            evidenceEndColumn: loc.endColumn,
+            extractorType: "typescript-compiler-api:containment-v2",
+          });
+          const symbolKey = `${pathValue}:${declared}`;
+          const matches = symbolEntities.get(symbolKey);
+          if (matches) matches.push(owner);
+          else symbolEntities.set(symbolKey, [owner]);
+        }
 
-      if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier)) {
-        const clause = node.importClause;
-        const names = clause
-          ? [
-              ...(clause.name ? [clause.name.text] : []),
-              ...(clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)
-                ? [clause.namedBindings.name.text]
-                : clause.namedBindings && ts.isNamedImports(clause.namedBindings)
-                  ? clause.namedBindings.elements.map((item) => item.name.text)
-                  : []),
-            ]
-          : [];
-        registerImport(node.moduleSpecifier.text, names, node);
-      }
-      if (
-        ts.isVariableDeclaration(node) &&
-        ts.isIdentifier(node.name) &&
-        node.initializer &&
-        ts.isCallExpression(node.initializer) &&
-        ts.isIdentifier(node.initializer.expression) &&
-        node.initializer.expression.text === "require" &&
-        node.initializer.arguments[0] &&
-        ts.isStringLiteralLike(node.initializer.arguments[0])
-      ) {
-        registerImport(node.initializer.arguments[0].text, [node.name.text], node);
-      }
-      if (
-        ts.isVariableDeclaration(node) &&
-        ts.isObjectBindingPattern(node.name) &&
-        node.initializer &&
-        ts.isCallExpression(node.initializer) &&
-        ts.isIdentifier(node.initializer.expression) &&
-        node.initializer.expression.text === "require" &&
-        node.initializer.arguments[0] &&
-        ts.isStringLiteralLike(node.initializer.arguments[0])
-      ) {
-        const specifier = node.initializer.arguments[0].text;
-        const locals = node.name.elements.flatMap((element) =>
-          ts.isIdentifier(element.name) ? [element.name.text] : [],
-        );
-        const root = registerImport(specifier, locals, node);
-        if (root) {
-          const importSubpath = specifier.startsWith(root)
-            ? specifier.slice(root.length).replace(/^\/+/, "").replaceAll("/", ".")
-            : "";
-          for (const element of node.name.elements) {
-            if (!ts.isIdentifier(element.name)) continue;
-            const imported = element.propertyName ?? element.name;
-            const importedName = ts.isIdentifier(imported) ? imported.text : null;
-            if (importedName) {
-              importOrigins.set(element.name.text, {
-                packageName: root,
-                path: [importSubpath, importedName].filter(Boolean).join("."),
-              });
+        if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier)) {
+          const clause = node.importClause;
+          const names = clause
+            ? [
+                ...(clause.name ? [clause.name.text] : []),
+                ...(clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)
+                  ? [clause.namedBindings.name.text]
+                  : clause.namedBindings && ts.isNamedImports(clause.namedBindings)
+                    ? clause.namedBindings.elements.map((item) => item.name.text)
+                    : []),
+              ]
+            : [];
+          registerImport(node.moduleSpecifier.text, names, node);
+        }
+        if (
+          ts.isVariableDeclaration(node) &&
+          ts.isIdentifier(node.name) &&
+          node.initializer &&
+          ts.isCallExpression(node.initializer) &&
+          ts.isIdentifier(node.initializer.expression) &&
+          node.initializer.expression.text === "require" &&
+          node.initializer.arguments[0] &&
+          ts.isStringLiteralLike(node.initializer.arguments[0])
+        ) {
+          registerImport(node.initializer.arguments[0].text, [node.name.text], node);
+        }
+        if (
+          ts.isVariableDeclaration(node) &&
+          ts.isObjectBindingPattern(node.name) &&
+          node.initializer &&
+          ts.isCallExpression(node.initializer) &&
+          ts.isIdentifier(node.initializer.expression) &&
+          node.initializer.expression.text === "require" &&
+          node.initializer.arguments[0] &&
+          ts.isStringLiteralLike(node.initializer.arguments[0])
+        ) {
+          const specifier = node.initializer.arguments[0].text;
+          const locals = node.name.elements.flatMap((element) =>
+            ts.isIdentifier(element.name) ? [element.name.text] : [],
+          );
+          const root = registerImport(specifier, locals, node);
+          if (root) {
+            const importSubpath = specifier.startsWith(root)
+              ? specifier.slice(root.length).replace(/^\/+/, "").replaceAll("/", ".")
+              : "";
+            for (const element of node.name.elements) {
+              if (!ts.isIdentifier(element.name)) continue;
+              const imported = element.propertyName ?? element.name;
+              const importedName = ts.isIdentifier(imported) ? imported.text : null;
+              if (importedName) {
+                importOrigins.set(element.name.text, {
+                  packageName: root,
+                  path: [importSubpath, importedName].filter(Boolean).join("."),
+                });
+              }
             }
           }
         }
-      }
-      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
-        if (ts.isNewExpression(node.initializer) && ts.isIdentifier(node.initializer.expression)) {
-          const origin = importOrigins.get(node.initializer.expression.text);
-          if (origin)
-            importOrigins.set(node.name.text, { packageName: origin.packageName, path: "" });
-        } else {
-          const chain = memberChain(node.initializer);
-          const origin = chain && importOrigins.get(chain.root);
-          if (origin)
-            importOrigins.set(node.name.text, {
-              packageName: origin.packageName,
-              path: [...origin.path, ...chain.path].join("."),
+        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+          if (
+            ts.isNewExpression(node.initializer) &&
+            ts.isIdentifier(node.initializer.expression)
+          ) {
+            const origin = importOrigins.get(node.initializer.expression.text);
+            if (origin)
+              importOrigins.set(node.name.text, { packageName: origin.packageName, path: "" });
+          } else {
+            const chain = memberChain(node.initializer);
+            const origin = chain && importOrigins.get(chain.root);
+            if (origin)
+              importOrigins.set(node.name.text, {
+                packageName: origin.packageName,
+                path: [...origin.path, ...chain.path].join("."),
+              });
+          }
+        }
+        if (ts.isCallExpression(node)) {
+          defer(callNodes, { node, owner });
+          if (ts.isIdentifier(node.expression) && !importOrigins.has(node.expression.text)) {
+            const loc = sourceLocation(source, node);
+            defer(unresolvedCalls, {
+              owner,
+              callee: node.expression.text,
+              path: pathValue,
+              startLine: loc.startLine,
+              startColumn: loc.startColumn,
+              endLine: loc.endLine,
+              endColumn: loc.endColumn,
             });
+          }
+          const callableText = node.expression.getText(source);
+          if (
+            ["fetch", "axios", "get", "post", "request"].some(
+              (name) => callableText === name || callableText.endsWith(`.${name}`),
+            )
+          ) {
+            const firstArg = node.arguments[0];
+            if (firstArg) defer(endpointNodes, { node, value: staticString(firstArg) });
+          }
         }
-      }
-      if (ts.isCallExpression(node)) {
-        defer(callNodes, { node, owner });
-        if (ts.isIdentifier(node.expression) && !importOrigins.has(node.expression.text)) {
-          const loc = sourceLocation(source, node);
-          defer(unresolvedCalls, {
-            owner,
-            callee: node.expression.text,
-            path: pathValue,
-            startLine: loc.startLine,
-            endLine: loc.endLine,
-          });
-        }
-        const callableText = node.expression.getText(source);
         if (
-          ["fetch", "axios", "get", "post", "request"].some(
-            (name) => callableText === name || callableText.endsWith(`.${name}`),
-          )
+          ts.isPropertyAccessExpression(node) &&
+          node.expression.getText(source) === "process.env"
         ) {
-          const firstArg = node.arguments[0];
-          if (firstArg) defer(endpointNodes, { node, value: staticString(firstArg) });
+          defer(envNodes, { node, name: node.name.text });
         }
-      }
-      if (
-        ts.isPropertyAccessExpression(node) &&
-        node.expression.getText(source) === "process.env"
-      ) {
-        defer(envNodes, { node, name: node.name.text });
-      }
-      if (
-        ts.isElementAccessExpression(node) &&
-        node.expression.getText(source) === "process.env" &&
-        node.argumentExpression &&
-        ts.isStringLiteralLike(node.argumentExpression)
-      ) {
-        defer(envNodes, { node, name: node.argumentExpression.text });
-      }
-      if (ts.isStringLiteralLike(node) && controlledEventString(node))
-        defer(eventNodes, { node, value: node.text });
-      if (ts.isTypeReferenceNode(node)) {
-        const value = node.typeName.getText(source);
-        if (/(?:Schema|Contract|Payload|Event)(?:$|[.<])/.test(value))
-          defer(schemaNodes, { node, value });
-      }
+        if (
+          ts.isElementAccessExpression(node) &&
+          node.expression.getText(source) === "process.env" &&
+          node.argumentExpression &&
+          ts.isStringLiteralLike(node.argumentExpression)
+        ) {
+          defer(envNodes, { node, name: node.argumentExpression.text });
+        }
+        if (ts.isStringLiteralLike(node)) {
+          const evidenceNode = controlledEventString(node);
+          if (evidenceNode) defer(eventNodes, { node, evidenceNode, value: node.text });
+        }
+        if (ts.isTypeReferenceNode(node)) {
+          const value = node.typeName.getText(source);
+          if (/(?:Schema|Contract|Payload|Event)(?:$|[.<])/.test(value))
+            defer(schemaNodes, { node, value });
+        }
         const children: ts.Node[] = [];
         ts.forEachChild(node, (child) => {
           children.push(child);
@@ -1220,7 +1263,9 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
           rawValue: entity.name,
           path: pathValue,
           startLine: item.startLine,
+          evidenceStartColumn: item.startColumn,
           endLine: item.endLine,
+          evidenceEndColumn: item.endColumn,
           language,
           confidenceClass: "exact",
           extractorType: "typescript-compiler-api:import-reference-v1",
@@ -1237,7 +1282,9 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
         normalizedValue: env.name,
         path: pathValue,
         startLine: loc.startLine,
+        evidenceStartColumn: loc.startColumn,
         endLine: loc.endLine,
+        evidenceEndColumn: loc.endColumn,
         language,
         confidenceClass: "exact",
         extractorType: "typescript-compiler-api:process-env-v1",
@@ -1248,16 +1295,23 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
     for (const event of eventNodes) {
       if (!/^[A-Za-z0-9_.:-]{3,160}$/.test(event.value)) continue;
       const loc = sourceLocation(source, event.node);
+      const evidenceLoc = sourceLocation(source, event.evidenceNode);
       addExternal(entities, refs, relations, {
         referenceType: "event",
         normalizedValue: event.value,
         rawValue: event.value,
         path: pathValue,
         startLine: loc.startLine,
+        referenceStartColumn: loc.startColumn,
+        evidenceStartLine: evidenceLoc.startLine,
+        evidenceStartColumn: evidenceLoc.startColumn,
         endLine: loc.endLine,
+        referenceEndColumn: loc.endColumn,
+        evidenceEndLine: evidenceLoc.endLine,
+        evidenceEndColumn: evidenceLoc.endColumn,
         language,
         confidenceClass: "structural",
-        extractorType: "typescript-compiler-api:event-control-flow-v1",
+        extractorType: "typescript-compiler-api:event-control-flow-v2",
         parentEntityKey: fileEntity,
       });
     }
@@ -1271,7 +1325,9 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
         rawValue: schema.value,
         path: pathValue,
         startLine: loc.startLine,
+        evidenceStartColumn: loc.startColumn,
         endLine: loc.endLine,
+        evidenceEndColumn: loc.endColumn,
         language,
         confidenceClass: "structural",
         extractorType: `${adapter?.id}:schema-reference-v1`,
@@ -1292,7 +1348,9 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
         normalizedValue: `${origin.packageName}.${member}`,
         path: pathValue,
         startLine: loc.startLine,
+        evidenceStartColumn: loc.startColumn,
         endLine: loc.endLine,
+        evidenceEndColumn: loc.endColumn,
         language,
         confidenceClass: "structural",
         extractorType: "typescript-compiler-api:sdk-call-v1",
@@ -1310,7 +1368,9 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
         forceRedact: resolved?.redacted,
         path: pathValue,
         startLine: loc.startLine,
+        evidenceStartColumn: loc.startColumn,
         endLine: loc.endLine,
+        evidenceEndColumn: loc.endColumn,
         language,
         confidenceClass: resolved ? "exact" : "heuristic",
         extractorType: "typescript-compiler-api:http-call-v1",
@@ -1342,7 +1402,9 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
         confidenceClass: "heuristic",
         evidencePath: call.path,
         evidenceStartLine: call.startLine,
+        evidenceStartColumn: call.startColumn,
         evidenceEndLine: call.endLine,
+        evidenceEndColumn: call.endColumn,
         extractorType: "typescript-compiler-api:same-file-call-site-v2",
       });
     }
@@ -1362,13 +1424,29 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
     : filesAnalyzed === 0 && (unsupportedCount > 0 || noSupportedSource)
       ? "unsupported"
       : "complete";
-  const entityList = [...entities.values()].sort((a, b) =>
-    stableCompare(a.entityKey, b.entityKey),
-  );
+  const entityList = [...entities.values()].sort((a, b) => stableCompare(a.entityKey, b.entityKey));
   const relationList = [...relations.values()].sort((a, b) =>
     stableCompare(
-      tupleKey(a.fromEntityKey, a.toEntityKey, a.relationType, a.evidencePath, a.evidenceStartLine),
-      tupleKey(b.fromEntityKey, b.toEntityKey, b.relationType, b.evidencePath, b.evidenceStartLine),
+      tupleKey(
+        a.fromEntityKey,
+        a.toEntityKey,
+        a.relationType,
+        a.evidencePath,
+        a.evidenceStartLine,
+        a.evidenceStartColumn,
+        a.evidenceEndLine,
+        a.evidenceEndColumn,
+      ),
+      tupleKey(
+        b.fromEntityKey,
+        b.toEntityKey,
+        b.relationType,
+        b.evidencePath,
+        b.evidenceStartLine,
+        b.evidenceStartColumn,
+        b.evidenceEndLine,
+        b.evidenceEndColumn,
+      ),
     ),
   );
   const referenceList = [...refs.values()].sort((a, b) =>
