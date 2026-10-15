@@ -1,4 +1,4 @@
-import { schemaTask, AbortTaskRunError, logger } from "@trigger.dev/sdk";
+import { schemaTask, AbortTaskRunError, logger, tasks } from "@trigger.dev/sdk";
 import { mkdtemp, opendir, readFile, rm, stat } from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import os from "node:os";
@@ -20,6 +20,7 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getEnvironment } from "@/lib/env/schema";
 import { GitHubAppRepositoryProvider } from "@/lib/preflight/github-provider";
 import type { RepositoryTarget } from "@/lib/preflight/preflight";
+import type { buildProviderImpactGraphTask } from "@/trigger/build-provider-impact-graph";
 
 const schema = z.object({
   workspaceId: z.string().uuid(),
@@ -250,8 +251,24 @@ export const analyzeProtectedRepositoryCodeTask = schemaTask({
       commitSha: payload.commitSha,
       routeIntentId: payload.routeIntentId,
     });
-    if (claim.status === "completed")
-      return { analysisRunId: claim.analysisRunId, status: "completed", replayed: true };
+    const dispatchGraph = async () => {
+      if (!payload.routeIntentId) return null;
+      const graphRun = await tasks.trigger<typeof buildProviderImpactGraphTask>(
+        "build-provider-impact-graph",
+        {
+          routeIntentId: payload.routeIntentId,
+          analysisRunId: claim.analysisRunId,
+          productId: payload.productId,
+          repositoryId: payload.repositoryId,
+        },
+        { idempotencyKey: `m1577-graph:${payload.routeIntentId}:${claim.analysisRunId}:${payload.productId}:${payload.repositoryId}` },
+      );
+      return graphRun.id;
+    };
+    if (claim.status === "completed") {
+      const graphRunId = await dispatchGraph();
+      return { analysisRunId: claim.analysisRunId, status: "completed", replayed: true, graphRunId };
+    }
     if (claim.status === "busy") throw new Error("code_analysis_claim_busy");
     if (claim.status !== "claimed" || !claim.claimToken)
       throw new AbortTaskRunError("Code analysis attempt unavailable");
@@ -335,6 +352,7 @@ export const analyzeProtectedRepositoryCodeTask = schemaTask({
     }
 
     const result = outcome.analysis;
+    const graphRunId = await dispatchGraph();
     return {
       analysisRunId: claim.analysisRunId,
       status: "completed",
@@ -353,6 +371,7 @@ export const analyzeProtectedRepositoryCodeTask = schemaTask({
         .length,
       externalReferences: result.externalReferences.length,
       relations: result.relations.length,
+      graphRunId,
     };
   },
 });

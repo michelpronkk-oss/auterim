@@ -11,7 +11,7 @@ import {
 export const CODE_INTELLIGENCE_VERSION = "code-intelligence-v2";
 // Endpoint call recognition was tightened after the first v2 readback exposed
 // non-HTTP getters (for example URLSearchParams.get) as dynamic endpoints.
-export const CODE_INTELLIGENCE_PROFILE = "javascript-typescript-v2.2";
+export const CODE_INTELLIGENCE_PROFILE = "javascript-typescript-v2.3";
 export const CODE_SCAN_LIMITS = {
   maxFileBytes: 256_000,
   maxManifestBytes: 5_000_000,
@@ -44,6 +44,12 @@ const CODE_EXTENSIONS = new Map([
   [".tsx", "typescript"],
   [".cts", "typescript"],
   [".mts", "typescript"],
+]);
+const UNSUPPORTED_SOURCE_EXTENSIONS = new Set([
+  ".astro", ".c", ".cc", ".cpp", ".cs", ".cxx", ".dart", ".ex", ".exs", ".elm",
+  ".gql", ".graphql", ".h", ".hh", ".hpp", ".html", ".hs", ".java", ".kt", ".kts",
+  ".lua", ".m", ".mm", ".php", ".pl", ".pm", ".py", ".r", ".rb", ".rs", ".scala",
+  ".sc", ".sh", ".sql", ".svelte", ".swift", ".tf", ".vue",
 ]);
 export type CodeLanguageAdapter = {
   id: string;
@@ -237,18 +243,43 @@ function addRelation(relations: Map<string, CodeRelation>, relation: CodeRelatio
 }
 
 class BoundedFactMap<K, V> extends Map<K, V> {
-  private readonly account: () => void;
+  private readonly account: (delta: number) => void;
+  private transactionKeys: K[] | null = null;
 
-  constructor(account: () => void) {
+  constructor(account: (delta: number) => void) {
     super();
     this.account = account;
+  }
+
+  beginTransaction() {
+    if (this.transactionKeys) throw new Error("code_analysis_fact_transaction_nested");
+    this.transactionKeys = [];
+  }
+
+  commitTransaction() {
+    this.transactionKeys = null;
+  }
+
+  rollbackTransaction() {
+    const keys = this.transactionKeys;
+    this.transactionKeys = null;
+    for (const key of keys ?? []) this.delete(key);
   }
 
   override set(key: K, value: V) {
     const isNew = !this.has(key);
     super.set(key, value);
-    if (isNew) this.account();
+    if (isNew) {
+      this.transactionKeys?.push(key);
+      this.account(1);
+    }
     return this;
+  }
+
+  override delete(key: K) {
+    const removed = super.delete(key);
+    if (removed) this.account(-1);
+    return removed;
   }
 }
 const ext = (file: string) => file.slice(file.lastIndexOf(".")).toLowerCase();
@@ -713,8 +744,8 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
     .filter((file) => !file.collectionTruncated && !file.directorySkipReason)
     .sort((a, b) => stableCompare(a.path, b.path));
   let factCount = 0;
-  const accountFact = () => {
-    factCount += 1;
+  const accountFact = (delta: number) => {
+    factCount += delta;
     if (factCount > CODE_SCAN_LIMITS.maxPersistedFacts)
       throw new CodeAnalysisStageError("fact_limit_exceeded");
   };
@@ -844,7 +875,7 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
     const adapter = CODE_LANGUAGE_ADAPTERS.find((candidate) => candidate.supports(pathValue));
     const language = adapter?.languageForPath(pathValue) ?? null;
     if (!language) {
-      if (/\.(?:py|go|rb|php|java|cs|rs|swift|kt|scala|c|h|cpp)$/i.test(pathValue)) {
+      if (UNSUPPORTED_SOURCE_EXTENSIONS.has(ext(pathValue))) {
         unsupportedCount += 1;
         unsupportedLanguageFiles += 1;
         skippedFiles.push({
@@ -889,7 +920,7 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
     if (astBudgetReached) {
       skippedFiles.push({
         path: pathValue.slice(0, 1024),
-        reason: "ast_node_limit",
+        reason: astBudgetReason,
         size: fileSize,
       });
       incomplete = true;
@@ -913,6 +944,11 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
     const parseDiagnostics = (
       source as ts.SourceFile & { parseDiagnostics: readonly ts.Diagnostic[] }
     ).parseDiagnostics;
+    entities.beginTransaction();
+    relations.beginTransaction();
+    refs.beginTransaction();
+    const unresolvedCallCheckpoint = unresolvedCalls.length;
+    const fileSymbolAdditions: Array<{ key: string; entityKey: string }> = [];
     const fileEntity = addEntity(entities, {
       entityType: "file",
       name: pathValue.split("/").at(-1)!.slice(0, 240),
@@ -1099,6 +1135,7 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
           const matches = symbolEntities.get(symbolKey);
           if (matches) matches.push(owner);
           else symbolEntities.set(symbolKey, [owner]);
+          fileSymbolAdditions.push({ key: symbolKey, entityKey: owner });
         }
 
         if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier)) {
@@ -1232,6 +1269,16 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
     walk(source, moduleEntity);
 
     if (astBudgetReached) {
+      entities.rollbackTransaction();
+      relations.rollbackTransaction();
+      refs.rollbackTransaction();
+      unresolvedCalls.length = unresolvedCallCheckpoint;
+      for (const addition of fileSymbolAdditions) {
+        const matches = symbolEntities.get(addition.key);
+        const index = matches?.lastIndexOf(addition.entityKey) ?? -1;
+        if (index >= 0) matches!.splice(index, 1);
+        if (matches?.length === 0) symbolEntities.delete(addition.key);
+      }
       skippedFiles.push({
         path: pathValue.slice(0, 1024),
         reason: astBudgetReason,
@@ -1240,6 +1287,9 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
       incomplete = true;
       continue;
     }
+    entities.commitTransaction();
+    relations.commitTransaction();
+    refs.commitTransaction();
     supportedFilesAnalyzed += 1;
 
     for (const item of importEntities) {

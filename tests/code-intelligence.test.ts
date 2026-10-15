@@ -630,6 +630,15 @@ describe("deterministic code intelligence", () => {
     expect(unsupported.unsupportedLanguageFiles).toBe(1);
     expect(unsupported.coverageState).toBe("unsupported");
 
+    const mixedLanguages = analyzeCodeSnapshot([
+      { path: "src/client.ts", text: "export const client = true;" },
+      { path: "src/component.vue", text: "<script>export default {}</script>" },
+      { path: "schema/query.sql", text: "select 1;" },
+    ]);
+    expect(mixedLanguages.supportedFilesAnalyzed).toBe(1);
+    expect(mixedLanguages.unsupportedLanguageFiles).toBe(2);
+    expect(mixedLanguages.coverageState).toBe("partial");
+
     const invalidEncoding = analyzeCodeSnapshot([
       { path: "src/undecodable.ts", text: "", skipReason: "invalid_encoding" },
     ]);
@@ -658,6 +667,38 @@ describe("deterministic code intelligence", () => {
     expect(result.coverageState).toBe("partial");
     expect(result.coverageReasonCounts.ast_depth_limit).toBe(1);
     expect(result.supportedFilesAnalyzed).toBe(0);
+  });
+
+  it("rolls back all prefix facts when the AST budget interrupts a source file", () => {
+    const nested = `${"(".repeat(CODE_SCAN_LIMITS.maxAstDepth + 10)}1${")".repeat(
+      CODE_SCAN_LIMITS.maxAstDepth + 10,
+    )}`;
+    const result = analyzeCodeSnapshot([
+      {
+        path: "src/a.ts",
+        text: [
+          'import Stripe from "stripe";',
+          "function target() { return 1; }",
+          "function caller() { return target(); }",
+          `const deep = ${nested};`,
+        ].join("\n"),
+      },
+      { path: "src/z.ts", text: 'import OpenAI from "openai";' },
+    ]);
+
+    expect(result.coverageState).toBe("partial");
+    expect(result.supportedFilesDiscovered).toBe(2);
+    expect(result.supportedFilesAnalyzed).toBe(0);
+    expect(result.coverageReasonCounts.ast_depth_limit).toBe(2);
+    expect(result.entities).toEqual([]);
+    expect(result.relations).toEqual([]);
+    expect(result.externalReferences).toEqual([]);
+    expect(result.skippedFiles).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "src/a.ts", reason: "ast_depth_limit" }),
+        expect.objectContaining({ path: "src/z.ts", reason: "ast_depth_limit" }),
+      ]),
+    );
   });
 
   it("fails closed at the deterministic intermediate fact budget", () => {

@@ -20,3 +20,11 @@ Existing evidence supports these conclusions:
 - Production metadata confirms the exact task/run and deployed version. Configuration-name presence and connected repository mapping do not prove credential validity or explain the failed attempt.
 
 No code is changed until this matrix is recorded. No Production retry is authorized during diagnosis.
+
+## M15.76 final closure note
+
+M15.76 is CLOSED / PASS on the v2 implementation and the persisted exact-commit Production comparison recorded in the M15.76 closure brief. The retrospective v1 failure mechanism remains unproven and is a non-blocking historical audit note:
+
+"The M15.76 v1 implementation contained a silent-fact-loss-capable entity-ID resolution path. The exact mechanism responsible for the historical Production count discrepancy could not be reconstructed. The v2 architecture removes that class of failure through bounded returned-ID persistence and completion-time count invariants."
+
+PostgREST truncation as the historical root cause remains UNVERIFIED. The v2 Production comparison is evidence of the current implementation's persisted counts; it is not a reconstruction of the immutable v1 run.
