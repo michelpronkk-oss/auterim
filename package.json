@@ -42,7 +42,9 @@
     "eval:public-growth": "vitest run tests/public-growth.test.ts tests/public-discovery.test.ts",
     "eval:public:live": "vitest run --config vitest.public-live.config.mts",
     "env:check": "node --experimental-strip-types scripts/env-check.mts",
-    "project:check": "node --experimental-strip-types scripts/project-check.mts"
+    "project:check": "node --experimental-strip-types scripts/project-check.mts",
+    "acceptance:m1576:docker": "node scripts/acceptance-m1576-docker.mjs",
+    "eval:code-intelligence": "vitest run tests/code-intelligence.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.117.2",
@@ -56,6 +58,7 @@
     "react-dom": "19.2.8",
     "resend": "6.32.0",
     "tldts": "^7.4.16",
+    "typescript": "^5.9.3",
     "zod": "4.6.5"
   },
   "devDependencies": {
@@ -71,7 +74,6 @@
     "eslint-config-prettier": "10.1.8",
     "prettier": "3.9.9",
     "tailwindcss": "^4",
-    "typescript": "^5",
     "vitest": "5.0.3"
   },
   "overrides": {
