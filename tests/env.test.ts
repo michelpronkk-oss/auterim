@@ -51,6 +51,15 @@ describe("environment validation", () => {
     expect(configured).not.toHaveProperty("NEXT_PUBLIC_GITHUB_APP_PRIVATE_KEY");
   });
 
+  it("accepts only an exact non-secret commit pin for the internal M15.76 probe", () => {
+    const sha = "a".repeat(40);
+    expect(
+      parseEnvironment({ AUTERIM_M1576_GITHUB_PROBE_COMMIT_SHA: ` ${sha} ` })
+        .AUTERIM_M1576_GITHUB_PROBE_COMMIT_SHA,
+    ).toBe(sha);
+    expect(() => parseEnvironment({ AUTERIM_M1576_GITHUB_PROBE_COMMIT_SHA: "main" })).toThrow();
+  });
+
   it("treats blank placeholders as unconfigured", () => {
     expect(
       parseEnvironment({

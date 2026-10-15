@@ -1,5 +1,5 @@
 import "server-only";
-import { createSign } from "node:crypto";
+import { createSign, type KeyObject } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -9,21 +9,32 @@ import type {
   RepositoryProvider,
   RepositoryTarget,
 } from "@/lib/preflight/preflight";
+import { parseGitHubAppPrivateKey } from "@/lib/preflight/github-app-crypto";
 
 type GitHubResponse<T> = { data: T; response: Response };
 
 export type GitHubAppInstallationFailureStage =
   | "app_jwt"
+  | "app_identity"
   | "user_installations"
   | "user_installation_authorization"
   | "installation_metadata"
   | "installation_token"
   | "repository_list"
+  | "repository_access"
+  | "exact_commit"
   | "repository_archive";
 
 export type GitHubAppInstallationFailureCategory =
   | "signing_failed"
+  | "github_private_key_unparseable"
+  | "github_private_key_not_rsa"
+  | "github_private_key_encrypted_unsupported"
+  | "github_private_key_format_unsupported"
+  | "github_local_sign_failed"
+  | "github_local_verify_failed"
   | "app_jwt_rejected"
+  | "app_identity_mismatch"
   | "installation_token_rejected"
   | "installation_not_found"
   | "permission_denied"
@@ -72,12 +83,17 @@ function installationHttpCategory(
   status: number,
 ): GitHubAppInstallationFailureCategory {
   if (status === 401)
-    return stage === "repository_list" || stage === "repository_archive"
+    return stage === "repository_list" ||
+      stage === "repository_access" ||
+      stage === "exact_commit" ||
+      stage === "repository_archive"
       ? "installation_token_rejected"
       : "app_jwt_rejected";
   if (status === 403) return "permission_denied";
   if (status === 404)
-    return stage === "repository_archive" ? "commit_unavailable" : "installation_not_found";
+    return stage === "repository_archive" || stage === "exact_commit"
+      ? "commit_unavailable"
+      : "installation_not_found";
   if (status === 429) return "rate_limited";
   if (status === 408 || status === 425 || status >= 500) return "provider_unavailable";
   return "http_error";
@@ -148,7 +164,7 @@ function base64url(value: string | Buffer) {
   return Buffer.from(value).toString("base64url");
 }
 
-function createAppJwt(appId: string, privateKey: string, now = Date.now()) {
+function createAppJwt(appId: string, privateKey: KeyObject, now = Date.now()) {
   const issuedAt = Math.floor(now / 1000) - 30;
   const header = base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
   const payload = base64url(JSON.stringify({ iat: issuedAt, exp: issuedAt + 8 * 60, iss: appId }));
@@ -440,10 +456,51 @@ export class GitHubAppRepositoryProvider implements RepositoryProvider {
   }
 
   private installationAppJwt() {
+    const parsed = parseGitHubAppPrivateKey(this.privateKey);
+    if (!parsed.ok)
+      throw new GitHubAppInstallationError({
+        stage: "app_jwt",
+        category: parsed.diagnostics.failureCategory ?? "signing_failed",
+      });
     try {
-      return createAppJwt(this.appId, this.privateKey);
+      return createAppJwt(this.appId, parsed.key);
     } catch {
-      throw new GitHubAppInstallationError({ stage: "app_jwt", category: "signing_failed" });
+      throw new GitHubAppInstallationError({
+        stage: "app_jwt",
+        category: "github_local_sign_failed",
+      });
+    }
+  }
+
+  /** Read-only GitHub App identity check; no token or response body is returned. */
+  async verifyAppIdentity() {
+    let response: Response;
+    try {
+      response = await fetch("https://api.github.com/app", {
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `Bearer ${this.installationAppJwt()}`,
+          "x-github-api-version": "2022-11-28",
+          "user-agent": "Auterim-Code-Intelligence/1.0",
+        },
+        signal: AbortSignal.timeout(12_000),
+        cache: "no-store",
+      });
+    } catch (error) {
+      throw safeInstallationError("app_identity", error);
+    }
+    if (!response.ok)
+      throw new GitHubAppInstallationError({
+        stage: "app_identity",
+        category: installationHttpCategory("app_identity", response.status),
+        upstreamStatus: response.status,
+      });
+    try {
+      const app = (await response.json()) as { id?: number };
+      if (!Number.isSafeInteger(app.id) || app.id! <= 0) throw new Error("invalid_app_identity");
+      return { matchesConfiguredAppId: app.id === Number(this.appId) };
+    } catch {
+      throw new GitHubAppInstallationError({ stage: "app_identity", category: "invalid_response" });
     }
   }
 
@@ -586,6 +643,130 @@ export class GitHubAppRepositoryProvider implements RepositoryProvider {
       permissions: installation.permissions!,
       suspendedAt: installation.suspended_at ?? null,
     };
+  }
+
+  /** Verifies access to one canonical repository using a repository-scoped installation token. */
+  async verifyRepositoryAccess(repository: RepositoryTarget) {
+    const token = await this.installationToken(repository);
+    let response: Response;
+    try {
+      response = await fetch(
+        `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`,
+        {
+          headers: {
+            accept: "application/vnd.github+json",
+            authorization: `Bearer ${token}`,
+            "x-github-api-version": "2022-11-28",
+            "user-agent": "Auterim-Code-Intelligence/1.0",
+          },
+          signal: AbortSignal.timeout(12_000),
+          cache: "no-store",
+        },
+      );
+    } catch (error) {
+      throw safeInstallationError("repository_access", error);
+    }
+    if (!response.ok)
+      throw new GitHubAppInstallationError({
+        stage: "repository_access",
+        category: installationHttpCategory("repository_access", response.status),
+        upstreamStatus: response.status,
+      });
+    try {
+      const data = (await response.json()) as { id?: number; full_name?: string };
+      return {
+        matchesCanonicalRepository:
+          data.id === repository.externalId &&
+          data.full_name?.toLowerCase() === `${repository.owner}/${repository.name}`.toLowerCase(),
+      };
+    } catch {
+      throw new GitHubAppInstallationError({
+        stage: "repository_access",
+        category: "invalid_response",
+      });
+    }
+  }
+
+  /** Confirms the exact commit exists and is visible before archive retrieval. */
+  async verifyExactCommit(repository: RepositoryTarget, commitSha: string) {
+    if (!/^[a-f0-9]{40,64}$/i.test(commitSha))
+      throw new GitHubAppInstallationError({
+        stage: "exact_commit",
+        category: "commit_unavailable",
+      });
+    const token = await this.installationToken(repository);
+    let response: Response;
+    try {
+      response = await fetch(
+        `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/commits/${encodeURIComponent(commitSha)}`,
+        {
+          headers: {
+            accept: "application/vnd.github+json",
+            authorization: `Bearer ${token}`,
+            "x-github-api-version": "2022-11-28",
+            "user-agent": "Auterim-Code-Intelligence/1.0",
+          },
+          signal: AbortSignal.timeout(12_000),
+          cache: "no-store",
+        },
+      );
+    } catch (error) {
+      throw safeInstallationError("exact_commit", error);
+    }
+    if (!response.ok)
+      throw new GitHubAppInstallationError({
+        stage: "exact_commit",
+        category: installationHttpCategory("exact_commit", response.status),
+        upstreamStatus: response.status,
+      });
+    try {
+      const commit = (await response.json()) as { sha?: string };
+      if (!commit.sha || commit.sha.toLowerCase() !== commitSha.toLowerCase())
+        throw new Error("commit_sha_mismatch");
+      return { exactShaMatch: true };
+    } catch {
+      throw new GitHubAppInstallationError({
+        stage: "exact_commit",
+        category: "commit_unavailable",
+      });
+    }
+  }
+
+  /** Resolves the repository's current default branch to a validated immutable SHA. */
+  async resolveDefaultBranchCommit(repository: RepositoryTarget) {
+    const token = await this.installationToken(repository);
+    let response: Response;
+    try {
+      response = await fetch(
+        `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/branches/${encodeURIComponent(repository.defaultBranch)}`,
+        {
+          headers: {
+            accept: "application/vnd.github+json",
+            authorization: `Bearer ${token}`,
+            "x-github-api-version": "2022-11-28",
+            "user-agent": "Auterim-Code-Intelligence/1.0",
+          },
+          signal: AbortSignal.timeout(12_000),
+          cache: "no-store",
+        },
+      );
+    } catch (error) {
+      throw safeInstallationError("exact_commit", error);
+    }
+    if (!response.ok)
+      throw new GitHubAppInstallationError({
+        stage: "exact_commit",
+        category: installationHttpCategory("exact_commit", response.status),
+        upstreamStatus: response.status,
+      });
+    try {
+      const branch = (await response.json()) as { commit?: { sha?: string } };
+      const sha = branch.commit?.sha;
+      if (!sha || !/^[a-f0-9]{40,64}$/i.test(sha)) throw new Error("invalid_branch_sha");
+      return sha;
+    } catch {
+      throw new GitHubAppInstallationError({ stage: "exact_commit", category: "invalid_response" });
+    }
   }
 
   async listInstallationRepositories(installationId: number) {
@@ -884,6 +1065,11 @@ export class GitHubAppRepositoryProvider implements RepositoryProvider {
         stage: "repository_archive",
         category: "snapshot_unavailable",
       });
-    return { files, bytes: extracted };
+    return {
+      files,
+      bytes: extracted,
+      compressedBytes: compressed.byteLength,
+      expandedBytes: tar.byteLength,
+    };
   }
 }

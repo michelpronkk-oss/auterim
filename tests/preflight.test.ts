@@ -914,9 +914,99 @@ describe("offline Preflight evidence evaluation", () => {
       });
       await expect(provider.getInstallationAccount(2001)).rejects.toMatchObject({
         stage: "app_jwt",
-        category: "signing_failed",
+        category: "github_private_key_unparseable",
       });
       expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("checks GitHub App identity using one JWT-authenticated read", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    let requestUrl = "";
+    let authorization = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        requestUrl = String(input);
+        authorization = new Headers(init?.headers).get("authorization") ?? "";
+        return new Response(JSON.stringify({ id: 12345 }), { status: 200 });
+      }),
+    );
+    try {
+      const provider = new GitHubAppRepositoryProvider({
+        appId: "12345",
+        privateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      });
+      await expect(provider.verifyAppIdentity()).resolves.toEqual({ matchesConfiguredAppId: true });
+      expect(requestUrl).toBe("https://api.github.com/app");
+      expect(authorization).toMatch(/^Bearer eyJ/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("verifies one repository and exact commit through a repository-scoped read token", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const calls: Array<{ url: string; method: string; body: string }> = [];
+    const commitSha = "a".repeat(40);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        calls.push({ url, method, body: String(init?.body ?? "") });
+        if (url.endsWith("/access_tokens"))
+          return new Response(
+            JSON.stringify({ token: "ghs_fixture_token", expires_at: "2099-01-01T00:00:00Z" }),
+            { status: 201 },
+          );
+        if (url.endsWith("/repos/michelpronkk-oss/auterim"))
+          return new Response(JSON.stringify({ id: 123, full_name: "michelpronkk-oss/auterim" }), {
+            status: 200,
+          });
+        if (url.endsWith("/branches/main"))
+          return new Response(JSON.stringify({ commit: { sha: commitSha } }), { status: 200 });
+        if (url.endsWith(`/commits/${commitSha}`))
+          return new Response(JSON.stringify({ sha: commitSha }), { status: 200 });
+        return new Response("", { status: 404 });
+      }),
+    );
+    try {
+      const provider = new GitHubAppRepositoryProvider({
+        appId: "12345",
+        privateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      });
+      const target = {
+        id: "repository-id",
+        workspaceId: "workspace-id",
+        owner: "michelpronkk-oss",
+        name: "auterim",
+        defaultBranch: "main",
+        externalId: 123,
+        installationId: 456,
+        commitSha,
+      };
+      await expect(provider.verifyRepositoryAccess(target)).resolves.toEqual({
+        matchesCanonicalRepository: true,
+      });
+      await expect(provider.resolveDefaultBranchCommit(target)).resolves.toBe(commitSha);
+      await expect(provider.verifyExactCommit(target, commitSha)).resolves.toEqual({
+        exactShaMatch: true,
+      });
+      expect(calls.map((call) => call.method)).toEqual(["POST", "GET", "GET", "GET"]);
+      expect(JSON.parse(calls[0]!.body)).toEqual({
+        repository_ids: [123],
+        permissions: { contents: "read" },
+      });
+      expect(calls[1]!.url).toBe("https://api.github.com/repos/michelpronkk-oss/auterim");
+      expect(calls[2]!.url).toBe(
+        "https://api.github.com/repos/michelpronkk-oss/auterim/branches/main",
+      );
+      expect(calls[3]!.url).toBe(
+        `https://api.github.com/repos/michelpronkk-oss/auterim/commits/${commitSha}`,
+      );
     } finally {
       vi.unstubAllGlobals();
     }
