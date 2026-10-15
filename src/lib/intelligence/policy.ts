@@ -80,6 +80,19 @@ export function applyIntelligencePolicy(input: {
     "webhook_or_event_change",
     "limits_or_quota_change",
   ].includes(judgment.route);
+  const classifierRoute = classifier?.material
+    ? classifierRouteForCategory(classifier.category)
+    : null;
+  if (classifierRoute && classifierRoute !== judgment.route) {
+    return {
+      route: judgment.route,
+      state: "escalate",
+      reason:
+        judgment.route === "docs_noise"
+          ? "classifier_jev_disagree_docs_noise"
+          : "classifier_jev_disagree_material",
+    };
+  }
   if (highRiskRoute && jevDocsNoise) {
     return {
       route: judgment.route,
@@ -126,6 +139,21 @@ export function applyIntelligencePolicy(input: {
     };
   }
   return { route: judgment.route, state: "escalate", reason: "no_safe_suppression_evidence" };
+}
+
+function classifierRouteForCategory(category: string): IntelligenceRoute | null {
+  const routes: Record<string, IntelligenceRoute> = {
+    documentation: "docs_noise",
+    deprecation: "deprecation",
+    api_change: "breaking_api_change",
+    security: "auth_or_security_change",
+    pricing: "pricing_change",
+    limits: "limits_or_quota_change",
+    terms: "terms_or_policy_change",
+    availability: "availability_or_runtime_change",
+    feature_change: "feature_change",
+  };
+  return routes[category] ?? null;
 }
 
 export function chooseMaterialThreshold(

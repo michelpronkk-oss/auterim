@@ -6,6 +6,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { SafeFetchError } from "@/lib/monitoring/fetcher";
 import { scanSource } from "@/lib/monitoring/scan";
 import type { MonitoringRepository, ScanOutcome } from "@/lib/monitoring/repository";
+import { evaluateBoundedEscalationEvidence } from "@/lib/intelligence/escalation";
 
 const migrationPath = fileURLToPath(
   new URL(
@@ -422,6 +423,24 @@ const baselinePreflightMigration = await readFile(
   ),
   "utf8",
 );
+const intelligenceDecisionMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261127000000_m1575a_change_intelligence_decisions.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
+const intelligenceRouterMigration = await readFile(
+  fileURLToPath(
+    new URL(
+      "../supabase/migrations/20261128000000_m1575b_autonomous_intelligence_router.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 async function makeDatabase(
   applyCompanySurfaceMigration = true,
@@ -501,6 +520,8 @@ async function makeDatabase(
   }
   await db.exec(baselineImpactAssessmentMigration);
   if (applyProductRepositoryProtectionMigration) await db.exec(baselinePreflightMigration);
+  await db.exec(intelligenceDecisionMigration);
+  await db.exec(intelligenceRouterMigration);
   return db;
 }
 
@@ -3569,6 +3590,204 @@ describe("Auterim migration and monitoring transaction", () => {
       "select * from public.list_due_source_ids(now()+interval '2 days', 999)",
     );
     expect(due.rows.map((row) => row.source_id)).toContain(sourceId);
+    await db.exec("reset role");
+  });
+
+  it("persists response-model audit data, idempotent route intents and bounded escalation", async () => {
+    await db.exec("set role service_role");
+    const sqlTargets = await db.query<{ route: string; route_target: string }>(`
+      select route,public.resolve_intelligence_route_target(route,'continue_candidate') as route_target
+      from (values
+        ('docs_noise'),('deprecation'),('breaking_api_change'),('auth_or_security_change'),
+        ('schema_or_contract_change'),('pricing_change'),('limits_or_quota_change'),('sdk_change'),
+        ('webhook_or_event_change'),('feature_change'),('availability_or_runtime_change'),
+        ('terms_or_policy_change'),('uncertain')
+      ) routes(route)
+    `);
+    expect(sqlTargets.rows).toEqual([
+      { route: "docs_noise", route_target: "suppress_archive" },
+      { route: "deprecation", route_target: "dependency_product_impact" },
+      {
+        route: "breaking_api_change",
+        route_target: "dependency_impact_repository_exposure_candidate",
+      },
+      { route: "auth_or_security_change", route_target: "integration_auth_risk_analysis" },
+      { route: "schema_or_contract_change", route_target: "contract_exposure_analysis" },
+      { route: "pricing_change", route_target: "commercial_impact_analysis" },
+      { route: "limits_or_quota_change", route_target: "capacity_risk_analysis" },
+      { route: "sdk_change", route_target: "repository_dependency_exposure_analysis" },
+      { route: "webhook_or_event_change", route_target: "contract_repository_exposure_analysis" },
+      { route: "feature_change", route_target: "product_relevance_analysis" },
+      { route: "availability_or_runtime_change", route_target: "runtime_risk_analysis_candidate" },
+      { route: "terms_or_policy_change", route_target: "provider_policy_review" },
+      { route: "uncertain", route_target: "evidence_escalation" },
+    ]);
+    const escalationTarget = await db.query<{ route_target: string }>(
+      "select public.resolve_intelligence_route_target('deprecation','escalate') as route_target",
+    );
+    expect(escalationTarget.rows[0]!.route_target).toBe("evidence_escalation");
+    const change = await db.query<{ id: string }>(
+      "select id from public.source_changes where source_id=$1 order by created_at desc limit 1",
+      [sourceId],
+    );
+    expect(change.rows).toHaveLength(1);
+    const sourceChangeId = change.rows[0]!.id;
+    const begun = await db.query<{ value: Record<string, unknown> }>(
+      "select public.begin_source_change_intelligence($1,'router-pglite-run',1) as value",
+      [sourceChangeId],
+    );
+    const start = begun.rows[0]!.value;
+    expect(start).toMatchObject({ status: "processing", sourceChangeId });
+    const evidenceFingerprint = start.evidenceFingerprint as string;
+    await db.query(
+      `select public.record_source_change_intelligence_v2(
+        $1,$2,'router-pglite-run',1,'uncertain',
+        '{"material":0.1,"criticalChange":0.1,"evidenceSufficient":0.3,"docsNoise":0.4,"requiresEscalation":0.9,"route":{}}'::jsonb,
+        0.4,'{"sourceCriticality":"standard","incomplete":true}'::jsonb,
+        'insufficient_evidence','evidence_insufficient','typesafe/jev-1.14-20261014',5,10,2,0.0001
+      )`,
+      [sourceChangeId, evidenceFingerprint],
+    );
+    const storedDecision = await db.query<{ response_model: string; policy_reason: string }>(
+      "select response_model,policy_reason from public.change_intelligence_decisions where source_change_id=$1",
+      [sourceChangeId],
+    );
+    expect(storedDecision.rows[0]).toEqual({
+      response_model: "typesafe/jev-1.14-20261014",
+      policy_reason: "evidence_insufficient",
+    });
+
+    const persisted = await db.query<{ value: Record<string, unknown> }>(
+      "select public.persist_intelligence_route_intent($1) as value",
+      [sourceChangeId],
+    );
+    const intent = persisted.rows[0]!.value;
+    expect(intent).toMatchObject({
+      route: "uncertain",
+      policyState: "insufficient_evidence",
+      routeTarget: "evidence_escalation",
+      routeStatus: "queued",
+      replayed: false,
+    });
+    const replay = await db.query<{ value: Record<string, unknown> }>(
+      "select public.persist_intelligence_route_intent($1) as value",
+      [sourceChangeId],
+    );
+    expect(replay.rows[0]!.value).toMatchObject({ id: intent.id, replayed: true });
+    expect(
+      (
+        await db.query(
+          "select id from public.intelligence_route_intents where source_change_id=$1",
+          [sourceChangeId],
+        )
+      ).rows,
+    ).toHaveLength(1);
+
+    const routeClaim = await db.query<{ value: Record<string, unknown> }>(
+      "select public.claim_intelligence_route_dispatch($1) as value",
+      [intent.id],
+    );
+    const claim = routeClaim.rows[0]!.value;
+    expect(claim.status).toBe("claimed");
+    const duplicateClaim = await db.query<{ value: Record<string, unknown> }>(
+      "select public.claim_intelligence_route_dispatch($1) as value",
+      [intent.id],
+    );
+    expect(duplicateClaim.rows[0]!.value).toMatchObject({
+      status: "dispatching",
+      dispatched: false,
+    });
+    await db.query(
+      "select public.release_intelligence_route_dispatch($1,$2,'transient_dispatch_error')",
+      [intent.id, claim.claimToken],
+    );
+    const retryClaim = await db.query<{ value: Record<string, unknown> }>(
+      "select public.claim_intelligence_route_dispatch($1) as value",
+      [intent.id],
+    );
+    expect(retryClaim.rows[0]!.value).toMatchObject({
+      status: "claimed",
+      idempotencyKey: claim.idempotencyKey,
+    });
+    const retry = retryClaim.rows[0]!.value;
+    const marked = await db.query<{ value: boolean }>(
+      "select public.mark_intelligence_route_dispatched($1,$2,'router-pglite-child-run') as value",
+      [intent.id, retry.claimToken],
+    );
+    expect(marked.rows[0]!.value).toBe(true);
+    const dispatchedReplay = await db.query<{ value: Record<string, unknown> }>(
+      "select public.claim_intelligence_route_dispatch($1) as value",
+      [intent.id],
+    );
+    expect(dispatchedReplay.rows[0]!.value).toMatchObject({
+      status: "dispatched",
+      dispatched: false,
+    });
+
+    const escalationClaim = await db.query<{ value: Record<string, unknown> }>(
+      "select public.claim_intelligence_evidence_escalation($1,'router-pglite-child-run') as value",
+      [intent.id],
+    );
+    const evidence = escalationClaim.rows[0]!.value;
+    expect(evidence.status).toBe("claimed");
+    expect(String(evidence.previousEvidence).length).toBeLessThanOrEqual(16_400);
+    expect(String(evidence.currentEvidence).length).toBeLessThanOrEqual(16_400);
+    const result = evaluateBoundedEscalationEvidence(evidence as never);
+    await db.query(
+      "select public.complete_intelligence_evidence_escalation($1,$2,$3,$4,$5::jsonb,$6)",
+      [
+        intent.id,
+        evidence.claimToken,
+        result.terminalState,
+        result.reason,
+        JSON.stringify(result.summary),
+        result.fingerprint,
+      ],
+    );
+    const terminal = await db.query<{
+      route_status: string;
+      terminal_state: string;
+      attempt_count: number;
+    }>(
+      `select r.route_status,e.terminal_state,e.attempt_count
+       from public.intelligence_route_intents r join public.intelligence_evidence_escalations e on e.route_intent_id=r.id
+       where r.id=$1`,
+      [intent.id],
+    );
+    expect(terminal.rows[0]).toMatchObject({ route_status: "completed", attempt_count: 1 });
+    expect(["completed", "insufficient_evidence"]).toContain(terminal.rows[0]!.terminal_state);
+    const escalationReplay = await db.query<{ value: Record<string, unknown> }>(
+      "select public.claim_intelligence_evidence_escalation($1,'router-pglite-replay') as value",
+      [intent.id],
+    );
+    expect(escalationReplay.rows[0]!.value.replayed).toBe(true);
+    await expect(
+      db.query(
+        "update public.intelligence_evidence_escalations set attempt_count=4 where route_intent_id=$1",
+        [intent.id],
+      ),
+    ).rejects.toBeTruthy();
+    const access = await db.query<{
+      rls: boolean;
+      authenticated_select: boolean;
+      anon_select: boolean;
+      service_route_target: boolean;
+      authenticated_route_target: boolean;
+    }>(`
+      select c.relrowsecurity as rls,
+        has_table_privilege('authenticated','public.intelligence_route_intents','select') as authenticated_select,
+        has_table_privilege('anon','public.intelligence_route_intents','select') as anon_select,
+        has_function_privilege('service_role','public.resolve_intelligence_route_target(text,text)','execute') as service_route_target,
+        has_function_privilege('authenticated','public.resolve_intelligence_route_target(text,text)','execute') as authenticated_route_target
+      from pg_class c where c.oid='public.intelligence_route_intents'::regclass
+    `);
+    expect(access.rows[0]).toEqual({
+      rls: true,
+      authenticated_select: false,
+      anon_select: false,
+      service_route_target: true,
+      authenticated_route_target: false,
+    });
     await db.exec("reset role");
   });
 
