@@ -174,10 +174,10 @@ const judgment: JevJudgment = {
   confidence: 0.99,
   probabilities: {
     material: 0.99,
-    criticalChange: 0.01,
+    criticalChange: 0.96,
     evidenceSufficient: 0.99,
     docsNoise: 0.01,
-    requiresEscalation: 0.01,
+    requiresEscalation: 0.89,
     route: {
       docs_noise: 0.001,
       deprecation: 0.001,
@@ -330,7 +330,9 @@ describe("M15.77 internal evidence-only source mode on local Docker Supabase", (
     const intents = await row(
       client
         .from("intelligence_route_intents")
-        .select("id,source_change_id,workspace_id,scope_product_id,route_target,route_status")
+        .select(
+          "id,source_change_id,workspace_id,scope_product_id,route_target,route_status,review_disposition,review_reason",
+        )
         .in("source_change_id", [providerChange.changeId, internal.sourceChangeId]),
     );
     const providerIntent = intents.find(
@@ -343,12 +345,21 @@ describe("M15.77 internal evidence-only source mode on local Docker Supabase", (
       workspace_id: null,
       scope_product_id: null,
       route_status: "pending",
+      review_disposition: "review_required",
+      review_reason: "critical_change",
     });
     expect(internalIntent).toMatchObject({
       workspace_id: targetA.workspaceId,
       scope_product_id: targetA.productId,
       route_status: "pending",
+      review_disposition: "review_required",
+      review_reason: "critical_change",
     });
+    const attemptedIntentReviewRewrite = await client
+      .from("intelligence_route_intents")
+      .update({ review_disposition: "none", review_reason: null })
+      .eq("id", internalIntent.id);
+    expect(attemptedIntentReviewRewrite.error).not.toBeNull();
 
     const exactFiles: SnapshotFile[] = ["package.json", "src/lib/supabase/server.ts"].map(
       (path) => {
@@ -421,7 +432,9 @@ describe("M15.77 internal evidence-only source mode on local Docker Supabase", (
     const graphRow = await row(
       client
         .from("impact_graph_builds")
-        .select("workspace_id,product_id,repository_id,commit_sha,production_exposure_state,status")
+        .select(
+          "workspace_id,product_id,repository_id,commit_sha,production_exposure_state,review_disposition,review_reason,status",
+        )
         .eq("id", graph.graphBuildId)
         .single(),
     );
@@ -430,8 +443,15 @@ describe("M15.77 internal evidence-only source mode on local Docker Supabase", (
       product_id: targetA.productId,
       commit_sha: commitSha,
       production_exposure_state: "unknown",
+      review_disposition: "review_required",
+      review_reason: "critical_change",
       status: "completed",
     });
+    const attemptedReviewRewrite = await client
+      .from("impact_graph_builds")
+      .update({ review_disposition: "none", review_reason: null })
+      .eq("id", graph.graphBuildId);
+    expect(attemptedReviewRewrite.error).not.toBeNull();
     await expect(
       claimCodeAnalysisRun(
         {

@@ -64,7 +64,7 @@ export async function queryImpactGraph(input: z.input<typeof querySchema>, reque
   if (membershipError) throw new Error("impact_graph_workspace_access_unavailable");
   if (!membership) throw new Error("impact_graph_forbidden");
   let buildQuery = client.from("impact_graph_builds")
-    .select("id,workspace_id,product_id,repository_id,source_change_id,route_intent_id,intelligence_decision_id,analysis_run_id,commit_sha,analyzer_version,analysis_profile,graph_builder_version,policy_version,coverage_state,coverage_truth,assessment_state,production_exposure_state,production_evidence_id,status,build_generation,completed_at")
+    .select("id,workspace_id,product_id,repository_id,source_change_id,route_intent_id,intelligence_decision_id,analysis_run_id,commit_sha,analyzer_version,analysis_profile,graph_builder_version,policy_version,review_disposition,review_reason,coverage_state,coverage_truth,assessment_state,production_exposure_state,production_evidence_id,status,build_generation,completed_at")
     .eq("workspace_id", scope.workspaceId).eq("status", "completed").lte("completed_at", asOf)
     .order("build_generation", { ascending: false });
   if (scope.productId) buildQuery = buildQuery.eq("product_id", scope.productId);

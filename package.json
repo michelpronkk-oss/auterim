@@ -24,6 +24,7 @@
     "eval:intelligence": "vitest run tests/intelligence.test.ts tests/intelligence-scan-independence.test.ts",
     "eval:intelligence-router": "vitest run tests/intelligence-router.test.ts",
     "eval:intelligence:live": "vitest run --config vitest.intelligence-live.config.mts",
+    "eval:intelligence:policy-semantics:live": "vitest run --config vitest.intelligence-policy-semantics-live.config.mts",
     "eval:discovery": "vitest run tests/discovery.test.ts tests/company-surfaces.test.ts tests/streaming-html.test.ts tests/runtime-browser.test.ts tests/runtime-browser-egress.test.ts tests/monitoring.test.ts",
     "eval:technology": "vitest run tests/technology-observation.test.ts",
     "eval:discovery:live": "vitest run --config vitest.discovery-live.config.mts",

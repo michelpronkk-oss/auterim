@@ -196,6 +196,7 @@ async function createCanonicalRouteIntent(
   route: IntelligenceRoute,
   fixture: Awaited<ReturnType<typeof createProtectedRepoFixture>>,
   dependencyIdentity?: { slug: string; name: string; websiteUrl: string },
+  reviewRequired = false,
 ) {
   const nonce = randomUUID();
   const dependencySlug = dependencyIdentity?.slug ?? `m1576-${nonce.slice(0, 16)}`;
@@ -326,10 +327,10 @@ async function createCanonicalRouteIntent(
     confidence: 1,
     probabilities: {
       material: 1,
-      criticalChange: 0,
+      criticalChange: reviewRequired ? 0.96 : 0,
       evidenceSufficient: 1,
       docsNoise: 0,
-      requiresEscalation: 0,
+      requiresEscalation: reviewRequired ? 0.89 : 0,
       route: Object.fromEntries(
         [
           "docs_noise",
@@ -366,7 +367,7 @@ async function createCanonicalRouteIntent(
     thresholds: CALIBRATED_ACTIVE_THRESHOLDS,
   });
   const recorded = await write<Record<string, unknown>>(
-    client.rpc("record_source_change_intelligence_v3", {
+    client.rpc("record_source_change_intelligence_v4", {
       p_source_change_id: change.id,
       p_evidence_fingerprint: begun.evidenceFingerprint,
       p_trigger_run_id: triggerRunId,
@@ -377,6 +378,8 @@ async function createCanonicalRouteIntent(
       p_evidence_quality: evidence.quality,
       p_proposed_policy_state: policy.state,
       p_policy_reason: policy.reason,
+      p_review_disposition: policy.reviewDisposition,
+      p_review_reason: policy.reviewReason,
       p_response_model: judgment.responseModel,
       p_policy_mode: "active_calibrated",
       p_active_policy_version: INTELLIGENCE_ACTIVE_POLICY_VERSION,
@@ -422,11 +425,17 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
   it("M15.77 builds an exact-commit graph from canonical route and code-analysis evidence", async () => {
     const client = requireAdmin();
     const fixture = await createProtectedRepoFixture(client);
-    const route = await createCanonicalRouteIntent(client, "sdk_change", fixture, {
-      slug: "openai",
-      name: "OpenAI",
-      websiteUrl: "https://api.openai.com",
-    });
+    const route = await createCanonicalRouteIntent(
+      client,
+      "sdk_change",
+      fixture,
+      {
+        slug: "openai",
+        name: "OpenAI",
+        websiteUrl: "https://api.openai.com",
+      },
+      true,
+    );
     const claim = await claimCodeAnalysisRun(
       { ...fixture, commitSha, routeIntentId: route.id },
       client,
@@ -464,11 +473,13 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
       status: string;
       production_exposure_state: string;
       workspace_dependency_id: string;
+      review_disposition: string;
+      review_reason: string | null;
     }>(
       client
         .from("impact_graph_builds")
         .select(
-          "id,workspace_id,commit_sha,status,production_exposure_state,workspace_dependency_id",
+          "id,workspace_id,commit_sha,status,production_exposure_state,workspace_dependency_id,review_disposition,review_reason",
         )
         .eq("id", first.graphBuildId)
         .single(),
@@ -478,6 +489,8 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
       commit_sha: commitSha,
       status: "completed",
       production_exposure_state: "unknown",
+      review_disposition: "review_required",
+      review_reason: "critical_change",
     });
     const dependencyMapping = await write<{
       id: string;
@@ -529,7 +542,10 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
     expect(
       graphRead.builds.some(
         (build) =>
-          build["id"] === first.graphBuildId && build["workspace_id"] === fixture.workspaceId,
+          build["id"] === first.graphBuildId &&
+          build["workspace_id"] === fixture.workspaceId &&
+          build["review_disposition"] === "review_required" &&
+          build["review_reason"] === "critical_change",
       ),
     ).toBe(true);
     expect(graphRead.blastRadius.productionExposure).toBe("unknown");

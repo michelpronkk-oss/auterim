@@ -25,6 +25,11 @@ const routeIntentSchema = z.object({
     "escalate",
     "insufficient_evidence",
   ]),
+  reviewDisposition: z.enum(["none", "review_required"]),
+  reviewReason: z
+    .string()
+    .regex(/^[a-z0-9_]{1,80}$/)
+    .nullable(),
   routeTarget: z.enum(routeTargets),
   routeStatus: z.enum([
     "suppressed",
