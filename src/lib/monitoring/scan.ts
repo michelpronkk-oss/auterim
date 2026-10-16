@@ -11,6 +11,7 @@ type ScanDependencies = {
   fetcher?: typeof fetchHttpSource;
   enqueueClassifier?: (changeId: string) => Promise<unknown>;
   enqueueIntelligence?: (changeId: string) => Promise<unknown>;
+  internalTestScope?: { workspaceId: string; productId: string };
 };
 
 export async function scanSource(
@@ -20,7 +21,19 @@ export async function scanSource(
   const repository = dependencies.repository ?? new SupabaseMonitoringRepository();
   const fetcher = dependencies.fetcher ?? fetchHttpSource;
   const source = await repository.getSource(input.sourceId);
-  if (!source.enabled) throw new Error("Monitoring source is disabled.");
+  const sourceMode = source.source_mode ?? "provider";
+  const processingMode = source.processing_mode ?? "customer";
+  if (sourceMode === "provider" && processingMode === "customer") {
+    if (!source.enabled) throw new Error("Monitoring source is disabled.");
+  } else if (
+    sourceMode !== "internal_test" ||
+    processingMode !== "evidence_only" ||
+    !dependencies.internalTestScope ||
+    source.workspace_id !== dependencies.internalTestScope.workspaceId ||
+    source.scope_product_id !== dependencies.internalTestScope.productId
+  ) {
+    throw new Error("Internal evidence source scope is not authorized.");
+  }
 
   const run = await repository.beginScan(input.sourceId, input.triggerRunId, input.attemptNumber);
   if (run.status !== "pending") {

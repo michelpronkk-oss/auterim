@@ -145,4 +145,17 @@ const policyResult = spawnSync(
   { cwd: root, env, stdio: "inherit" },
 );
 if (policyResult.error || policyResult.status !== 0) process.exit(policyResult.status ?? 1);
+const evidenceModeResult = spawnSync(
+  process.execPath,
+  [
+    path.join(root, "node_modules/vitest/vitest.mjs"),
+    "run",
+    "--config",
+    "vitest.m1577-docker.config.mts",
+    "scripts/m1577-evidence-only-source-mode.docker.integration.test.ts",
+  ],
+  { cwd: root, env, stdio: "inherit" },
+);
+if (evidenceModeResult.error || evidenceModeResult.status !== 0)
+  process.exit(evidenceModeResult.status ?? 1);
 console.log("M15.76 persistence/provenance and M15.77 isolated Docker acceptance: PASS");

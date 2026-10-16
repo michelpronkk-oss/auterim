@@ -16,6 +16,8 @@ const routeIntentSchema = z.object({
   id: z.string().uuid(),
   sourceChangeId: z.string().uuid(),
   decisionId: z.string().uuid(),
+  workspaceId: z.string().uuid().nullable(),
+  productId: z.string().uuid().nullable(),
   route: z.enum(INTELLIGENCE_ROUTES),
   policyState: z.enum([
     "suppress_candidate",

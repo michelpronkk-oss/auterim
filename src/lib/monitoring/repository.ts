@@ -6,6 +6,10 @@ const SourceSchema = z.object({
   id: z.string().uuid(),
   url: z.string().url(),
   enabled: z.boolean(),
+  source_mode: z.enum(["provider", "internal_test"]),
+  processing_mode: z.enum(["customer", "evidence_only"]),
+  workspace_id: z.string().uuid().nullable(),
+  scope_product_id: z.string().uuid().nullable(),
   etag: z.string().nullable(),
   last_modified: z.string().nullable(),
 });
@@ -71,7 +75,9 @@ export class SupabaseMonitoringRepository implements MonitoringRepository {
   async getSource(sourceId: string) {
     const { data, error } = await this.client
       .from("source_catalog")
-      .select("id,url,enabled,etag,last_modified")
+      .select(
+        "id,url,enabled,source_mode,processing_mode,workspace_id,scope_product_id,etag,last_modified",
+      )
       .eq("id", sourceId)
       .maybeSingle();
     throwOnError(error);
