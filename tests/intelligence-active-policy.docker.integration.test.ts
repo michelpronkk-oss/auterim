@@ -122,7 +122,14 @@ async function createSourceChange(label: string, sourceType: string, diffTruncat
 
 function fixedClassifier(input: {
   material: boolean;
-  category: "api_change" | "deprecation" | "sdk_change" | "pricing" | "documentation" | "other";
+  category:
+    | "api_change"
+    | "deprecation"
+    | "sdk_change"
+    | "security"
+    | "pricing"
+    | "documentation"
+    | "other";
 }): SemanticClassifier {
   return {
     providerId: "openai",
@@ -193,6 +200,48 @@ describe.skipIf(!enabled)(
           target: "repository_dependency_exposure_analysis",
         },
         {
+          name: "critical-sdk-review-not-blocked",
+          type: "changelog",
+          classifier: { material: true, category: "sdk_change" as const },
+          route: "sdk_change" as const,
+          options: { critical: 0.96, escalation: 0.89 },
+          expected: "continue_candidate",
+          target: "repository_dependency_exposure_analysis",
+          expectedReview: "review_required",
+          expectedReviewReason: "critical_change",
+        },
+        {
+          name: "endpoint-removal-review-not-blocked",
+          type: "api",
+          classifier: { material: true, category: "api_change" as const },
+          route: "breaking_api_change" as const,
+          options: { critical: 0.96, escalation: 0.89 },
+          expected: "continue_candidate",
+          target: "dependency_impact_repository_exposure_candidate",
+          expectedReview: "review_required",
+          expectedReviewReason: "critical_change",
+        },
+        {
+          name: "auth-scope-review-not-blocked",
+          type: "api",
+          classifier: { material: true, category: "security" as const },
+          route: "auth_or_security_change" as const,
+          options: { critical: 0.96, escalation: 0.89 },
+          expected: "continue_candidate",
+          target: "integration_auth_risk_analysis",
+          expectedReview: "review_required",
+          expectedReviewReason: "critical_change",
+        },
+        {
+          name: "pricing-material-clear",
+          type: "pricing",
+          classifier: { material: true, category: "pricing" as const },
+          route: "pricing_change" as const,
+          expected: "continue_candidate",
+          target: "commercial_impact_analysis",
+          expectedReview: "none",
+        },
+        {
           name: "critical-incomplete",
           type: "deprecation",
           truncated: true,
@@ -202,6 +251,8 @@ describe.skipIf(!enabled)(
           options: { evidence: 0.1 },
           expected: "insufficient_evidence",
           target: "evidence_escalation",
+          expectedReview: "review_required",
+          expectedReviewReason: "evidence_incomplete",
         },
         {
           name: "uncertain-low-confidence",
@@ -210,6 +261,8 @@ describe.skipIf(!enabled)(
           route: "uncertain" as const,
           expected: "escalate",
           target: "evidence_escalation",
+          expectedReview: "review_required",
+          expectedReviewReason: "analysis_uncertain",
         },
         {
           name: "docs-noise",
@@ -226,6 +279,8 @@ describe.skipIf(!enabled)(
           route: "docs_noise" as const,
           expected: "escalate",
           target: "evidence_escalation",
+          expectedReview: "review_required",
+          expectedReviewReason: "classifier_model_conflict",
         },
       ];
 
@@ -258,14 +313,16 @@ describe.skipIf(!enabled)(
           client
             .from("change_intelligence_decisions")
             .select(
-              "proposed_route,proposed_policy_state,policy_mode,active_policy_version,threshold_version,calibration_corpus_version,calibration_version,calibration_fixture_count,threshold_fingerprint,policy_thresholds,readiness_metadata,holdout_metrics",
+              "proposed_route,proposed_policy_state,review_disposition,review_reason,policy_mode,active_policy_version,threshold_version,calibration_corpus_version,calibration_version,calibration_fixture_count,threshold_fingerprint,policy_thresholds,readiness_metadata,holdout_metrics",
             )
             .eq("source_change_id", sourceChangeId)
             .single(),
         );
         expect(decision.proposed_policy_state).toBe(item.expected);
+        expect(decision.review_disposition, item.name).toBe(item.expectedReview ?? "none");
+        expect(decision.review_reason, item.name).toBe(item.expectedReviewReason ?? null);
         expect(decision.policy_mode).toBe("active_calibrated");
-        expect(decision.active_policy_version).toBe("intelligence-policy-active-v1");
+        expect(decision.active_policy_version).toBe("intelligence-policy-active-v2");
         expect(decision.threshold_version).toBe("m1575a-calibrated-thresholds-v1");
         expect(decision.calibration_corpus_version).toBe("explicit-stratified-64-v2");
         expect(decision.calibration_version).toBe("m1575a-stratified-64-v2");
@@ -274,13 +331,17 @@ describe.skipIf(!enabled)(
         const intent = await must(
           client
             .from("intelligence_route_intents")
-            .select("route,policy_state,policy_version,route_target,route_status")
+            .select(
+              "route,policy_state,policy_version,review_disposition,review_reason,route_target,route_status",
+            )
             .eq("source_change_id", sourceChangeId)
             .single(),
         );
         expect(intent.route).toBe(item.expectedRoute ?? item.route);
         expect(intent.policy_state).toBe(item.expected);
-        expect(intent.policy_version).toBe("intelligence-policy-active-v1");
+        expect(intent.policy_version).toBe("intelligence-policy-active-v2");
+        expect(intent.review_disposition, item.name).toBe(item.expectedReview ?? "none");
+        expect(intent.review_reason, item.name).toBe(item.expectedReviewReason ?? null);
         expect(intent.route_target).toBe(item.target);
         if (item.name === "docs-noise") expect(intent.route_status).toBe("suppressed");
         else if (item.expected === "continue_candidate")

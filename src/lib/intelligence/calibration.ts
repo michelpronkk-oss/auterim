@@ -40,6 +40,7 @@ export const CALIBRATION_HOLDOUT_METRICS = Object.freeze({
 });
 
 export const ACTIVE_ROUTING_READINESS = Object.freeze({
+  policySemanticsVersion: "intelligence-policy-semantics-v2",
   corpusVersion: CALIBRATION_CORPUS_VERSION,
   calibrationVersion: CALIBRATION_VERSION,
   fixtureCount: 64,
@@ -58,6 +59,7 @@ export const ACTIVE_ROUTING_READINESS = Object.freeze({
 });
 
 type Readiness = {
+  policySemanticsVersion: string;
   corpusVersion: string;
   calibrationVersion: string;
   fixtureCount: number;
@@ -72,7 +74,7 @@ type Readiness = {
   noHighRiskRouteCollapse: boolean;
 };
 
-export const INTELLIGENCE_ACTIVE_POLICY_VERSION = "intelligence-policy-active-v1";
+export const INTELLIGENCE_ACTIVE_POLICY_VERSION = "intelligence-policy-active-v2";
 
 export function activeCalibrationIsReady(
   readiness: Readiness = ACTIVE_ROUTING_READINESS,
@@ -81,6 +83,7 @@ export function activeCalibrationIsReady(
   const t = thresholds;
   const r = readiness;
   return (
+    r.policySemanticsVersion === "intelligence-policy-semantics-v2" &&
     ACTIVE_THRESHOLD_VERSION === "m1575a-calibrated-thresholds-v1" &&
     r.corpusVersion === "explicit-stratified-64-v2" &&
     r.calibrationVersion === t.calibrationVersion &&
@@ -111,6 +114,7 @@ export function activeThresholdFingerprint(): string {
   // A stable, content-addressed identity. The caller persists only this digest
   // and the bounded threshold object, never source or provider material.
   const canonical = JSON.stringify({
+    policySemanticsVersion: "intelligence-policy-semantics-v2",
     policyVersion: INTELLIGENCE_ACTIVE_POLICY_VERSION,
     thresholdVersion: ACTIVE_THRESHOLD_VERSION,
     corpusVersion: CALIBRATION_CORPUS_VERSION,

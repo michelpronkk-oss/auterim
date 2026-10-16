@@ -58,6 +58,10 @@ export function evaluateWithReadinessGate(input: {
     return {
       route: input.judgment.route,
       state: criticalIncomplete ? ("insufficient_evidence" as const) : ("escalate" as const),
+      reviewDisposition: "review_required" as const,
+      reviewReason: criticalIncomplete
+        ? ("evidence_incomplete" as const)
+        : ("policy_review" as const),
       reason: criticalIncomplete
         ? ("critical_evidence_incomplete" as const)
         : ("model_uncertain" as const),

@@ -6,7 +6,9 @@ import type {
 } from "@/lib/intelligence/taxonomy";
 import type { EvidenceQuality } from "@/lib/intelligence/evidence";
 
-export const INTELLIGENCE_POLICY_VERSION = "intelligence-policy-v1";
+// The database queue identity remains v1 for compatibility; this identifies
+// the changed policy semantics persisted on each decision.
+export const INTELLIGENCE_POLICY_VERSION = "intelligence-policy-semantics-v2";
 
 export type PolicyThresholds = {
   material: number;
@@ -22,6 +24,18 @@ export type PolicyThresholds = {
 export type PolicyDecision = {
   route: IntelligenceRoute;
   state: ProposedPolicyState;
+  reviewDisposition: "none" | "review_required";
+  reviewReason:
+    | "critical_change"
+    | "elevated_risk"
+    | "classifier_review"
+    | "evidence_incomplete"
+    | "evidence_insufficient"
+    | "analysis_uncertain"
+    | "classifier_model_conflict"
+    | "high_risk_docs_noise_conflict"
+    | "policy_review"
+    | null;
   reason:
     | "critical_evidence_incomplete"
     | "evidence_insufficient"
@@ -48,25 +62,49 @@ export function applyIntelligencePolicy(input: {
 }): PolicyDecision {
   const { classifier, judgment, evidenceQuality: quality, thresholds } = input;
   const probability = judgment.probabilities;
-  if (quality.sourceCriticality === "critical" && quality.incomplete) {
+  const reviewReason =
+    probability.criticalChange >= thresholds.criticalChange ||
+    quality.sourceCriticality === "critical"
+      ? "critical_change"
+      : probability.requiresEscalation >= thresholds.requiresEscalation
+        ? "elevated_risk"
+        : classifier?.decisionStatus === "review_required"
+          ? "classifier_review"
+          : null;
+  const decision = (
+    route: IntelligenceRoute,
+    state: ProposedPolicyState,
+    reason: PolicyDecision["reason"],
+    explicitReviewReason: PolicyDecision["reviewReason"] = null,
+  ): PolicyDecision => {
+    const requiredReviewReason = explicitReviewReason ?? reviewReason;
     return {
-      route: "uncertain",
-      state: "insufficient_evidence",
-      reason: "critical_evidence_incomplete",
+      route,
+      state,
+      reason,
+      reviewDisposition: requiredReviewReason ? "review_required" : "none",
+      reviewReason: requiredReviewReason,
     };
+  };
+
+  if (quality.sourceCriticality === "critical" && quality.incomplete) {
+    return decision(
+      "uncertain",
+      "insufficient_evidence",
+      "critical_evidence_incomplete",
+      "evidence_incomplete",
+    );
   }
   if (probability.evidenceSufficient < thresholds.evidenceSufficient) {
-    return { route: "uncertain", state: "insufficient_evidence", reason: "evidence_insufficient" };
+    return decision(
+      "uncertain",
+      "insufficient_evidence",
+      "evidence_insufficient",
+      "evidence_insufficient",
+    );
   }
-  if (
-    judgment.route === "uncertain" ||
-    judgment.confidence < thresholds.routeConfidence ||
-    probability.requiresEscalation >= thresholds.requiresEscalation
-  ) {
-    return { route: judgment.route, state: "escalate", reason: "model_uncertain" };
-  }
-  if (probability.criticalChange >= thresholds.criticalChange) {
-    return { route: judgment.route, state: "escalate", reason: "critical_change_candidate" };
+  if (judgment.route === "uncertain" || judgment.confidence < thresholds.routeConfidence) {
+    return decision(judgment.route, "escalate", "model_uncertain", "analysis_uncertain");
   }
 
   const jevMaterial = probability.material >= thresholds.material;
@@ -84,61 +122,54 @@ export function applyIntelligencePolicy(input: {
     ? classifierRouteForCategory(classifier.category)
     : null;
   if (classifierRoute && classifierRoute !== judgment.route) {
-    return {
-      route: judgment.route,
-      state: "escalate",
-      reason:
-        judgment.route === "docs_noise"
-          ? "classifier_jev_disagree_docs_noise"
-          : "classifier_jev_disagree_material",
-    };
+    return decision(
+      judgment.route,
+      "escalate",
+      judgment.route === "docs_noise"
+        ? "classifier_jev_disagree_docs_noise"
+        : "classifier_jev_disagree_material",
+      "classifier_model_conflict",
+    );
   }
   if (highRiskRoute && jevDocsNoise) {
-    return {
-      route: judgment.route,
-      state: "escalate",
-      reason: "high_risk_route_docs_noise_conflict",
-    };
-  }
-  if (classifier?.decisionStatus === "review_required") {
-    return { route: judgment.route, state: "escalate", reason: "classifier_jev_disagree_material" };
+    return decision(
+      judgment.route,
+      "escalate",
+      "high_risk_route_docs_noise_conflict",
+      "high_risk_docs_noise_conflict",
+    );
   }
   if (classifier?.material && jevMaterial) {
-    return {
-      route: judgment.route,
-      state: "continue_candidate",
-      reason: "classifier_jev_agree_material",
-    };
+    return decision(judgment.route, "continue_candidate", "classifier_jev_agree_material");
   }
   if (classifier?.material && jevDocsNoise) {
-    return {
-      route: judgment.route,
-      state: "escalate",
-      reason: "classifier_jev_disagree_docs_noise",
-    };
+    return decision(
+      judgment.route,
+      "escalate",
+      "classifier_jev_disagree_docs_noise",
+      "classifier_model_conflict",
+    );
   }
   if (!classifier && jevMaterial) {
-    return {
-      route: judgment.route,
-      state: "continue_candidate",
-      reason: "jev_material_without_classifier",
-    };
+    return decision(judgment.route, "continue_candidate", "jev_material_without_classifier");
   }
   if (classifier?.material || jevMaterial) {
-    return {
-      route: judgment.route,
-      state: "escalate",
-      reason: classifier ? "classifier_jev_disagree_material" : "jev_material_without_classifier",
-    };
+    return decision(
+      judgment.route,
+      "escalate",
+      classifier ? "classifier_jev_disagree_material" : "jev_material_without_classifier",
+      "classifier_model_conflict",
+    );
   }
-  if (jevDocsNoise && quality.sourceCriticality !== "critical") {
-    return {
-      route: judgment.route,
-      state: "suppress_candidate",
-      reason: "both_non_material_docs_noise",
-    };
+  if (jevDocsNoise && quality.sourceCriticality !== "critical" && reviewReason === null) {
+    return decision(judgment.route, "suppress_candidate", "both_non_material_docs_noise");
   }
-  return { route: judgment.route, state: "escalate", reason: "no_safe_suppression_evidence" };
+  return decision(
+    judgment.route,
+    "escalate",
+    "no_safe_suppression_evidence",
+    reviewReason ?? "policy_review",
+  );
 }
 
 function classifierRouteForCategory(category: string): IntelligenceRoute | null {
