@@ -223,7 +223,7 @@ const judgment: JevJudgment = {
 describe("M15.77 internal evidence-only source mode on local Docker Supabase", () => {
   it("keeps provider routing global while evidence-only routing and customer actions stay scoped off", async () => {
     if (!client) throw new Error("m1577_evidence_mode_docker_guard_required");
-    expect(url).toBe("http://127.0.0.1:57521");
+    expect(url).toBe(process.env.AUTERIM_M1578_EXPECTED_URL ?? "http://127.0.0.1:57521");
     expect(commitSha).toMatch(/^[a-f0-9]{40,64}$/);
     const existingDependency = await client
       .from("dependency_catalog")
