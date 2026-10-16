@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
+import { createPGliteSnapshotFactory, measurePGliteSetup } from "./pglite-snapshot-factory";
 
 const migrationPaths = [
   "20261002232050_auterim_monitoring_foundation.sql",
@@ -35,9 +36,13 @@ const baselineReliabilityMigration = await readFile(
   "utf8",
 );
 
+const snapshots = createPGliteSnapshotFactory<PGlite>("onboarding");
+
 async function database() {
-  const db = new PGlite();
-  await db.exec(`
+  return snapshots.create("default", async () => {
+    const db = await measurePGliteSetup("onboarding", "construction", async () => new PGlite());
+    await measurePGliteSetup("onboarding", "bootstrap", () =>
+      db.exec(`
     create role anon;
     create role authenticated;
     create role service_role bypassrls;
@@ -48,10 +53,14 @@ async function database() {
     $$;
     grant usage on schema auth to anon, authenticated;
     grant execute on function auth.uid() to anon, authenticated;
-  `);
-  for (const migration of migrations) await db.exec(migration);
-  await db.exec(baselineReliabilityMigration);
-  return db;
+  `),
+    );
+    await measurePGliteSetup("onboarding", "migrations", async () => {
+      for (const migration of migrations) await db.exec(migration);
+      await db.exec(baselineReliabilityMigration);
+    });
+    return db;
+  });
 }
 
 const ownerId = "00000000-0000-4000-8000-000000000001";
@@ -119,6 +128,8 @@ async function addClassifiedChange(
 }
 
 describe("onboarding activation backend", () => {
+  afterAll(async () => snapshots.close());
+
   it("searches the full canonical catalog by exact, partial, case-insensitive, and alias matches with truthful coverage", async () => {
     const db = await database();
     await db.query("insert into auth.users(id) values ($1)", [ownerId]);

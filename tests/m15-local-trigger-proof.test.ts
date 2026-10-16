@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { access, mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  isAllowedM15LocalRuntime,
   isM15LocalAcceptanceEnabled,
   isM15PostCommitRetryFault,
   shouldInjectM15PostCommitRetry,
@@ -11,9 +12,37 @@ import {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+});
+
+describe("M15 local runtime identity predicate", () => {
+  const base = {
+    integrationEnabled: true,
+    supabaseUrl: "http://127.0.0.1:65431",
+    configuredRoot: "C:\\Users\\miche\\Desktop\\Auterim",
+    actualRoot: "C:\\Users\\miche\\Desktop\\Auterim",
+  };
+
+  it("accepts only the canonical Auterim checkout and isolated loopback persistence", () => {
+    expect(isAllowedM15LocalRuntime(base)).toBe(true);
+    expect(isAllowedM15LocalRuntime({ ...base, actualRoot: "C:\\temp\\auterim-worktree" })).toBe(
+      false,
+    );
+    expect(
+      isAllowedM15LocalRuntime({ ...base, configuredRoot: "C:\\temp\\auterim-worktree" }),
+    ).toBe(false);
+    expect(isAllowedM15LocalRuntime({ ...base, supabaseUrl: "https://hosted.supabase.co" })).toBe(
+      false,
+    );
+    expect(isAllowedM15LocalRuntime({ ...base, integrationEnabled: false })).toBe(false);
+  });
 });
 
 describe("M15 local duplicate-delivery gate", () => {
+  beforeEach(() => {
+    vi.spyOn(process, "cwd").mockReturnValue("C:\\Users\\miche\\Desktop\\Auterim");
+  });
+
   it("requires the guarded acceptance flags, exact Auterim root, and isolated loopback database", () => {
     vi.stubEnv("AUTERIM_M15_LOCAL_INTEGRATION", "1");
     vi.stubEnv("AUTERIM_M15_LOCAL_ACCEPTANCE_DUPLICATE_DELIVERIES", "1");
@@ -46,6 +75,10 @@ describe("M15 local duplicate-delivery gate", () => {
 
 describe("M15 local post-commit retry fault gate", () => {
   const queueId = "33333333-3333-4333-8333-333333333333";
+
+  beforeEach(() => {
+    vi.spyOn(process, "cwd").mockReturnValue("C:\\Users\\miche\\Desktop\\Auterim");
+  });
 
   function enableGuardedFault() {
     vi.stubEnv("NODE_ENV", "test");
@@ -106,6 +139,10 @@ describe("M15 local post-commit retry fault gate", () => {
 });
 
 describe("M15 local pre-claim acceptance gate", () => {
+  beforeEach(() => {
+    vi.spyOn(process, "cwd").mockReturnValue("C:\\Users\\miche\\Desktop\\Auterim");
+  });
+
   it("waits for the matching local release signal and stays unavailable outside acceptance", async () => {
     const queueId = randomUUID();
     const root = path.join(process.cwd(), "node_modules", ".cache", "m15-local", "preclaim-gates");
