@@ -10,6 +10,7 @@ export const semanticClassificationSchema = z
       "pricing",
       "api_change",
       "deprecation",
+      "sdk_change",
       "limits",
       "terms",
       "feature_change",

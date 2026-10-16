@@ -15,6 +15,7 @@ const classifiedDecisionSchema = z
       "pricing",
       "api_change",
       "deprecation",
+      "sdk_change",
       "limits",
       "terms",
       "feature_change",

@@ -226,6 +226,18 @@ async function persistDecision(input: {
     judgment: modelJudgment,
     quality: evidence.quality,
     policy,
+    policyIdentity: {
+      mode: "shadow",
+      policyVersion: "intelligence-policy-v1",
+      thresholdVersion: "uncalibrated-conservative-v1",
+      calibrationCorpusVersion: "none",
+      calibrationVersion: "uncalibrated-conservative-v1",
+      calibrationFixtureCount: 0,
+      thresholdFingerprint: null,
+      thresholds: INITIAL_SHADOW_THRESHOLDS,
+      readiness: { shadowOnly: true },
+      holdoutMetrics: null,
+    },
   });
   const intent = await routeRepository.persistRouteIntent(input.sourceChangeId);
   return { intent, policy, started, modelJudgment };

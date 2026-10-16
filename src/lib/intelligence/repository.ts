@@ -1,6 +1,7 @@
 import "server-only";
 import { z } from "zod";
 import type { PolicyDecision } from "@/lib/intelligence/policy";
+import type { PolicyThresholds } from "@/lib/intelligence/policy";
 import type { EvidenceQuality } from "@/lib/intelligence/evidence";
 import type { JevJudgment } from "@/lib/intelligence/taxonomy";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -54,6 +55,7 @@ export interface ChangeIntelligenceRepository {
     judgment: JevJudgment;
     quality: EvidenceQuality;
     policy: PolicyDecision;
+    policyIdentity: PersistedPolicyIdentity;
   }): Promise<void>;
   fail(input: {
     sourceChangeId: string;
@@ -64,6 +66,19 @@ export interface ChangeIntelligenceRepository {
   }): Promise<void>;
   getQueuedSourceChangeIds(limit?: number): Promise<string[]>;
 }
+
+export type PersistedPolicyIdentity = {
+  mode: "active_calibrated" | "shadow" | "fail_closed";
+  policyVersion: string;
+  thresholdVersion: string;
+  calibrationCorpusVersion: string;
+  calibrationVersion: string;
+  calibrationFixtureCount: number;
+  thresholdFingerprint: string | null;
+  thresholds: PolicyThresholds;
+  readiness: Record<string, unknown>;
+  holdoutMetrics: Record<string, unknown> | null;
+};
 
 function throwOnError(error: { message: string } | null) {
   if (error) throw new Error("Intelligence persistence operation failed.");
@@ -116,8 +131,9 @@ export class SupabaseChangeIntelligenceRepository implements ChangeIntelligenceR
     judgment: JevJudgment;
     quality: EvidenceQuality;
     policy: PolicyDecision;
+    policyIdentity: PersistedPolicyIdentity;
   }) {
-    const { error } = await this.client.rpc("record_source_change_intelligence_v2", {
+    const { error } = await this.client.rpc("record_source_change_intelligence_v3", {
       p_source_change_id: input.sourceChangeId,
       p_evidence_fingerprint: input.evidenceFingerprint,
       p_trigger_run_id: input.triggerRunId,
@@ -129,6 +145,16 @@ export class SupabaseChangeIntelligenceRepository implements ChangeIntelligenceR
       p_proposed_policy_state: input.policy.state,
       p_policy_reason: input.policy.reason,
       p_response_model: input.judgment.responseModel || null,
+      p_policy_mode: input.policyIdentity.mode,
+      p_active_policy_version: input.policyIdentity.policyVersion,
+      p_threshold_version: input.policyIdentity.thresholdVersion,
+      p_calibration_corpus_version: input.policyIdentity.calibrationCorpusVersion,
+      p_calibration_version: input.policyIdentity.calibrationVersion,
+      p_calibration_fixture_count: input.policyIdentity.calibrationFixtureCount,
+      p_threshold_fingerprint: input.policyIdentity.thresholdFingerprint,
+      p_policy_thresholds: input.policyIdentity.thresholds,
+      p_readiness_metadata: input.policyIdentity.readiness,
+      p_holdout_metrics: input.policyIdentity.holdoutMetrics,
       p_latency_ms: input.judgment.latencyMs,
       p_input_tokens: input.judgment.inputTokens,
       p_output_tokens: input.judgment.outputTokens,
