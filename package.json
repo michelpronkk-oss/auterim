@@ -12,7 +12,7 @@
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",
     "test": "vitest",
-    "test:run": "vitest run",
+    "test:run": "node scripts/test-run.mjs",
     "test:cli": "vitest run packages/cli/tests",
     "cli:build": "npm --prefix packages/cli run build",
     "cli:typecheck": "npm --prefix packages/cli run typecheck",
