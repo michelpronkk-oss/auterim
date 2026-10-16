@@ -1429,7 +1429,7 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
     expect(afterFailure).toEqual({ status: "failed", coverage_state: "failed" });
   }, 120_000);
 
-  it("rejects completion when a v2 relation lacks source provenance", async () => {
+  it("rejects completion when a v3 relation lacks source provenance", async () => {
     const client = requireAdmin();
     const fixture = await createProtectedRepoFixture(client);
     const claim = await claimCodeAnalysisRun({ ...fixture, commitSha }, client);
@@ -1491,7 +1491,7 @@ describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
     expect(failed).toEqual({ status: "failed", coverage_state: "failed" });
   }, 120_000);
 
-  it("rejects v2 completion when a source reference lacks occurrence columns", async () => {
+  it("rejects v3 completion when a source reference lacks occurrence columns", async () => {
     const client = requireAdmin();
     const fixture = await createProtectedRepoFixture(client);
     const claim = await claimCodeAnalysisRun({ ...fixture, commitSha }, client);

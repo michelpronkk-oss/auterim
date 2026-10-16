@@ -1,6 +1,7 @@
 import type { CoverageState } from "@/lib/code-intelligence/analyzer";
 import ts from "typescript";
 import { collectHttpClientOrigins, isRecognizedHttpCall } from "@/lib/code-intelligence/http-call";
+import { normalizeHttpEndpointIdentity } from "@/lib/code-intelligence/endpoint";
 
 export const EXTERNAL_REFERENCE_TYPES = [
   "package",
@@ -54,6 +55,30 @@ function resemblesCredential(value: string) {
   if (trimmed.length < 28 || !/^[A-Za-z0-9_-]+$/.test(trimmed)) return false;
   const alphabet = new Set(trimmed).size;
   return alphabet >= 16 && alphabet / trimmed.length > 0.45;
+}
+
+function staticEndpointString(node: ts.Expression): string | null {
+  if (ts.isStringLiteralLike(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+  if (ts.isParenthesizedExpression(node)) return staticEndpointString(node.expression);
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = staticEndpointString(node.left);
+    const right = staticEndpointString(node.right);
+    return left === null || right === null ? null : left + right;
+  }
+  return null;
+}
+
+function hasSensitiveEndpointQuery(raw: string) {
+  try {
+    return [...new URL(raw).searchParams].some(
+      ([name, value]) =>
+        /(?:api[-_]?key|access[-_]?token|auth(?:orization)?|credential|password|secret|signature|token)/i.test(
+          name,
+        ) || resemblesCredential(value),
+    );
+  } catch {
+    return true;
+  }
 }
 
 export function persistedCredentialLikeValueCount(values: string[]) {
@@ -170,14 +195,8 @@ export function safeReadbackValue(type: string, value: string): string | null {
     case "event":
       return /^[A-Za-z0-9_.:-]{3,160}$/.test(value) ? value : null;
     case "endpoint": {
-      try {
-        const url = new URL(value);
-        if (!new Set(["http:", "https:"]).has(url.protocol) || url.username || url.password)
-          return null;
-        return `${url.origin}${url.pathname}`.slice(0, 512);
-      } catch {
-        return null;
-      }
+      if (hasSensitiveEndpointQuery(value)) return null;
+      return normalizeHttpEndpointIdentity(value);
     }
     case "dynamic_endpoint":
       return value === "[dynamic]" ? value : null;
@@ -222,12 +241,39 @@ export function safeSourceSpanMatch(
     case "event":
       return span.includes(normalizedValue);
     case "endpoint": {
-      try {
-        const url = new URL(normalizedValue);
-        return span.includes(url.hostname) || span.includes(url.pathname);
-      } catch {
-        return false;
+      const wanted = normalizeHttpEndpointIdentity(normalizedValue);
+      if (!wanted) return false;
+      const parsed = ts.createSourceFile(
+        path,
+        source,
+        ts.ScriptTarget.Latest,
+        true,
+        /\.tsx$/i.test(path)
+          ? ts.ScriptKind.TSX
+          : /\.jsx?$/i.test(path) || /\.[cm]js$/i.test(path)
+            ? ts.ScriptKind.JS
+            : ts.ScriptKind.TS,
+      );
+      const origins = collectHttpClientOrigins(parsed);
+      const pending: ts.Node[] = [parsed];
+      while (pending.length) {
+        const node = pending.pop()!;
+        if (ts.isCallExpression(node) && node.arguments[0] && isRecognizedHttpCall(node, origins)) {
+          const callStartLine =
+            parsed.getLineAndCharacterOfPosition(node.getStart(parsed)).line + 1;
+          const callEndLine = parsed.getLineAndCharacterOfPosition(node.getEnd()).line + 1;
+          const raw = staticEndpointString(node.arguments[0]);
+          if (
+            callStartLine >= startLine &&
+            callEndLine <= endLine &&
+            raw !== null &&
+            normalizeHttpEndpointIdentity(raw) === wanted
+          )
+            return true;
+        }
+        node.forEachChild((child) => pending.push(child));
       }
+      return false;
     }
     case "dynamic_endpoint":
       return matchesDynamicHttpCall(source, path, startLine, endLine);
@@ -255,15 +301,6 @@ function matchesDynamicHttpCall(source: string, path: string, startLine: number,
         : ts.ScriptKind.TS,
   );
   const origins = collectHttpClientOrigins(parsed);
-  const isStaticString = (node: ts.Expression): boolean => {
-    if (ts.isStringLiteralLike(node) || ts.isNoSubstitutionTemplateLiteral(node)) return true;
-    if (ts.isParenthesizedExpression(node)) return isStaticString(node.expression);
-    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken)
-      return isStaticString(node.left) && isStaticString(node.right);
-    if (ts.isTemplateExpression(node))
-      return node.templateSpans.every((part) => isStaticString(part.expression));
-    return false;
-  };
   const stack: ts.Node[] = [parsed];
   while (stack.length) {
     const node = stack.pop()!;
@@ -271,7 +308,7 @@ function matchesDynamicHttpCall(source: string, path: string, startLine: number,
       const start = parsed.getLineAndCharacterOfPosition(node.getStart(parsed)).line + 1;
       const end = parsed.getLineAndCharacterOfPosition(node.getEnd()).line + 1;
       if (start >= startLine && end <= endLine) {
-        if (!isStaticString(node.arguments[0]!)) return true;
+        if (staticEndpointString(node.arguments[0]!) === null) return true;
       }
     }
     node.forEachChild((child) => stack.push(child));
@@ -402,41 +439,6 @@ export function relationEvidenceMatchesSource(input: {
   }
   const span = source.slice(start, end);
   const matchingReference = input.matchingExternalReference;
-  const staticStringValue = (node: ts.Expression): string | null => {
-    if (ts.isStringLiteralLike(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
-    if (ts.isParenthesizedExpression(node)) return staticStringValue(node.expression);
-    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-      const left = staticStringValue(node.left);
-      const right = staticStringValue(node.right);
-      return left === null || right === null ? null : left + right;
-    }
-    if (ts.isTemplateExpression(node)) {
-      let value = node.head.text;
-      for (const part of node.templateSpans) {
-        if (
-          !ts.isStringLiteralLike(part.expression) &&
-          !ts.isNoSubstitutionTemplateLiteral(part.expression)
-        )
-          return null;
-        value += part.expression.text + part.literal.text;
-      }
-      return value;
-    }
-    return null;
-  };
-  const normalizedEndpoint = (raw: string) => {
-    try {
-      const value = new URL(raw);
-      if (!["http:", "https:"].includes(value.protocol) || !value.hostname) return null;
-      value.username = "";
-      value.password = "";
-      value.search = "";
-      value.hash = "";
-      return `${value.protocol}//${value.host.toLowerCase()}${value.pathname}`.slice(0, 512);
-    } catch {
-      return null;
-    }
-  };
   const callMemberPath = (expression: ts.Expression) => {
     const parts: string[] = [];
     let current = expression;
@@ -739,19 +741,22 @@ export function relationEvidenceMatchesSource(input: {
         matchingReference &&
         ["endpoint", "dynamic_endpoint"].includes(matchingReference.referenceType) &&
         matchingReference.normalizedValue === to.name &&
-        exactNodes.some((node) => {
+        nodes.some((node) => {
           if (!ts.isCallExpression(node) || !node.arguments[0]) return false;
           if (!isRecognizedHttpCall(node, httpClientOrigins)) return false;
+          if (node.arguments[0].getStart(parsed) !== start || node.arguments[0].getEnd() !== end)
+            return false;
           if (matchingReference.redacted)
             return (
               matchingReference.normalizedValue === "[redacted]" &&
               matchingReference.startColumn === startColumn &&
               matchingReference.endColumn === endColumn
             );
-          const raw = staticStringValue(node.arguments[0]);
+          const raw = staticEndpointString(node.arguments[0]);
           return matchingReference.referenceType === "dynamic_endpoint"
             ? raw === null
-            : raw !== null && normalizedEndpoint(raw) === matchingReference.normalizedValue;
+            : raw !== null &&
+                normalizeHttpEndpointIdentity(raw) === matchingReference.normalizedValue;
         }),
       );
     case "REFERENCES_SCHEMA":

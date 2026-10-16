@@ -130,6 +130,87 @@ describe("deterministic code intelligence", () => {
     ).toEqual([]);
   });
 
+  it("extracts static endpoints from global fetch and explicitly fetch-typed injected methods", () => {
+    const result = analyzeCodeSnapshot([
+      {
+        path: "src/http.ts",
+        text: [
+          'fetch("https://api.example.com/v1/items");',
+          "class Client {",
+          "  constructor(private readonly request: typeof fetch = fetch) {}",
+          '  async send() { return this.request("https://api.example.com/v1/other", { method: "POST" }); }',
+          "}",
+          "fetch(`https://api.example.com/v1/template`);",
+        ].join("\n"),
+      },
+    ]);
+    const endpoints = result.externalReferences.filter((item) => item.referenceType === "endpoint");
+    expect(endpoints.map((item) => item.normalizedValue).sort()).toEqual(
+      [
+        "https://api.example.com/v1/items",
+        "https://api.example.com/v1/other",
+        "https://api.example.com/v1/template",
+      ].sort(),
+    );
+    const injected = endpoints.find((item) => item.normalizedValue.endsWith("/v1/other"));
+    expect(injected).toMatchObject({
+      path: "src/http.ts",
+      startLine: 4,
+      endLine: 4,
+      confidenceClass: "exact",
+      extractorType: "typescript-compiler-api:http-call-v1",
+    });
+    expect(injected!.endColumn).toBeGreaterThan(injected!.startColumn!);
+  });
+
+  it("does not promote dynamic/interpolated fetch arguments or unrelated URL strings to exact endpoints", () => {
+    const result = analyzeCodeSnapshot([
+      {
+        path: "src/dynamic.ts",
+        text: [
+          "declare const baseUrl: string;",
+          "declare const path: string;",
+          "fetch(baseUrl + path);",
+          "fetch(`${baseUrl}/v1/items`);",
+          'const documentation = "https://api.example.com/v1/documented";',
+        ].join("\n"),
+      },
+    ]);
+    expect(result.externalReferences.filter((item) => item.referenceType === "endpoint")).toEqual(
+      [],
+    );
+    expect(
+      result.externalReferences.filter((item) => item.referenceType === "dynamic_endpoint"),
+    ).toHaveLength(2);
+  });
+
+  it("preserves non-sensitive query and trailing-slash endpoint identity while redacting credential queries", () => {
+    const result = analyzeCodeSnapshot([
+      {
+        path: "src/endpoints.ts",
+        text: [
+          'fetch("https://api.example.com/v1/items?api-version=v2");',
+          'fetch("https://api.example.com/v1/items/");',
+          'fetch("https://api.example.com/v1/items?access_token=short-test-token");',
+        ].join("\n"),
+      },
+    ]);
+    expect(result.externalReferences.filter((item) => item.referenceType === "endpoint")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          normalizedValue: "https://api.example.com/v1/items?api-version=v2",
+          redacted: false,
+        }),
+        expect.objectContaining({
+          normalizedValue: "https://api.example.com/v1/items/",
+          redacted: false,
+        }),
+        expect.objectContaining({ normalizedValue: "[redacted]", redacted: true }),
+      ]),
+    );
+    expect(JSON.stringify(result)).not.toContain("short-test-token");
+  });
+
   it("uses the same scoped HTTP-call rules for extraction and source readback", () => {
     const source = [
       'import axios from "axios";',
@@ -573,7 +654,7 @@ describe("deterministic code intelligence", () => {
     const base = { repositoryId: "repo-id", commitSha: "a".repeat(40) };
     expect(createCodeAnalysisIdempotencyKey(base)).toBe(createCodeAnalysisIdempotencyKey(base));
     expect(createCodeAnalysisIdempotencyKey(base)).not.toBe(
-      createCodeAnalysisIdempotencyKey({ ...base, analyzerVersion: "code-intelligence-v3" }),
+      createCodeAnalysisIdempotencyKey({ ...base, analyzerVersion: "code-intelligence-v4" }),
     );
     expect(createCodeAnalysisIdempotencyKey(base)).not.toBe(
       createCodeAnalysisIdempotencyKey({ ...base, analysisProfile: "other-profile" }),

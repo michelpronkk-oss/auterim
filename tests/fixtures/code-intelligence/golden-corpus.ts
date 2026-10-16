@@ -64,10 +64,13 @@ export const CODE_INTELLIGENCE_GOLDEN_CORPUS: GoldenCodeCase[] = [
     files: [
       {
         path: "src/http.ts",
-        text: 'fetch("https://" + "api.example.test/v1/items?token=privatevalue");\nfetch(`${baseUrl}/v2/items`);',
+        text: 'fetch("https://" + "api.example.test/v1/items?api-version=v1");\nfetch(`${baseUrl}/v2/items`);',
       },
     ],
-    expected: { endpoints: ["https://api.example.test/v1/items"], dynamicEndpoints: 1 },
+    expected: {
+      endpoints: ["https://api.example.test/v1/items?api-version=v1"],
+      dynamicEndpoints: 1,
+    },
   },
   {
     name: "environment names and package declared without import",

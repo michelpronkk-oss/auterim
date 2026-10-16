@@ -23,6 +23,15 @@ const client =
     ? createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } })
     : null;
 
+const canonicalFixture = {
+  workspaceId: "e140d48e-9dc0-4552-a9a4-a81fe3872422",
+  productId: "de1f2a12-de3c-4644-8892-b6c2d458a300",
+  dependencyId: "3cfb1bb7-1d76-4692-932b-24e94b66f346",
+  workspaceDependencyId: "867eb92b-2ed2-4917-ac68-44a22773e369",
+  repositoryId: "3b4f4fe6-cbbd-4bbd-a340-71f7c268e2c4",
+  productRepositoryId: "a244fd9a-cc2b-49d2-aaa8-36147437837e",
+};
+
 // The Supabase test client has no generated Database type here; fixture assertions validate each returned shape.
 /* eslint-disable @typescript-eslint/no-explicit-any */
 async function row(
@@ -39,7 +48,12 @@ async function noError(query: PromiseLike<{ error: { message: string } | null }>
   if (result.error) throw new Error("m1577_evidence_mode_fixture_failed");
 }
 
-async function createTarget(db: SupabaseClient, dependencyId: string, label: string) {
+async function createTarget(
+  db: SupabaseClient,
+  dependencyId: string,
+  label: string,
+  identity?: typeof canonicalFixture,
+) {
   const nonce = randomUUID();
   const user = await db.auth.admin.createUser({
     email: `m1577-evidence-${nonce}@auterim.local`,
@@ -51,6 +65,7 @@ async function createTarget(db: SupabaseClient, dependencyId: string, label: str
     db
       .from("workspaces")
       .insert({
+        ...(identity ? { id: identity.workspaceId } : {}),
         name: `M15.77 evidence ${label}`,
         created_by: user.data.user.id,
       })
@@ -68,6 +83,7 @@ async function createTarget(db: SupabaseClient, dependencyId: string, label: str
     db
       .from("workspace_products")
       .insert({
+        ...(identity ? { id: identity.productId } : {}),
         workspace_id: workspace.id,
         name: `Evidence ${label}`,
         slug: `m1577-evidence-${nonce.slice(0, 10)}`,
@@ -96,11 +112,12 @@ async function createTarget(db: SupabaseClient, dependencyId: string, label: str
     db
       .from("repositories")
       .insert({
+        ...(identity ? { id: identity.repositoryId } : {}),
         workspace_id: workspace.id,
         connection_id: connection.id,
         external_id: 4_000_000 + Math.floor(Math.random() * 1_000_000),
-        owner: "fixture-owner",
-        name: `repo-${label}`,
+        owner: identity ? "michelpronkk-oss" : "fixture-owner",
+        name: identity ? "auterim" : `repo-${label}`,
         default_branch: "main",
         private: true,
         selected_for_protection: true,
@@ -111,6 +128,7 @@ async function createTarget(db: SupabaseClient, dependencyId: string, label: str
   );
   await noError(
     db.from("workspace_product_repositories").insert({
+      ...(identity ? { id: identity.productRepositoryId } : {}),
       workspace_id: workspace.id,
       protected_product_id: product.id,
       repository_id: repository.id,
@@ -121,6 +139,7 @@ async function createTarget(db: SupabaseClient, dependencyId: string, label: str
   );
   await noError(
     db.from("workspace_dependencies").insert({
+      ...(identity ? { id: identity.workspaceDependencyId } : {}),
       workspace_id: workspace.id,
       protected_product_id: product.id,
       dependency_id: dependencyId,
@@ -155,11 +174,11 @@ const classifier: SemanticClassifier = {
     return {
       classification: {
         material: true,
-        category: "sdk_change",
-        affectedEntities: ["@supabase/supabase-js"],
+        category: "deprecation",
+        affectedEntities: ["POST https://api.openai.com/v1/responses"],
         severityHint: "high",
         confidence: 0.99,
-        summary: "A material SDK compatibility change.",
+        summary: "A material endpoint deprecation.",
         evidence: [{ type: "added", excerpt: excerpt.slice(0, 280) }],
         reasoningSummary: "Bounded local acceptance fixture.",
       },
@@ -170,7 +189,7 @@ const classifier: SemanticClassifier = {
 };
 
 const judgment: JevJudgment = {
-  route: "sdk_change",
+  route: "deprecation",
   confidence: 0.99,
   probabilities: {
     material: 0.99,
@@ -180,13 +199,13 @@ const judgment: JevJudgment = {
     requiresEscalation: 0.89,
     route: {
       docs_noise: 0.001,
-      deprecation: 0.001,
+      deprecation: 0.99,
       breaking_api_change: 0.001,
       auth_or_security_change: 0.001,
       schema_or_contract_change: 0.001,
       pricing_change: 0.001,
       limits_or_quota_change: 0.001,
-      sdk_change: 0.99,
+      sdk_change: 0.001,
       webhook_or_event_change: 0.001,
       feature_change: 0.001,
       availability_or_runtime_change: 0.001,
@@ -206,27 +225,40 @@ describe("M15.77 internal evidence-only source mode on local Docker Supabase", (
     if (!client) throw new Error("m1577_evidence_mode_docker_guard_required");
     expect(url).toBe("http://127.0.0.1:57521");
     expect(commitSha).toMatch(/^[a-f0-9]{40,64}$/);
-    const dependency = await row(
-      client
-        .from("dependency_catalog")
-        .insert({
-          slug: `m1577-evidence-${randomUUID().replaceAll("-", "").slice(0, 16)}`,
-          name: "M15.77 evidence mode fixture dependency",
-          category: "developer-tools",
-          website_url: "https://fixture.invalid",
-        })
-        .select("id")
-        .single(),
-    );
-    const targetA = await createTarget(client, dependency.id, "a");
-    const targetB = await createTarget(client, dependency.id, "b");
+    const existingDependency = await client
+      .from("dependency_catalog")
+      .select("id")
+      .eq("id", canonicalFixture.dependencyId)
+      .maybeSingle();
+    if (existingDependency.error) throw new Error("m1577_openai_dependency_read_failed");
+    let dependencyId: string;
+    if (existingDependency.data) {
+      dependencyId = existingDependency.data.id;
+    } else {
+      const inserted: { id: string } = await row(
+        client
+          .from("dependency_catalog")
+          .insert({
+            id: canonicalFixture.dependencyId,
+            slug: "openai-m1577-canonical-fixture",
+            name: "OpenAI",
+            category: "developer-tools",
+            website_url: "https://api.openai.com",
+          })
+          .select("id")
+          .single(),
+      );
+      dependencyId = inserted.id;
+    }
+    const targetA = await createTarget(client, dependencyId, "a", canonicalFixture);
+    const targetB = await createTarget(client, dependencyId, "b");
     const anonClient = createClient(url, process.env.AUTERIM_M1576_ANON_KEY ?? "", {
       auth: { autoRefreshToken: false, persistSession: false },
     });
     const anonymousCreate = await anonClient.rpc("create_internal_test_source", {
       p_workspace_id: targetA.workspaceId,
       p_product_id: targetA.productId,
-      p_dependency_id: dependency.id,
+      p_dependency_id: dependencyId,
       p_internal_key: `anon-${randomUUID().replaceAll("-", "").slice(0, 16)}`,
     });
     expect(anonymousCreate.error).not.toBeNull();
@@ -234,7 +266,7 @@ describe("M15.77 internal evidence-only source mode on local Docker Supabase", (
       client
         .from("source_catalog")
         .insert({
-          dependency_id: dependency.id,
+          dependency_id: dependencyId,
           name: `Provider fixture ${randomUUID().slice(0, 8)}`,
           source_type: "changelog",
           url: "https://fixture.invalid/provider-changelog",
@@ -273,10 +305,12 @@ describe("M15.77 internal evidence-only source mode on local Docker Supabase", (
     const internal = await persistInternalTestSourceChange({
       workspaceId: targetA.workspaceId,
       productId: targetA.productId,
-      dependencyId: dependency.id,
+      dependencyId,
       acceptanceKey: `m1577-${randomUUID().replaceAll("-", "").slice(0, 20)}`,
-      baseline: "The SDK supports the existing response contract.",
-      changed: "The SDK removes the existing response contract and requires a migration.",
+      baseline:
+        "POST https://api.openai.com/v1/responses is available and applications may send Responses API requests to this endpoint.",
+      changed:
+        "POST https://api.openai.com/v1/responses is removed in the next API version. Applications using this endpoint must migrate before upgrading because requests to the existing endpoint will no longer work.",
     });
     const internalChange = await row(
       client
@@ -331,7 +365,7 @@ describe("M15.77 internal evidence-only source mode on local Docker Supabase", (
       client
         .from("intelligence_route_intents")
         .select(
-          "id,source_change_id,workspace_id,scope_product_id,route_target,route_status,review_disposition,review_reason",
+          "id,source_change_id,workspace_id,scope_product_id,route,route_target,route_status,review_disposition,review_reason",
         )
         .in("source_change_id", [providerChange.changeId, internal.sourceChangeId]),
     );
@@ -351,6 +385,8 @@ describe("M15.77 internal evidence-only source mode on local Docker Supabase", (
     expect(internalIntent).toMatchObject({
       workspace_id: targetA.workspaceId,
       scope_product_id: targetA.productId,
+      route: "deprecation",
+      route_target: "dependency_product_impact",
       route_status: "pending",
       review_disposition: "review_required",
       review_reason: "critical_change",
@@ -361,7 +397,7 @@ describe("M15.77 internal evidence-only source mode on local Docker Supabase", (
       .eq("id", internalIntent.id);
     expect(attemptedIntentReviewRewrite.error).not.toBeNull();
 
-    const exactFiles: SnapshotFile[] = ["package.json", "src/lib/supabase/server.ts"].map(
+    const exactFiles: SnapshotFile[] = ["package.json", "src/lib/monitoring/classification.ts"].map(
       (path) => {
         const bytes = execFileSync("git", ["show", `${commitSha}:${path}`], {
           maxBuffer: 1_000_000,
@@ -393,6 +429,17 @@ describe("M15.77 internal evidence-only source mode on local Docker Supabase", (
     if (claim.status !== "claimed" || !claim.claimToken)
       throw new Error("m1577_evidence_analysis_claim_failed");
     const analysis = analyzeCodeSnapshot(exactFiles);
+    const endpointFact = analysis.externalReferences.find(
+      (reference) =>
+        reference.referenceType === "endpoint" &&
+        reference.normalizedValue === "https://api.openai.com/v1/responses",
+    );
+    expect(endpointFact).toMatchObject({
+      path: "src/lib/monitoring/classification.ts",
+      startLine: 114,
+      endLine: 114,
+      confidenceClass: "exact",
+    });
     await persistCodeAnalysis(
       {
         analysisRunId: claim.analysisRunId,
@@ -429,6 +476,102 @@ describe("M15.77 internal evidence-only source mode on local Docker Supabase", (
       ).repository_id,
     });
     expect(graph.status).toBe("completed");
+    const repositoryId = (
+      await row(
+        client
+          .from("workspace_product_repositories")
+          .select("repository_id")
+          .eq("workspace_id", targetA.workspaceId)
+          .eq("protected_product_id", targetA.productId)
+          .single(),
+      )
+    ).repository_id as string;
+    const beforeReplay = await Promise.all(
+      ["impact_graph_builds", "impact_graph_nodes", "impact_graph_edges"].map(async (table) => {
+        const result = await client
+          .from(table)
+          .select("id", { count: "exact", head: true })
+          .eq(
+            table === "impact_graph_builds" ? "route_intent_id" : "graph_build_id",
+            table === "impact_graph_builds" ? internalIntent.id : graph.graphBuildId,
+          );
+        if (result.error || result.count === null)
+          throw new Error("m1577_graph_idempotency_count_unavailable");
+        return result.count;
+      }),
+    );
+    const replay = await buildImpactGraph({
+      routeIntentId: internalIntent.id,
+      analysisRunId: claim.analysisRunId,
+      productId: targetA.productId,
+      repositoryId,
+    });
+    expect(replay).toMatchObject({
+      graphBuildId: graph.graphBuildId,
+      status: "completed",
+      replayed: true,
+    });
+    const afterReplay = await Promise.all(
+      ["impact_graph_builds", "impact_graph_nodes", "impact_graph_edges"].map(async (table) => {
+        const result = await client
+          .from(table)
+          .select("id", { count: "exact", head: true })
+          .eq(
+            table === "impact_graph_builds" ? "route_intent_id" : "graph_build_id",
+            table === "impact_graph_builds" ? internalIntent.id : graph.graphBuildId,
+          );
+        if (result.error || result.count === null)
+          throw new Error("m1577_graph_idempotency_count_unavailable");
+        return result.count;
+      }),
+    );
+    expect(afterReplay).toEqual(beforeReplay);
+    const exactReference = await row(
+      client
+        .from("code_external_references")
+        .select("id,path,start_line,normalized_value,reference_type")
+        .eq("analysis_run_id", claim.analysisRunId)
+        .eq("reference_type", "endpoint")
+        .eq("normalized_value", "https://api.openai.com/v1/responses")
+        .single(),
+    );
+    expect(exactReference).toMatchObject({
+      path: "src/lib/monitoring/classification.ts",
+      start_line: 114,
+      reference_type: "endpoint",
+      normalized_value: "https://api.openai.com/v1/responses",
+    });
+    const graphEdges = await row(
+      client
+        .from("impact_graph_edges")
+        .select(
+          "edge_type,edge_kind,code_reference_id,evidence_path,evidence_start_line,evidence_chain",
+        )
+        .eq("graph_build_id", graph.graphBuildId),
+    );
+    expect(graphEdges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          edge_type: "REFERENCES_EXTERNAL",
+          edge_kind: "observed",
+          code_reference_id: exactReference.id,
+          evidence_path: "src/lib/monitoring/classification.ts",
+          evidence_start_line: 114,
+        }),
+        expect.objectContaining({
+          edge_type: "CHANGE_AFFECTS_ENDPOINT",
+          edge_kind: "inferred",
+          code_reference_id: exactReference.id,
+        }),
+        expect.objectContaining({
+          edge_type: "PRODUCT_POTENTIALLY_AFFECTED_BY_CHANGE",
+          edge_kind: "inferred",
+          evidence_chain: expect.arrayContaining([
+            expect.objectContaining({ type: "workspace_product_repository" }),
+          ]),
+        }),
+      ]),
+    );
     const graphRow = await row(
       client
         .from("impact_graph_builds")
@@ -492,6 +635,7 @@ describe("M15.77 internal evidence-only source mode on local Docker Supabase", (
     expect(internalTargets[0]).toMatchObject({
       workspace_id: targetA.workspaceId,
       product_id: targetA.productId,
+      repository_id: repositoryId,
     });
     expect(
       customerImpactDispatchAllowed({ source_mode: "provider", processing_mode: "customer" }),
