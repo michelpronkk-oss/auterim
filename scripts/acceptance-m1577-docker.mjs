@@ -150,7 +150,9 @@ const evidenceModeResult = spawnSync(
   [
     path.join(root, "node_modules/vitest/vitest.mjs"),
     "run",
-    "tests/internal-evidence-only-source-mode.docker.integration.test.ts",
+    "--config",
+    "vitest.m1577-docker.config.mts",
+    "scripts/m1577-evidence-only-source-mode.docker.integration.test.ts",
   ],
   { cwd: root, env, stdio: "inherit" },
 );
