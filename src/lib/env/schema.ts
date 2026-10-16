@@ -123,6 +123,21 @@ export const environmentSchema = z
     AUTERIM_PREFLIGHT_FIXTURE_ENTITY: z.preprocess(emptyToUndefined, z.string().trim().optional()),
     OPENAI_API_KEY: optionalSecret,
     OPENROUTER_API_KEY: optionalSecret,
+    FIX_CODING_MODEL_PROVIDER: z.preprocess(
+      emptyToUndefined,
+      z
+        .string()
+        .trim()
+        .regex(/^[a-zA-Z0-9._:-]{1,80}$/)
+        .optional(),
+    ),
+    FIX_CODING_MODEL_NAME: z.preprocess(
+      emptyToUndefined,
+      z.string().trim().min(1).max(160).optional(),
+    ),
+    FIX_CODING_MODEL_ENDPOINT: optionalUrl,
+    FIX_CODING_MODEL_API_KEY: optionalSecret,
+    FIX_GITHUB_DRAFT_PR_WRITES: z.preprocess(emptyToUndefined, z.enum(["0", "1"]).default("0")),
     AUTERIM_INTELLIGENCE_PROVIDER: z.preprocess(
       emptyToUndefined,
       z.enum(["openrouter"]).default("openrouter"),
@@ -151,6 +166,19 @@ export const environmentSchema = z
   .superRefine((environment, context) => {
     const hasUrl = Boolean(environment.NEXT_PUBLIC_SUPABASE_URL);
     const hasPublishableKey = Boolean(environment.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY);
+    const fixModelFields = [
+      environment.FIX_CODING_MODEL_PROVIDER,
+      environment.FIX_CODING_MODEL_NAME,
+      environment.FIX_CODING_MODEL_ENDPOINT,
+      environment.FIX_CODING_MODEL_API_KEY,
+    ];
+    if (fixModelFields.some(Boolean) && fixModelFields.some((value) => !value)) {
+      context.addIssue({
+        code: "custom",
+        message: "Configure all Fix Engine coding-model fields together.",
+        path: ["FIX_CODING_MODEL_PROVIDER"],
+      });
+    }
 
     if (hasUrl !== hasPublishableKey) {
       context.addIssue({

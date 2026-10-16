@@ -47,6 +47,9 @@
     "project:check": "node --experimental-strip-types scripts/project-check.mts",
     "acceptance:m1576:docker": "node scripts/acceptance-m1576-docker.mjs",
     "acceptance:m1577:docker": "node scripts/acceptance-m1577-docker.mjs",
+    "acceptance:m1578:docker": "node scripts/acceptance-m1578-docker.mjs",
+    "eval:fix-engine": "vitest run tests/fix-engine.test.ts",
+    "benchmark:fix-engine": "node scripts/benchmark-fix-engine.mjs",
     "eval:code-intelligence": "vitest run tests/code-intelligence.test.ts"
   },
   "dependencies": {

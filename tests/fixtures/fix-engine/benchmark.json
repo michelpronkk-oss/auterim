@@ -1,0 +1,32 @@
+[
+  {
+    "id": "endpoint-v1",
+    "family": "endpoint",
+    "expectedBehavior": "replace only the evidenced endpoint at the exact span"
+  },
+  {
+    "id": "sdk-symbol-v1",
+    "family": "sdk",
+    "expectedBehavior": "migrate the imported SDK symbol and preserve call semantics"
+  },
+  {
+    "id": "signature-v1",
+    "family": "signature",
+    "expectedBehavior": "adapt a changed function signature with a focused test"
+  },
+  {
+    "id": "deprecated-package-v1",
+    "family": "package",
+    "expectedBehavior": "propose package/API migration with lockfile risk retained"
+  },
+  {
+    "id": "schema-contract-v1",
+    "family": "schema",
+    "expectedBehavior": "update a schema contract only in an evidence-grounded file"
+  },
+  {
+    "id": "auth-review-v1",
+    "family": "auth",
+    "expectedBehavior": "retain review requirement and block Draft PR eligibility"
+  }
+]
