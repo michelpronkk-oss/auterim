@@ -393,7 +393,7 @@ export function collectHttpClientOrigins(source: ts.SourceFile): HttpClientOrigi
 export function isRecognizedHttpCall(call: ts.CallExpression, origins: HttpClientOriginIndex) {
   if (origins.bindingPatternTruncated) return false;
   const callable = memberChain(call.expression);
-  if (!callable) return false;
+  if (!callable) return isFetchTypedThisPropertyCall(call);
   if (callable.root === "fetch" && callable.path.length === 0)
     if (bindingAt(origins, call, "fetch") === null) return true;
   const origin = originAt(origins, call, callable.root);
@@ -403,10 +403,61 @@ export function isRecognizedHttpCall(call: ts.CallExpression, origins: HttpClien
     (origin.namespaceImport && callable.path.length === 0
       ? false
       : origin.member
-      ? HTTP_CLIENT_METHODS.has(origin.member) && callable.path.length === 0
-      : callable.path.length === 0 ||
-        (callable.path.length === 1 && HTTP_CLIENT_METHODS.has(callable.path[0]!))),
+        ? HTTP_CLIENT_METHODS.has(origin.member) && callable.path.length === 0
+        : callable.path.length === 0 ||
+          (callable.path.length === 1 && HTTP_CLIENT_METHODS.has(callable.path[0]!))),
   );
+}
+
+function isFetchType(type: ts.TypeNode | undefined): boolean {
+  if (!type || !ts.isTypeQueryNode(type)) return false;
+  const name = type.exprName;
+  if (ts.isIdentifier(name)) return name.text === "fetch";
+  return (
+    ts.isQualifiedName(name) &&
+    ts.isIdentifier(name.left) &&
+    name.left.text === "globalThis" &&
+    name.right.text === "fetch"
+  );
+}
+
+function isFetchTypedThisPropertyCall(call: ts.CallExpression): boolean {
+  const target = call.expression;
+  if (
+    !ts.isPropertyAccessExpression(target) ||
+    target.expression.kind !== ts.SyntaxKind.ThisKeyword
+  )
+    return false;
+
+  const propertyName = target.name.text;
+  for (let current: ts.Node | undefined = call.parent; current; current = current.parent) {
+    if (!ts.isClassLike(current)) continue;
+    return current.members.some((member) => {
+      if (ts.isPropertyDeclaration(member))
+        return (
+          ts.isIdentifier(member.name) &&
+          member.name.text === propertyName &&
+          isFetchType(member.type)
+        );
+      if (ts.isConstructorDeclaration(member))
+        return member.parameters.some(
+          (parameter) =>
+            ts.isIdentifier(parameter.name) &&
+            parameter.name.text === propertyName &&
+            parameter.modifiers?.some((modifier) =>
+              [
+                ts.SyntaxKind.PublicKeyword,
+                ts.SyntaxKind.PrivateKeyword,
+                ts.SyntaxKind.ProtectedKeyword,
+                ts.SyntaxKind.ReadonlyKeyword,
+              ].includes(modifier.kind),
+            ) === true &&
+            isFetchType(parameter.type),
+        );
+      return false;
+    });
+  }
+  return false;
 }
 
 export function resolveCreatedClientAlias(

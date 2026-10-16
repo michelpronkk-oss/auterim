@@ -30,9 +30,10 @@ describe("bounded Code Intelligence readback", () => {
       "@stripe/stripe-js@^4.0.0",
     );
     expect(safeReadbackValue("package", "stripe@4.0.0?token=ghp_secret123456789012345")).toBeNull();
-    expect(safeReadbackValue("endpoint", "https://api.example.test/v1?token=secret")).toBe(
-      "https://api.example.test/v1",
+    expect(safeReadbackValue("endpoint", "https://api.example.test/v1?api-version=v2")).toBe(
+      "https://api.example.test/v1?api-version=v2",
     );
+    expect(safeReadbackValue("endpoint", "https://api.example.test/v1?token=secret")).toBeNull();
     expect(
       persistedCredentialLikeValueCount([
         "OPENAI_API_KEY",
@@ -443,14 +444,18 @@ describe("bounded Code Intelligence readback", () => {
 
   it("binds redacted endpoint relation evidence to the exact persisted call occurrence", () => {
     const source = 'fetch("https://user:pw@api.example.test/v1");';
-    const endColumn = source.indexOf(";") + 1;
+    const reference = analyzeCodeSnapshot([
+      { path: "src/client.ts", text: source },
+    ]).externalReferences.find((item) => item.referenceType === "endpoint");
+    expect(reference).toBeDefined();
+    if (!reference) throw new Error("expected_redacted_endpoint_reference");
     const input = {
       relationType: "CALLS_ENDPOINT",
       path: "src/client.ts",
       startLine: 1,
-      startColumn: 1,
+      startColumn: reference.startColumn!,
       endLine: 1,
-      endColumn,
+      endColumn: reference.endColumn!,
       extractorType: "typescript-compiler-api:endpoint-v1",
       from: {
         entity_type: "module",
@@ -472,8 +477,8 @@ describe("bounded Code Intelligence readback", () => {
         referenceType: "endpoint",
         normalizedValue: "[redacted]",
         redacted: true,
-        startColumn: 1,
-        endColumn,
+        startColumn: reference.startColumn!,
+        endColumn: reference.endColumn!,
       },
     } as const;
     expect(relationEvidenceMatchesSource(input)).toBe(true);

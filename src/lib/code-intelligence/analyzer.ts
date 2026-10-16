@@ -7,8 +7,9 @@ import {
   memberChain,
   resolveCreatedClientAlias,
 } from "@/lib/code-intelligence/http-call";
+import { normalizeHttpEndpointIdentity } from "@/lib/code-intelligence/endpoint";
 
-export const CODE_INTELLIGENCE_VERSION = "code-intelligence-v2";
+export const CODE_INTELLIGENCE_VERSION = "code-intelligence-v3";
 // Endpoint call recognition was tightened after the first v2 readback exposed
 // non-HTTP getters (for example URLSearchParams.get) as dynamic endpoints.
 export const CODE_INTELLIGENCE_PROFILE = "javascript-typescript-v2.3";
@@ -46,10 +47,44 @@ const CODE_EXTENSIONS = new Map([
   [".mts", "typescript"],
 ]);
 const UNSUPPORTED_SOURCE_EXTENSIONS = new Set([
-  ".astro", ".c", ".cc", ".cpp", ".cs", ".cxx", ".dart", ".ex", ".exs", ".elm",
-  ".gql", ".graphql", ".h", ".hh", ".hpp", ".html", ".hs", ".java", ".kt", ".kts",
-  ".lua", ".m", ".mm", ".php", ".pl", ".pm", ".py", ".r", ".rb", ".rs", ".scala",
-  ".sc", ".sh", ".sql", ".svelte", ".swift", ".tf", ".vue",
+  ".astro",
+  ".c",
+  ".cc",
+  ".cpp",
+  ".cs",
+  ".cxx",
+  ".dart",
+  ".ex",
+  ".exs",
+  ".elm",
+  ".gql",
+  ".graphql",
+  ".h",
+  ".hh",
+  ".hpp",
+  ".html",
+  ".hs",
+  ".java",
+  ".kt",
+  ".kts",
+  ".lua",
+  ".m",
+  ".mm",
+  ".php",
+  ".pl",
+  ".pm",
+  ".py",
+  ".r",
+  ".rb",
+  ".rs",
+  ".scala",
+  ".sc",
+  ".sh",
+  ".sql",
+  ".svelte",
+  ".swift",
+  ".tf",
+  ".vue",
 ]);
 export type CodeLanguageAdapter = {
   id: string;
@@ -452,56 +487,47 @@ function sourceLocation(source: ts.SourceFile, node: ts.Node) {
   };
 }
 
-function staticString(node: ts.Expression): string | null {
+function staticEndpointLiteral(node: ts.Expression): string | null {
   if (ts.isStringLiteralLike(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
-  if (ts.isParenthesizedExpression(node)) return staticString(node.expression);
+  if (ts.isParenthesizedExpression(node)) return staticEndpointLiteral(node.expression);
   if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-    const left = staticString(node.left);
-    const right = staticString(node.right);
+    const left = staticEndpointLiteral(node.left);
+    const right = staticEndpointLiteral(node.right);
     return left === null || right === null ? null : left + right;
-  }
-  if (ts.isTemplateExpression(node)) {
-    let output = node.head.text;
-    for (const span of node.templateSpans) {
-      if (
-        !ts.isStringLiteralLike(span.expression) &&
-        !ts.isNoSubstitutionTemplateLiteral(span.expression)
-      )
-        return null;
-      output += span.expression.text + span.literal.text;
-    }
-    return output;
   }
   return null;
 }
 
 function endpointValue(raw: string) {
+  let parsed: URL;
   try {
-    const value = new URL(raw);
-    if (!["http:", "https:"].includes(value.protocol) || !value.hostname) return null;
-    const sensitivePath = value.pathname.split("/").some((segment) => {
-      try {
-        return looksSecret(decodeURIComponent(segment));
-      } catch {
-        return true;
-      }
-    });
-    const sensitiveHost = value.hostname.split(".").some((segment) => looksSecret(segment));
-    const hasCredential = Boolean(
-      value.username || value.password || sensitivePath || sensitiveHost,
-    );
-    value.username = "";
-    value.password = "";
-    value.search = "";
-    value.hash = "";
-    const normalized = `${value.protocol}//${value.host.toLowerCase()}${value.pathname}`.slice(
-      0,
-      512,
-    );
-    return { value: hasCredential ? "[redacted]" : normalized, redacted: hasCredential };
+    parsed = new URL(raw);
   } catch {
     return null;
   }
+  if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname || /\s/.test(raw))
+    return null;
+  const normalized = normalizeHttpEndpointIdentity(raw);
+  if (!normalized && !parsed.username && !parsed.password) return null;
+  if (normalized && normalized.length > 512) return null;
+  const sensitivePath = parsed.pathname.split("/").some((segment) => {
+    try {
+      return looksSecret(decodeURIComponent(segment));
+    } catch {
+      return true;
+    }
+  });
+  const sensitiveHost = parsed.hostname.split(".").some((segment) => looksSecret(segment));
+  const sensitiveQuery = [...parsed.searchParams].some(
+    ([name, value]) =>
+      /(?:api[-_]?key|access[-_]?token|auth(?:orization)?|credential|password|secret|signature|token)/i.test(
+        name,
+      ) || looksSecret(value),
+  );
+  const redacted = Boolean(
+    parsed.username || parsed.password || sensitivePath || sensitiveHost || sensitiveQuery,
+  );
+  return { value: redacted ? "[redacted]" : normalized!, redacted };
 }
 
 function isEventDiscriminator(node: ts.Node) {
@@ -999,7 +1025,7 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
     const envNodes: Array<{ node: ts.Node; name: string }> = [];
     const eventNodes: Array<{ node: ts.StringLiteralLike; evidenceNode: ts.Node; value: string }> =
       [];
-    const endpointNodes: Array<{ node: ts.CallExpression; value: string | null }> = [];
+    const endpointNodes: Array<{ node: ts.Expression; value: string | null }> = [];
     const schemaNodes: Array<{ node: ts.TypeReferenceNode; value: string }> = [];
 
     const registerImport = (spec: string, localNames: string[], evidenceNode: ts.Node) => {
@@ -1232,7 +1258,8 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
           }
           if (isRecognizedHttpCall(node, httpClientOrigins)) {
             const firstArg = node.arguments[0];
-            if (firstArg) defer(endpointNodes, { node, value: staticString(firstArg) });
+            if (firstArg)
+              defer(endpointNodes, { node: firstArg, value: staticEndpointLiteral(firstArg) });
           }
         }
         if (
@@ -1406,8 +1433,10 @@ export function analyzeCodeSnapshot(inputFiles: SnapshotFile[]): AnalysisResult 
         forceRedact: resolved?.redacted,
         path: pathValue,
         startLine: loc.startLine,
+        referenceStartColumn: loc.startColumn,
         evidenceStartColumn: loc.startColumn,
         endLine: loc.endLine,
+        referenceEndColumn: loc.endColumn,
         evidenceEndColumn: loc.endColumn,
         language,
         confidenceClass: resolved ? "exact" : "heuristic",
