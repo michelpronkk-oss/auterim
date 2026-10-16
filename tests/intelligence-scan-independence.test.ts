@@ -8,6 +8,10 @@ function repository(): MonitoringRepository {
       id: "source-id",
       url: "https://source.example",
       enabled: true,
+      source_mode: "provider" as const,
+      processing_mode: "customer" as const,
+      workspace_id: null,
+      scope_product_id: null,
       etag: null,
       last_modified: null,
     })),
@@ -83,5 +87,27 @@ describe("independent scan fan-out", () => {
     expect(result.status).toBe("changed");
     expect(enqueueClassifier).toHaveBeenCalledOnce();
     expect(repo.recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("rejects internal evidence sources through the normal provider scan entry point", async () => {
+    const repo = repository();
+    vi.mocked(repo.getSource).mockResolvedValue({
+      id: "source-id",
+      url: "https://internal-test.invalid/evidence",
+      enabled: true,
+      source_mode: "internal_test",
+      processing_mode: "evidence_only",
+      workspace_id: "00000000-0000-4000-8000-000000000010",
+      scope_product_id: "00000000-0000-4000-8000-000000000011",
+      etag: null,
+      last_modified: null,
+    });
+    await expect(
+      scanSource(
+        { sourceId: "source-id", triggerRunId: "provider-worker", attemptNumber: 1 },
+        { repository: repo, fetcher: fetcher as never },
+      ),
+    ).rejects.toThrow("Internal evidence source scope is not authorized.");
+    expect(repo.beginScan).not.toHaveBeenCalled();
   });
 });

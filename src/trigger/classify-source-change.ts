@@ -5,6 +5,8 @@ import {
   classifySourceChange,
 } from "@/lib/monitoring/classification";
 import { dispatchCustomerImpactTask } from "@/trigger/dispatch-customer-impact";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { customerImpactDispatchAllowed } from "@/lib/monitoring/source-mode";
 
 export const semanticClassifyChangeTask = schemaTask({
   id: "classify-source-change",
@@ -24,7 +26,16 @@ export const semanticClassifyChangeTask = schemaTask({
         triggerRunId: ctx.run.id,
         attemptNumber: ctx.attempt.number,
       });
+      const supabase = createSupabaseServerClient();
+      const { data: provenance, error: provenanceError } = await supabase
+        .from("source_changes")
+        .select("source_mode,processing_mode")
+        .eq("id", sourceChangeId)
+        .maybeSingle();
+      if (provenanceError || !provenance) throw new Error("source_change_provenance_unavailable");
+      const allowCustomerImpact = customerImpactDispatchAllowed(provenance);
       if (
+        allowCustomerImpact &&
         outcome.status === "classified" &&
         outcome.classification.material &&
         outcome.classification.decisionStatus === "classified"

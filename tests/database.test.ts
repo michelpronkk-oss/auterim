@@ -563,7 +563,13 @@ class PGliteMonitoringRepository implements MonitoringRepository {
     }>("select id,url,enabled,etag,last_modified from public.source_catalog where id=$1", [
       sourceId,
     ]);
-    return result.rows[0]!;
+    return {
+      ...result.rows[0]!,
+      source_mode: "provider" as const,
+      processing_mode: "customer" as const,
+      workspace_id: null,
+      scope_product_id: null,
+    };
   }
   async beginScan(sourceId: string, triggerRunId: string, attemptNumber: number) {
     const result = await this.db.query<{

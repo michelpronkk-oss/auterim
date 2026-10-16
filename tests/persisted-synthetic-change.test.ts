@@ -50,6 +50,10 @@ function fixture() {
         id,
         url: "https://internal-qa.auterim.invalid/m15/source",
         enabled: true,
+        source_mode: "provider",
+        processing_mode: "customer",
+        workspace_id: null,
+        scope_product_id: null,
         etag: null,
         last_modified: null,
       };
