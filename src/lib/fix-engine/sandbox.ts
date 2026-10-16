@@ -7,11 +7,15 @@ import {
   assertStructuredCommand,
   type VerificationCommand,
 } from "@/lib/fix-engine/verification-profile";
+import type { TrustedDependencyCache } from "@/lib/fix-engine/dependency-cache";
 
 const execFileAsync = promisify(execFile);
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_REPOSITORY_BYTES = 25 * 1024 * 1024;
 const MAX_TIMEOUT_MS = 120_000;
+export const FIX_VERIFICATION_NETWORK_MODE = "none" as const;
+export const FIX_VERIFICATION_IMAGE =
+  "node:24.8.0-alpine3.22@sha256:3e843c608bb5232f39ecb2b25e41214b958b0795914707374c8acc28487dea17";
 
 function runWithInput(command: string, args: string[], input: string, timeoutMs: number) {
   return new Promise<void>((resolve, reject) => {
@@ -254,10 +258,13 @@ export async function runVerificationInDocker(input: {
   checkoutPath: string;
   image: string;
   command: VerificationCommand;
+  dependencyCache: TrustedDependencyCache;
   timeoutMs?: number;
 }) {
   assertStructuredCommand(input.command);
-  if (!/^sha256:[a-f0-9]{64}$/.test(input.image)) throw new Error("validator_image_not_pinned");
+  if (input.image !== FIX_VERIFICATION_IMAGE) throw new Error("validator_image_not_pinned");
+  if (input.dependencyCache.status !== "available")
+    throw new Error("trusted_dependency_cache_unavailable");
   await inspectTree(input.checkoutPath);
   const started = Date.now();
   const bootstrap = [
@@ -276,7 +283,7 @@ export async function runVerificationInDocker(input: {
       [
         "run",
         "--rm",
-        "--network=none",
+        `--network=${FIX_VERIFICATION_NETWORK_MODE}`,
         "--pull=never",
         "--memory=512m",
         "--cpus=1",
@@ -292,6 +299,8 @@ export async function runVerificationInDocker(input: {
         "1000:1000",
         "--volume",
         `${input.checkoutPath}:/source:ro`,
+        "--volume",
+        `${input.dependencyCache.nodeModulesPath}:/workspace/node_modules:ro`,
         "--workdir",
         "/workspace",
         "--entrypoint",

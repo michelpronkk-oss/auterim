@@ -39,6 +39,9 @@ create table public.fix_runs (
   idempotency_key text not null unique check (idempotency_key ~ '^[a-f0-9]{64}$'),
   contract_version text not null check (char_length(contract_version) between 1 and 80),
   eligibility_rules_version text not null check (char_length(eligibility_rules_version) between 1 and 80),
+  product_policy_version integer not null default 0 check (product_policy_version >= 0),
+  preflight_applicability_version text not null default 'fix-preflight-v1'
+    check (preflight_applicability_version = 'fix-preflight-v1'),
   draft_pr_policy_allowed boolean not null default false,
   preflight_required boolean not null default false,
   status text not null default 'queued' check (status in (
@@ -60,6 +63,7 @@ create table public.fix_runs (
     (source_mode='provider' and processing_mode='customer' and provenance_mode='customer') or
     (source_mode='internal_test' and processing_mode='evidence_only' and provenance_mode='evidence_only')
   ),
+  constraint fix_run_evidence_only_preflight_check check (source_mode <> 'internal_test' or not preflight_required),
   constraint fix_run_product_scope_fkey foreign key(product_id,workspace_id)
     references public.workspace_products(id,workspace_id) on delete cascade,
   constraint fix_run_repository_scope_fkey foreign key(repository_id,workspace_id)
@@ -236,9 +240,29 @@ create table public.fix_pr_outcomes (
   constraint fix_pr_operation_scope_fkey foreign key(external_operation_id,fix_run_id,workspace_id) references public.fix_external_operations(id,fix_run_id,workspace_id) on delete restrict
 );
 
+create function private.fix_preflight_applicable(
+  p_source_mode text,
+  p_semantic_route text,
+  p_policy_enabled boolean,
+  p_draft_pr_allowed boolean,
+  p_repository_allowed boolean
+)
+returns boolean language sql immutable security invoker set search_path = '' as $$
+  select p_source_mode='provider'
+    and coalesce(p_policy_enabled,false)
+    and coalesce(p_draft_pr_allowed,false)
+    and coalesce(p_repository_allowed,false)
+    and p_semantic_route in (
+      'deprecation','breaking_api_change','sdk_change','webhook_or_event_change',
+      'schema_or_contract_change','auth_or_security_change'
+    );
+$$;
+revoke all on function private.fix_preflight_applicable(text,text,boolean,boolean,boolean) from public,anon,authenticated;
+
 create function private.guard_fix_run_identity()
 returns trigger language plpgsql security invoker set search_path = '' as $$
 declare v_source public.source_changes%rowtype; v_repository public.repositories%rowtype;
+    v_policy public.product_remediation_policies%rowtype; v_policy_found boolean:=false; v_expected_preflight boolean:=false;
 begin
   if tg_op='UPDATE' then
     if row(new.workspace_id,new.product_id,new.repository_id,new.workspace_dependency_id,new.product_repository_mapping_id,
@@ -246,14 +270,16 @@ begin
       new.classification_id,new.route_intent_id,new.semantic_route,new.route_target,new.analysis_run_id,new.graph_build_id,new.commit_sha,new.analyzer_version,new.analysis_profile,
       new.graph_builder_version,new.policy_version,new.review_disposition,new.review_reason,new.provenance_mode,
       new.positive_graph_evidence_ids,new.evidence_fingerprint,new.identity_document,new.identity_fingerprint,new.idempotency_key,
-      new.contract_version,new.eligibility_rules_version,new.draft_pr_policy_allowed,new.preflight_required)
+      new.contract_version,new.eligibility_rules_version,new.product_policy_version,new.preflight_applicability_version,
+      new.draft_pr_policy_allowed,new.preflight_required)
       is distinct from
       row(old.workspace_id,old.product_id,old.repository_id,old.workspace_dependency_id,old.product_repository_mapping_id,
       old.provider_repository_identity,old.source_change_id,old.source_mode,old.processing_mode,old.intelligence_decision_id,
       old.classification_id,old.route_intent_id,old.semantic_route,old.route_target,old.analysis_run_id,old.graph_build_id,old.commit_sha,old.analyzer_version,old.analysis_profile,
       old.graph_builder_version,old.policy_version,old.review_disposition,old.review_reason,old.provenance_mode,
       old.positive_graph_evidence_ids,old.evidence_fingerprint,old.identity_document,old.identity_fingerprint,old.idempotency_key,
-      old.contract_version,old.eligibility_rules_version,old.draft_pr_policy_allowed,old.preflight_required)
+      old.contract_version,old.eligibility_rules_version,old.product_policy_version,old.preflight_applicability_version,
+      old.draft_pr_policy_allowed,old.preflight_required)
     then raise exception 'fix_run_identity_immutable' using errcode='23514'; end if;
     return new;
   end if;
@@ -267,6 +293,21 @@ begin
   if not ((new.source_mode='provider' and new.processing_mode='customer' and new.provenance_mode='customer') or
           (new.source_mode='internal_test' and new.processing_mode='evidence_only' and new.provenance_mode='evidence_only')) then
     raise exception 'fix_run_provenance_mismatch' using errcode='23514';
+  end if;
+  select * into v_policy from public.product_remediation_policies p
+    where p.workspace_id=new.workspace_id and p.product_id=new.product_id;
+  v_policy_found:=found;
+  if new.product_policy_version <> (case when v_policy_found then v_policy.policy_version else 0 end) then
+    raise exception 'fix_run_policy_version_mismatch' using errcode='23514';
+  end if;
+  v_expected_preflight:=private.fix_preflight_applicable(
+    new.source_mode,new.semantic_route,v_policy_found and v_policy.enabled,
+    v_policy_found and v_policy.draft_pr_preparation_allowed,
+    v_policy_found and new.repository_id=any(v_policy.allowed_repository_ids)
+  );
+  if new.preflight_applicability_version<>'fix-preflight-v1'
+    or new.preflight_required is distinct from v_expected_preflight then
+    raise exception 'fix_run_preflight_policy_mismatch' using errcode='23514';
   end if;
   select * into v_repository from public.repositories r where r.id=new.repository_id and r.workspace_id=new.workspace_id;
   if not found or lower(new.provider_repository_identity)<>lower(v_repository.owner||'/'||v_repository.name) then
@@ -372,6 +413,7 @@ declare
   r public.repositories%rowtype; p public.workspace_products%rowtype;
   d public.workspace_dependencies%rowtype; m public.workspace_product_repositories%rowtype;
   pol public.product_remediation_policies%rowtype; v_has_policy boolean:=false;
+  v_semantic_route text; v_preflight_required boolean:=false; v_policy_version integer:=0;
   v_evidence_ids uuid[]; v_evidence_fingerprint text; v_identity jsonb; v_hash text; v_inserted_id uuid;
   v_fix public.fix_runs%rowtype;
 begin
@@ -401,6 +443,15 @@ begin
           (s.source_mode='internal_test' and s.processing_mode='evidence_only' and s.workspace_id is not null and s.scope_product_id is not null)) then
     raise exception 'fix_source_provenance_invalid' using errcode='23514';
   end if;
+  select i.route into v_semantic_route from public.intelligence_route_intents i
+    where i.id=g.route_intent_id and i.workspace_id=g.workspace_id;
+  if v_semantic_route is null then raise exception 'fix_route_scope_unavailable' using errcode='42501'; end if;
+  v_policy_version:=case when v_has_policy then pol.policy_version else 0 end;
+  v_preflight_required:=private.fix_preflight_applicable(
+    s.source_mode,v_semantic_route,v_has_policy and pol.enabled,
+    v_has_policy and pol.draft_pr_preparation_allowed,
+    v_has_policy and g.repository_id=any(pol.allowed_repository_ids)
+  );
   if g.coverage_state not in ('complete','partial') then raise exception 'fix_analysis_coverage_unsupported' using errcode='22023'; end if;
   if not exists (select 1 from public.impact_graph_edges e where e.graph_build_id=g.id and e.workspace_id=g.workspace_id
       and e.repository_id=g.repository_id and e.commit_sha=g.commit_sha and e.edge_kind='observed'
@@ -427,23 +478,25 @@ begin
     'graph_builder_version',g.graph_builder_version,'policy_version',g.policy_version,
     'review_disposition',g.review_disposition,'review_reason',g.review_reason,
     'positive_graph_evidence_ids',to_jsonb(v_evidence_ids),'evidence_fingerprint',v_evidence_fingerprint,
-    'preflight_required',s.source_mode='provider',
+    'product_policy_version',v_policy_version,'preflight_applicability_version','fix-preflight-v1',
+    'preflight_required',v_preflight_required,
     'contract_version','fix-engine-v1','eligibility_rules_version','fix-eligibility-v1');
   v_hash:=encode(extensions.digest(convert_to(v_identity::text,'UTF8'),'sha256'),'hex');
   insert into public.fix_runs(workspace_id,product_id,repository_id,workspace_dependency_id,product_repository_mapping_id,
     provider_repository_identity,source_change_id,classification_id,source_mode,processing_mode,intelligence_decision_id,route_intent_id,
     semantic_route,route_target,analysis_run_id,graph_build_id,commit_sha,analyzer_version,analysis_profile,graph_builder_version,policy_version,
     review_disposition,review_reason,provenance_mode,positive_graph_evidence_ids,evidence_fingerprint,identity_document,
-    identity_fingerprint,idempotency_key,contract_version,eligibility_rules_version,draft_pr_policy_allowed,preflight_required)
+    identity_fingerprint,idempotency_key,contract_version,eligibility_rules_version,product_policy_version,
+    preflight_applicability_version,draft_pr_policy_allowed,preflight_required)
   values(g.workspace_id,g.product_id,g.repository_id,g.workspace_dependency_id,m.id,r.owner||'/'||r.name,g.source_change_id,c.id,
     s.source_mode,s.processing_mode,g.intelligence_decision_id,g.route_intent_id,
     (select i.route from public.intelligence_route_intents i where i.id=g.route_intent_id),
     (select i.route_target from public.intelligence_route_intents i where i.id=g.route_intent_id),g.analysis_run_id,g.id,g.commit_sha,
     g.analyzer_version,g.analysis_profile,g.graph_builder_version,g.policy_version,g.review_disposition,g.review_reason,
     case when s.source_mode='internal_test' then 'evidence_only' else 'customer' end,v_evidence_ids,v_evidence_fingerprint,
-    v_identity,v_hash,v_hash,'fix-engine-v1','fix-eligibility-v1',
+    v_identity,v_hash,v_hash,'fix-engine-v1','fix-eligibility-v1',v_policy_version,'fix-preflight-v1',
     coalesce(v_has_policy and pol.enabled and pol.draft_pr_preparation_allowed and g.repository_id=any(pol.allowed_repository_ids),false),
-     s.source_mode='provider')
+     v_preflight_required)
   on conflict(idempotency_key) do nothing returning id into v_inserted_id;
   select * into v_fix from public.fix_runs f where f.idempotency_key=v_hash;
   if not found then raise exception 'fix_run_persist_failed' using errcode='P0001'; end if;
@@ -458,7 +511,8 @@ grant execute on function public.create_fix_run_from_graph(uuid) to service_role
 
 create function public.claim_fix_stage(p_stage_id uuid,p_lease_seconds integer default 120)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare q public.fix_stage_queue%rowtype; v_run public.fix_runs%rowtype; v_token uuid:=gen_random_uuid(); v_next text; v_status text;
+declare q public.fix_stage_queue%rowtype; v_run public.fix_runs%rowtype; v_policy public.product_remediation_policies%rowtype;
+    v_policy_found boolean:=false; v_preflight_required boolean:=false; v_token uuid:=gen_random_uuid(); v_next text; v_status text;
 begin
   if coalesce(auth.role(),'')<>'service_role' then raise exception 'service_role_required' using errcode='42501'; end if;
   if p_lease_seconds not between 15 and 300 then raise exception 'invalid_fix_stage_lease' using errcode='22023'; end if;
@@ -483,6 +537,23 @@ begin
     where id=p_stage_id and attempt_count<3 and (status='queued' or (status='claimed' and lease_expires_at<now())) returning * into q;
   if not found then return jsonb_build_object('status','busy'); end if;
   select * into v_run from public.fix_runs where id=q.fix_run_id and workspace_id=q.workspace_id;
+  select * into v_policy from public.product_remediation_policies p
+    where p.workspace_id=v_run.workspace_id and p.product_id=v_run.product_id;
+  v_policy_found:=found;
+  v_preflight_required:=private.fix_preflight_applicable(
+    v_run.source_mode,v_run.semantic_route,v_policy_found and v_policy.enabled,
+    v_policy_found and v_policy.draft_pr_preparation_allowed,
+    v_policy_found and v_run.repository_id=any(v_policy.allowed_repository_ids)
+  );
+  if v_run.product_policy_version <> (case when v_policy_found then v_policy.policy_version else 0 end)
+    or v_run.preflight_applicability_version<>'fix-preflight-v1'
+    or v_run.preflight_required is distinct from v_preflight_required then
+    update public.fix_stage_queue set status='failed',claim_token=null,lease_expires_at=null,
+      failure_category='fix_product_policy_stale',completed_at=now() where id=q.id;
+    update public.fix_runs set status='failed',failure_category='fix_product_policy_stale',updated_at=now(),completed_at=now()
+      where id=v_run.id;
+    return jsonb_build_object('status','stale_policy','stageId',q.id,'fixRunId',q.fix_run_id);
+  end if;
   if not exists(select 1 from public.workspace_products p where p.id=v_run.product_id and p.workspace_id=v_run.workspace_id and p.status='protected')
     or not exists(select 1 from public.repositories r where r.id=v_run.repository_id and r.workspace_id=v_run.workspace_id and r.status='available' and not r.archived)
     or not exists(select 1 from public.workspace_dependencies d where d.id=v_run.workspace_dependency_id and d.workspace_id=v_run.workspace_id

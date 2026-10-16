@@ -159,6 +159,8 @@ export async function runPersistedFixStage(input: {
   if (claimError || !claimData) return { status: "busy" as const, nextStage: null };
   if (claimData.status === "stale_scope")
     return { status: "stale_scope" as const, nextStage: null };
+  if (claimData.status === "stale_policy")
+    return { status: "stale_policy" as const, nextStage: null };
   if (claimData.status === "completed")
     return {
       status: "completed" as const,

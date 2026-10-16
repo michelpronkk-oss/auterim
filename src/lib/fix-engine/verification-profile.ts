@@ -1,3 +1,5 @@
+import { resolveLockedPackageManager } from "@/lib/fix-engine/package-manager";
+
 export type VerificationCommandClass = "targeted_test" | "test" | "typecheck" | "lint" | "build";
 export type VerificationCommand = {
   commandClass: VerificationCommandClass;
@@ -29,14 +31,7 @@ export function resolveVerificationProfile(input: {
 }): VerificationProfile {
   const manifest = input.packageJson as Manifest;
   const names = new Set(input.files);
-  const packageManager =
-    manifest.packageManager?.startsWith("pnpm@") || names.has("pnpm-lock.yaml")
-      ? "pnpm"
-      : manifest.packageManager?.startsWith("yarn@") || names.has("yarn.lock")
-        ? "yarn"
-        : names.has("package-lock.json") || names.has("npm-shrinkwrap.json")
-          ? "npm"
-          : "unsupported";
+  const packageManager = resolveLockedPackageManager(manifest, names) ?? "unsupported";
   const monorepo = Boolean(manifest.workspaces) || names.has("pnpm-workspace.yaml");
   if (packageManager === "unsupported")
     return {

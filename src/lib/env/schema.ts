@@ -137,6 +137,14 @@ export const environmentSchema = z
     ),
     FIX_CODING_MODEL_ENDPOINT: optionalUrl,
     FIX_CODING_MODEL_API_KEY: optionalSecret,
+    FIX_DEPENDENCY_CACHE_ROOT: z.preprocess(
+      emptyToUndefined,
+      z.string().trim().min(1).max(2048).optional(),
+    ),
+    FIX_DEPENDENCY_CACHE_PUBLIC_KEY: z.preprocess(
+      emptyToUndefined,
+      z.string().trim().min(1).max(8192).optional(),
+    ),
     FIX_GITHUB_DRAFT_PR_WRITES: z.preprocess(emptyToUndefined, z.enum(["0", "1"]).default("0")),
     AUTERIM_INTELLIGENCE_PROVIDER: z.preprocess(
       emptyToUndefined,

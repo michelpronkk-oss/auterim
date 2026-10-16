@@ -37,6 +37,7 @@ export type FixModelContext = {
 
 export interface FixCodingModel {
   readonly provider: string;
+  readonly modelName: string;
   diagnose(context: FixModelContext, signal?: AbortSignal): Promise<ModelEnvelope<unknown>>;
   plan(
     context: FixModelContext,
@@ -153,7 +154,7 @@ export type StructuredModelConfig = {
 /** OpenAI-compatible transport without a provider/model name baked into product semantics. */
 export class StructuredChatCompletionFixModel implements FixCodingModel {
   readonly provider: string;
-  private readonly modelName: string;
+  readonly modelName: string;
 
   constructor(private readonly config: StructuredModelConfig) {
     const url = new URL(config.endpoint);

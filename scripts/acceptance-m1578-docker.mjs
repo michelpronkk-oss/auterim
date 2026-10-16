@@ -106,6 +106,29 @@ const catalog = run("docker", [
   catalogSql,
 ]).trim();
 assert(catalog === "t|t|t|t|t|t|t|t|t|t|t|t|t|t|t", "m1578_database_security_parity_failed");
+const preflightApplicabilitySql = `
+select
+  private.fix_preflight_applicable('provider','deprecation',true,true,true),
+  private.fix_preflight_applicable('provider','pricing_change',true,true,true),
+  private.fix_preflight_applicable('provider','deprecation',false,true,true),
+  private.fix_preflight_applicable('provider','deprecation',true,true,false),
+  private.fix_preflight_applicable('internal_test','deprecation',true,true,true);
+`;
+const preflightApplicability = run("docker", [
+  "exec",
+  container,
+  "psql",
+  "-U",
+  "postgres",
+  "-d",
+  "postgres",
+  "-At",
+  "-F",
+  "|",
+  "-c",
+  preflightApplicabilitySql,
+]).trim();
+assert(preflightApplicability === "t|f|f|f|f", "m1578_preflight_applicability_contract_failed");
 
 const statusOutput = runSupabase([
   "status",

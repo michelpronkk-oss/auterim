@@ -46,7 +46,13 @@ export function deterministicFixBranch(identityKey: string) {
   return `auterim/fix/${identityKey.slice(0, 12).toLowerCase()}`;
 }
 
-export type GitHubChangedFile = { path: string; content?: string; deleted?: boolean };
+export type GitHubChangedFile = {
+  path: string;
+  content?: string;
+  deleted?: boolean;
+  /** Set only from validated base-tree metadata; model patches cannot set modes. */
+  mode?: "100644" | "100755";
+};
 export type DraftPrResult = { branch: string; headSha: string; url: string; reconciled: boolean };
 export type GitHubWriteGrant = {
   repositoryIdentity: string;
@@ -62,6 +68,7 @@ export function validateDraftPrFiles(files: GitHubChangedFile[]): void {
     files.some(
       (file) =>
         !isSafeRepoPath(file.path) ||
+        (file.mode !== undefined && file.mode !== "100644" && file.mode !== "100755") ||
         (!file.deleted &&
           (typeof file.content !== "string" ||
             Buffer.byteLength(file.content, "utf8") > 128 * 1024)),
@@ -298,12 +305,43 @@ export class GitHubAppDraftPRProvider implements DraftPRProvider {
     );
     const baseTree = baseCommit.tree as Record<string, unknown> | undefined;
     if (typeof baseTree?.sha !== "string") throw new Error("github_base_tree_unavailable");
+    const baseTreeDocument = await this.request(
+      token,
+      `/repos/${owner}/${repository}/git/trees/${encodeURIComponent(baseTree.sha)}?recursive=1`,
+    );
+    if (baseTreeDocument.truncated === true || !Array.isArray(baseTreeDocument.tree))
+      throw new Error("github_base_tree_incomplete");
+    const baseEntries = new Map<string, { mode: string; type: string }>();
+    for (const item of baseTreeDocument.tree) {
+      if (!item || typeof item !== "object") throw new Error("github_base_tree_invalid");
+      const entry = item as Record<string, unknown>;
+      if (
+        typeof entry.path !== "string" ||
+        typeof entry.mode !== "string" ||
+        typeof entry.type !== "string"
+      )
+        throw new Error("github_base_tree_invalid");
+      baseEntries.set(entry.path, { mode: entry.mode, type: entry.type });
+    }
     const treeEntries: Array<Record<string, unknown>> = [];
     for (const file of input.changedFiles) {
+      const existing = baseEntries.get(file.path);
       if (file.deleted) {
-        treeEntries.push({ path: file.path, mode: "100644", type: "blob", sha: null });
+        if (!existing || existing.type !== "blob" || !["100644", "100755"].includes(existing.mode))
+          throw new Error("github_base_file_mode_unsupported");
+        if (file.mode && file.mode !== existing.mode)
+          throw new Error("github_file_mode_change_forbidden");
+        treeEntries.push({ path: file.path, mode: existing.mode, type: "blob", sha: null });
         continue;
       }
+      const mode = existing
+        ? existing.type === "blob" && ["100644", "100755"].includes(existing.mode)
+          ? existing.mode
+          : (() => {
+              throw new Error("github_base_file_mode_unsupported");
+            })()
+        : "100644";
+      if (file.mode && file.mode !== mode) throw new Error("github_file_mode_change_forbidden");
       if (typeof file.content !== "string" || Buffer.byteLength(file.content, "utf8") > 128 * 1024)
         throw new Error("github_patch_file_invalid");
       const blob = await this.request(token, `/repos/${owner}/${repository}/git/blobs`, {
@@ -314,7 +352,7 @@ export class GitHubAppDraftPRProvider implements DraftPRProvider {
         }),
       });
       if (typeof blob.sha !== "string") throw new Error("github_blob_create_failed");
-      treeEntries.push({ path: file.path, mode: "100644", type: "blob", sha: blob.sha });
+      treeEntries.push({ path: file.path, mode, type: "blob", sha: blob.sha });
     }
     if (treeEntries.length === 0) throw new Error("github_empty_patch");
     const tree = await this.request(token, `/repos/${owner}/${repository}/git/trees`, {

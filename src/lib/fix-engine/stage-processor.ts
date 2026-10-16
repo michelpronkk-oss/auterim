@@ -10,13 +10,22 @@ import { validateProposedDiagnosis, validateProposedFixPlan } from "@/lib/fix-en
 import {
   buildBoundedModelContext,
   StructuredChatCompletionFixModel,
+  type FixCodingModel,
   type ModelEnvelope,
 } from "@/lib/fix-engine/model";
 import type { FixStageProcessor } from "@/lib/fix-engine/stage-runtime";
 import { validatePatchProposal } from "@/lib/fix-engine/patch";
 import { SupabasePrivatePatchArtifactStore } from "@/lib/fix-engine/artifact-store";
-import { withExactBaseGitHubSnapshot, runVerificationInDocker } from "@/lib/fix-engine/sandbox";
+import {
+  withExactBaseGitHubSnapshot,
+  runVerificationInDocker,
+  FIX_VERIFICATION_IMAGE,
+} from "@/lib/fix-engine/sandbox";
 import { resolveVerificationProfile } from "@/lib/fix-engine/verification-profile";
+import {
+  createDependencyCacheIdentity,
+  resolveTrustedDependencyCache,
+} from "@/lib/fix-engine/dependency-cache";
 import { assessFixRisk } from "@/lib/fix-engine/risk";
 import { DiagnosisSchema, FixPlanSchema, isSafeRepoPath } from "@/lib/fix-engine/contracts";
 import { stableFingerprint } from "@/lib/fix-engine/identity";
@@ -34,6 +43,10 @@ import {
   executeReconciledOperation,
 } from "@/lib/fix-engine/operation-ledger";
 import { SupabaseExternalOperationStore } from "@/lib/fix-engine/supabase-external-operation-store";
+import type {
+  DependencyCacheIdentity,
+  DependencyCacheResolution,
+} from "@/lib/fix-engine/dependency-cache";
 
 type StoredRun = {
   id: string;
@@ -229,16 +242,21 @@ function codingModel() {
   };
 }
 
-async function invokeCodingModel(input: {
-  stage: "diagnose" | "plan" | "generate_patch";
-  stageId: string;
-  claimToken: string;
-  attemptNumber: number;
-  inputFingerprint: string;
-  invoke: (model: StructuredChatCompletionFixModel) => Promise<ModelEnvelope<unknown>>;
-}) {
+async function invokeCodingModel(
+  input: {
+    stage: "diagnose" | "plan" | "generate_patch";
+    stageId: string;
+    claimToken: string;
+    attemptNumber: number;
+    inputFingerprint: string;
+    invoke: (model: FixCodingModel) => Promise<ModelEnvelope<unknown>>;
+  },
+  modelOverride?: FixCodingModel,
+) {
   const client = createSupabaseServerClient();
-  const configured = codingModel();
+  const configured = modelOverride
+    ? { provider: modelOverride.provider, modelName: modelOverride.modelName, model: modelOverride }
+    : codingModel();
   const { data: started, error: beginError } = await client.rpc("begin_fix_model_attempt", {
     p_stage_id: input.stageId,
     p_claim_token: input.claimToken,
@@ -292,7 +310,12 @@ async function invokeCodingModel(input: {
   return envelope;
 }
 
-async function loadModelContext(run: StoredRun) {
+type FixRepositoryProvider = Pick<
+  GitHubAppRepositoryProvider,
+  "getFile" | "materializeRepository" | "getHead"
+>;
+
+async function loadModelContext(run: StoredRun, repositoryProvider?: FixRepositoryProvider) {
   const client = createSupabaseServerClient();
   const rawEdges = (await checked<GraphEdge[]>(
     client
@@ -344,7 +367,7 @@ async function loadModelContext(run: StoredRun) {
     run.provider_repository_identity.toLowerCase()
   )
     throw new Error("fix_repository_identity_mismatch");
-  const provider = githubProvider();
+  const provider = repositoryProvider ?? githubProvider();
   const graphEvidence = edges.map((edge) => {
     const reference = edge.code_reference_id ? referenceById.get(edge.code_reference_id) : null;
     if (
@@ -400,7 +423,12 @@ async function filesUnder(root: string, current = root): Promise<string[]> {
   return files.slice(0, 5000);
 }
 
-async function materializeForRun(run: StoredRun, checkoutPath: string, commitSha: string) {
+async function materializeForRun(
+  run: StoredRun,
+  checkoutPath: string,
+  commitSha: string,
+  repositoryProvider?: FixRepositoryProvider,
+) {
   if (commitSha !== run.commit_sha) throw new Error("fix_snapshot_commit_mismatch");
   const { target, repository } = await loadRepository(run);
   if (
@@ -408,7 +436,7 @@ async function materializeForRun(run: StoredRun, checkoutPath: string, commitSha
     run.provider_repository_identity.toLowerCase()
   )
     throw new Error("fix_repository_identity_mismatch");
-  const exact = githubProvider();
+  const exact = repositoryProvider ?? githubProvider();
   const snapshot = await exact.materializeRepository(target, commitSha, checkoutPath);
   return { skippedLinks: snapshot.skippedLinks };
 }
@@ -516,671 +544,733 @@ async function readChangedFilesFromAppliedPatch(input: {
   });
 }
 
-export const processFixEngineStage: FixStageProcessor = async ({
-  run: stageRun,
-  stage,
-  stageId,
-  claimToken,
-  attemptNumber,
-}) => {
-  const run = await loadRun(stageRun.id);
-  const client = createSupabaseServerClient();
-  if (
-    run.workspace_id !== stageRun.workspace_id ||
-    run.repository_id !== stageRun.repository_id ||
-    run.commit_sha !== stageRun.commit_sha
-  )
-    throw new Error("fix_stage_persisted_identity_mismatch");
+export type FixEngineStageProcessorDependencies = {
+  model?: FixCodingModel;
+  repositoryProvider?: FixRepositoryProvider;
+  resolveDependencyCache?: (
+    identity: DependencyCacheIdentity | null,
+  ) => Promise<DependencyCacheResolution>;
+};
 
-  if (stage === "diagnose") {
-    const { context, graphEvidence } = await loadModelContext(run);
-    const envelope = await invokeCodingModel({
-      stage: "diagnose",
-      stageId,
-      claimToken,
-      attemptNumber,
-      inputFingerprint: stableFingerprint({
-        stage: "diagnose",
-        context: context.contextFingerprint,
-      }),
-      invoke: (model) => model.diagnose(context),
-    });
-    const validated = validateProposedDiagnosis({
-      proposal: envelope.value,
-      evidence: graphEvidence.map((edge) => ({ ...edge, symbol: null })),
-      workspaceId: run.workspace_id,
-      expectedWorkspaceId: stageRun.workspace_id,
-      repositoryId: run.repository_id,
-      expectedRepositoryId: stageRun.repository_id,
-      commitSha: run.commit_sha,
-      expectedCommitSha: stageRun.commit_sha,
-    });
-    return {
-      recordKind: "diagnosis",
-      record: {
-        diagnosis: validated.diagnosis,
-        evidenceIds: validated.evidenceIds,
-        changeFamily: validated.diagnosis.changeFamily,
-        provider: envelope.provider,
-        model: envelope.model,
-        modelVersion: envelope.modelVersion ?? null,
-        schemaVersion: envelope.schemaVersion,
-        promptContractVersion: envelope.promptContractVersion,
-        inputFingerprint: envelope.inputFingerprint,
-        outputFingerprint: validated.outputFingerprint,
-        latencyMs: envelope.usage.latencyMs,
-        inputTokens: envelope.usage.inputTokens ?? null,
-        outputTokens: envelope.usage.outputTokens ?? null,
-        costMicrousd: envelope.usage.costMicrousd ?? null,
-      },
-    };
-  }
+export function createFixEngineStageProcessor(
+  dependencies: FixEngineStageProcessorDependencies = {},
+): FixStageProcessor {
+  return async ({ run: stageRun, stage, stageId, claimToken, attemptNumber }) => {
+    const run = await loadRun(stageRun.id);
+    const client = createSupabaseServerClient();
+    if (
+      run.workspace_id !== stageRun.workspace_id ||
+      run.repository_id !== stageRun.repository_id ||
+      run.commit_sha !== stageRun.commit_sha
+    )
+      throw new Error("fix_stage_persisted_identity_mismatch");
 
-  if (stage === "plan") {
-    const { context } = await loadModelContext(run);
-    const diagnosis = await checked<{ diagnosis: unknown }>(
-      client
-        .from("fix_diagnoses")
-        .select("diagnosis")
-        .eq("fix_run_id", run.id)
-        .single() as PromiseLike<DbResult<{ diagnosis: unknown }>>,
-      "fix_diagnosis_unavailable",
-    );
-    const parsedDiagnosis = DiagnosisSchema.parse(diagnosis.diagnosis);
-    const envelope = await invokeCodingModel({
-      stage: "plan",
-      stageId,
-      claimToken,
-      attemptNumber,
-      inputFingerprint: stableFingerprint({
-        stage: "plan",
-        context: context.contextFingerprint,
-        diagnosis: parsedDiagnosis,
-      }),
-      invoke: (model) => model.plan(context, parsedDiagnosis),
-    });
-    const plan = validateProposedFixPlan({
-      proposal: envelope.value,
-      diagnosis: parsedDiagnosis,
-      preflightRequired: run.preflight_required,
-      reviewRequired: run.review_disposition === "review_required",
-    });
-    return {
-      recordKind: "plan",
-      record: {
-        plan,
-        planVersion: 1,
-        planFingerprint: stableFingerprint(plan),
-        provider: envelope.provider,
-        model: envelope.model,
-        schemaVersion: envelope.schemaVersion,
-        promptContractVersion: envelope.promptContractVersion,
-      },
-    };
-  }
+    if (stage === "diagnose") {
+      const { context, graphEvidence } = await loadModelContext(
+        run,
+        dependencies.repositoryProvider,
+      );
+      const envelope = await invokeCodingModel(
+        {
+          stage: "diagnose",
+          stageId,
+          claimToken,
+          attemptNumber,
+          inputFingerprint: stableFingerprint({
+            stage: "diagnose",
+            context: context.contextFingerprint,
+          }),
+          invoke: (model) => model.diagnose(context),
+        },
+        dependencies.model,
+      );
+      const validated = validateProposedDiagnosis({
+        proposal: envelope.value,
+        evidence: graphEvidence.map((edge) => ({ ...edge, symbol: null })),
+        workspaceId: run.workspace_id,
+        expectedWorkspaceId: stageRun.workspace_id,
+        repositoryId: run.repository_id,
+        expectedRepositoryId: stageRun.repository_id,
+        commitSha: run.commit_sha,
+        expectedCommitSha: stageRun.commit_sha,
+      });
+      return {
+        recordKind: "diagnosis",
+        record: {
+          diagnosis: validated.diagnosis,
+          evidenceIds: validated.evidenceIds,
+          changeFamily: validated.diagnosis.changeFamily,
+          provider: envelope.provider,
+          model: envelope.model,
+          modelVersion: envelope.modelVersion ?? null,
+          schemaVersion: envelope.schemaVersion,
+          promptContractVersion: envelope.promptContractVersion,
+          inputFingerprint: envelope.inputFingerprint,
+          outputFingerprint: validated.outputFingerprint,
+          latencyMs: envelope.usage.latencyMs,
+          inputTokens: envelope.usage.inputTokens ?? null,
+          outputTokens: envelope.usage.outputTokens ?? null,
+          costMicrousd: envelope.usage.costMicrousd ?? null,
+        },
+      };
+    }
 
-  if (stage === "generate_patch") {
-    const { context } = await loadModelContext(run);
-    const [diagnosis, planRow] = await Promise.all([
-      checked<{ diagnosis: unknown }>(
+    if (stage === "plan") {
+      const { context } = await loadModelContext(run, dependencies.repositoryProvider);
+      const diagnosis = await checked<{ diagnosis: unknown }>(
         client
           .from("fix_diagnoses")
           .select("diagnosis")
           .eq("fix_run_id", run.id)
           .single() as PromiseLike<DbResult<{ diagnosis: unknown }>>,
         "fix_diagnosis_unavailable",
-      ),
-      checked<PlanRow>(
-        client
-          .from("fix_plans")
-          .select("id,plan,plan_fingerprint")
-          .eq("fix_run_id", run.id)
-          .single() as PromiseLike<DbResult<PlanRow>>,
-        "fix_plan_unavailable",
-      ),
-    ]);
-    const plan = FixPlanSchema.parse(planRow.plan);
-    const parsedDiagnosis = DiagnosisSchema.parse(diagnosis.diagnosis);
-    const envelope = await invokeCodingModel({
-      stage: "generate_patch",
-      stageId,
-      claimToken,
-      attemptNumber,
-      inputFingerprint: stableFingerprint({
-        stage: "generate_patch",
-        context: context.contextFingerprint,
-        diagnosis: parsedDiagnosis,
-        plan,
-      }),
-      invoke: (model) => model.proposePatch(context, parsedDiagnosis, plan),
-    });
-    const attemptId = deterministicAttemptUuid(run.id, stageId, attemptNumber);
-    const proposal =
-      typeof envelope.value === "object" && envelope.value !== null
-        ? { ...envelope.value, attemptIdentity: attemptId }
-        : envelope.value;
-    const validated = validatePatchProposal({
-      proposal,
-      plan,
-      expectedBaseSha: run.commit_sha,
-      expectedPlanFingerprint: planRow.plan_fingerprint,
-      expectedEvidenceFingerprint: run.evidence_fingerprint,
-    });
-    const artifact = await new SupabasePrivatePatchArtifactStore().put({
-      fixRunId: run.id,
-      attemptId,
-      diff: validated.diff,
-    });
-    return {
-      recordKind: "patch",
-      record: {
-        planId: planRow.id,
-        attemptNumber,
-        baseSha: run.commit_sha,
-        patchFingerprint: validated.fingerprint,
-        artifactPath: artifact.path,
-        changedPaths: validated.changedPaths,
-        lineCount: validated.changedLines,
-        byteCount: artifact.byteCount,
-        provider: envelope.provider,
-        model: envelope.model,
-      },
-    };
-  }
-
-  if (stage === "apply_patch" || stage === "verify_patch") {
-    const patch = await checked<PatchRow>(
-      client
-        .from("fix_patches")
-        .select(
-          "id,plan_id,base_sha,patch_fingerprint,artifact_path,changed_paths,line_count,byte_count,status,provider,model",
-        )
-        .eq("fix_run_id", run.id)
-        .order("attempt_number", { ascending: false })
-        .limit(1)
-        .single() as PromiseLike<DbResult<PatchRow>>,
-      "fix_patch_unavailable",
-    );
-    const diff = Buffer.from(
-      await new SupabasePrivatePatchArtifactStore().get({ path: patch.artifact_path }),
-    ).toString("utf8");
-    const snapshotInput = {
-      expectedBaseSha: run.commit_sha,
-      materialize: (destination: string, commitSha: string) =>
-        materializeForRun(run, destination, commitSha),
-      unifiedDiff: diff,
-    };
-    if (stage === "apply_patch") {
-      await withExactBaseGitHubSnapshot({ ...snapshotInput, run: async () => undefined });
-      return { recordKind: "patch", record: { planId: patch.plan_id, patchId: patch.id } };
-    }
-    const applied = await client
-      .from("fix_patches")
-      .select("status")
-      .eq("id", patch.id)
-      .eq("fix_run_id", run.id)
-      .single();
-    if (applied.error || applied.data?.status !== "applied")
-      throw new Error("fix_patch_not_applied");
-    const materialized = await withExactBaseGitHubSnapshot({
-      ...snapshotInput,
-      run: async (checkoutPath) => {
-        const names = await filesUnder(checkoutPath);
-        let packageJson: unknown = {};
-        if (names.includes("package.json")) {
-          try {
-            packageJson = JSON.parse(
-              await readFile(path.join(checkoutPath, "package.json"), "utf8"),
-            );
-          } catch {
-            throw new Error("verification_manifest_invalid");
-          }
-        }
-        const profile = resolveVerificationProfile({
-          packageJson,
-          files: names,
-          targetedTestPaths: FixPlanSchema.parse(
-            (
-              await checked(
-                client
-                  .from("fix_plans")
-                  .select("plan")
-                  .eq("id", patch.plan_id)
-                  .single() as PromiseLike<DbResult<{ plan: unknown }>>,
-                "fix_plan_unavailable",
-              )
-            ).plan,
-          ).expectedTests,
-          dependencyCacheAvailable: false,
-        });
-        if (profile.state !== "supported")
-          return { status: "unsupported" as const, profile, checks: [] };
-        const image =
-          "node:24.8.0-alpine3.22@sha256:3e843c608bb5232f39ecb2b25e41214b958b0795914707374c8acc28487dea17";
-        const checks = [];
-        for (const command of profile.commands) {
-          checks.push({
-            commandClass: command.commandClass,
-            ...(await runVerificationInDocker({ checkoutPath, image, command })),
-          });
-        }
-        return {
-          status: checks.every((check) => check.status === "passed")
-            ? ("passed" as const)
-            : ("failed" as const),
-          profile,
-          checks,
-        };
-      },
-    });
-    const status = materialized.status === "passed" ? "passed" : materialized.status;
-    return {
-      recordKind: "verification",
-      record: {
-        patchId: patch.id,
-        patchFingerprint: patch.patch_fingerprint,
-        profileId: materialized.profile.id,
-        status,
-        checks: materialized.checks,
-        diagnosticSummary:
-          status === "unsupported"
-            ? (materialized.profile.reason ?? "verification_unsupported")
-            : "",
-        durationMs: 0,
-        attemptNumber,
-      },
-    };
-  }
-
-  if (stage === "preflight") {
-    if (run.provenance_mode === "evidence_only")
-      throw new Error("evidence_only_preflight_forbidden");
-    const patch = await checked<PatchRow>(
-      client
-        .from("fix_patches")
-        .select("id,patch_fingerprint,status")
-        .eq("fix_run_id", run.id)
-        .eq("status", "applied")
-        .order("attempt_number", { ascending: false })
-        .limit(1)
-        .single() as PromiseLike<DbResult<PatchRow>>,
-      "fix_preflight_patch_unavailable",
-    );
-    const { target, repository } = await loadRepository(run);
-    if (
-      `${repository.owner}/${repository.name}`.toLowerCase() !==
-      run.provider_repository_identity.toLowerCase()
-    )
-      throw new Error("fix_repository_identity_mismatch");
-    const currentSha = await githubProvider().getHead(target);
-    if (currentSha.toLowerCase() !== run.commit_sha.toLowerCase()) throw new Error("stale_base");
-    const result = await runCanonicalFixPreflight({
-      workspaceId: run.workspace_id,
-      workspaceDependencyId: run.workspace_dependency_id,
-      classificationId: run.classification_id,
-      repositoryId: run.repository_id,
-      baseSha: run.commit_sha,
-      provenanceMode: run.provenance_mode,
-    });
-    return {
-      recordKind: "preflight",
-      record: {
-        patchId: patch.id,
-        patchFingerprint: patch.patch_fingerprint,
-        status: result.status,
-        preflightRunId: result.preflightRunId,
-        failureCategory: result.category,
-      },
-    };
-  }
-
-  if (stage === "risk_assess") {
-    const RiskPatchRow = {
-      changed_paths: [] as string[],
-      line_count: 0,
-      plan_id: "",
-      id: "",
-      patch_fingerprint: "",
-    };
-    type RiskPatchRow = typeof RiskPatchRow;
-    const patch = await checked<RiskPatchRow>(
-      client
-        .from("fix_patches")
-        .select("changed_paths,line_count,plan_id,id,patch_fingerprint")
-        .eq("fix_run_id", run.id)
-        .eq("status", "applied")
-        .single() as PromiseLike<DbResult<RiskPatchRow>>,
-      "fix_applied_patch_unavailable",
-    );
-    const [planRow, verification, preflight] = await Promise.all([
-      checked<{ plan: unknown }>(
-        client.from("fix_plans").select("plan").eq("id", patch.plan_id).single() as PromiseLike<
-          DbResult<{ plan: unknown }>
-        >,
-        "fix_plan_unavailable",
-      ),
-      checked<{ status: string }>(
-        client
-          .from("fix_verification_runs")
-          .select("status")
-          .eq("fix_run_id", run.id)
-          .eq("patch_id", patch.id)
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .single() as PromiseLike<DbResult<{ status: string }>>,
-        "fix_verification_unavailable",
-      ),
-      run.preflight_required
-        ? checked<{ status: string }>(
-            client
-              .from("fix_preflight_results")
-              .select("status")
-              .eq("fix_run_id", run.id)
-              .eq("patch_id", patch.id)
-              .single() as PromiseLike<DbResult<{ status: string }>>,
-            "fix_preflight_unavailable",
-          )
-        : Promise.resolve({ status: "not_applicable" }),
-    ]);
-    const plan = FixPlanSchema.parse(planRow.plan);
-    const risk = assessFixRisk({
-      changedPaths: patch.changed_paths,
-      changedLines: patch.line_count,
-      dependencyChanges: plan.dependencyChanges.length,
-      verification:
-        verification.status === "passed"
-          ? "passed"
-          : verification.status === "unsupported"
-            ? "unsupported"
-            : "failed",
-      preflightRequired: run.preflight_required,
-      preflight: run.preflight_required
-        ? preflight.status === "passed"
-          ? "passed"
-          : "failed"
-        : "not_applicable",
-      reviewDisposition: run.review_disposition,
-      provenanceMode: run.provenance_mode,
-      staleBase: false,
-      conflict: false,
-    });
-    return {
-      recordKind: "risk",
-      record: {
-        riskVersion: risk.version,
-        riskLevel: risk.level,
-        factors: risk.factors,
-        inputFingerprint: stableFingerprint({
-          run: run.id,
-          patch: patch.patch_fingerprint,
-          verification: verification.status,
-          risk,
-        }),
-      },
-    };
-  }
-
-  if (stage === "create_draft_pr") {
-    const environment = getEnvironment();
-    if (environment.FIX_GITHUB_DRAFT_PR_WRITES !== "1")
-      throw new Error("github_draft_pr_writes_disabled");
-    if (
-      run.source_mode !== "provider" ||
-      run.processing_mode !== "customer" ||
-      run.provenance_mode !== "customer" ||
-      run.status !== "creating_pr"
-    ) {
-      throw new Error("fix_draft_pr_provenance_or_state_invalid");
-    }
-    const currentScope = await loadCurrentDraftPrScope(run);
-    const patch = await checked<PatchRow>(
-      client
-        .from("fix_patches")
-        .select(
-          "id,plan_id,base_sha,patch_fingerprint,artifact_path,changed_paths,line_count,byte_count,status,provider,model",
-        )
-        .eq("fix_run_id", run.id)
-        .eq("status", "applied")
-        .order("attempt_number", { ascending: false })
-        .limit(1)
-        .single() as PromiseLike<DbResult<PatchRow>>,
-      "fix_applied_patch_unavailable",
-    );
-    if (patch.base_sha !== run.commit_sha) throw new Error("stale_base");
-    const [planRow, verification, persistedRisk, preflight] = await Promise.all([
-      checked<{ plan: unknown }>(
-        client
-          .from("fix_plans")
-          .select("plan")
-          .eq("id", patch.plan_id)
-          .eq("fix_run_id", run.id)
-          .single() as PromiseLike<DbResult<{ plan: unknown }>>,
-        "fix_plan_unavailable",
-      ),
-      checked<{ status: string; patch_fingerprint: string }>(
-        client
-          .from("fix_verification_runs")
-          .select("status,patch_fingerprint")
-          .eq("fix_run_id", run.id)
-          .eq("patch_id", patch.id)
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .single() as PromiseLike<DbResult<{ status: string; patch_fingerprint: string }>>,
-        "fix_verification_unavailable",
-      ),
-      checked<{ risk_level: string; factors: string[]; input_fingerprint: string }>(
-        client
-          .from("fix_risk_assessments")
-          .select("risk_level,factors,input_fingerprint")
-          .eq("fix_run_id", run.id)
-          .single() as PromiseLike<
-          DbResult<{ risk_level: string; factors: string[]; input_fingerprint: string }>
-        >,
-        "fix_risk_assessment_unavailable",
-      ),
-      run.preflight_required
-        ? checked<{ status: string; patch_id: string; patch_fingerprint: string }>(
-            client
-              .from("fix_preflight_results")
-              .select("status,patch_id,patch_fingerprint")
-              .eq("fix_run_id", run.id)
-              .eq("patch_id", patch.id)
-              .single() as PromiseLike<
-              DbResult<{ status: string; patch_id: string; patch_fingerprint: string }>
-            >,
-            "fix_preflight_unavailable",
-          )
-        : Promise.resolve({
-            status: "not_applicable",
-            patch_id: patch.id,
-            patch_fingerprint: patch.patch_fingerprint,
+      );
+      const parsedDiagnosis = DiagnosisSchema.parse(diagnosis.diagnosis);
+      const envelope = await invokeCodingModel(
+        {
+          stage: "plan",
+          stageId,
+          claimToken,
+          attemptNumber,
+          inputFingerprint: stableFingerprint({
+            stage: "plan",
+            context: context.contextFingerprint,
+            diagnosis: parsedDiagnosis,
           }),
-    ]);
-    if (
-      verification.patch_fingerprint !== patch.patch_fingerprint ||
-      preflight.patch_id !== patch.id ||
-      preflight.patch_fingerprint !== patch.patch_fingerprint
-    ) {
-      throw new Error("fix_pr_verification_identity_mismatch");
-    }
-    const plan = FixPlanSchema.parse(planRow.plan);
-    const recomputedRisk = assessFixRisk({
-      changedPaths: patch.changed_paths,
-      changedLines: patch.line_count,
-      dependencyChanges: plan.dependencyChanges.length,
-      verification:
-        verification.status === "passed"
-          ? "passed"
-          : verification.status === "unsupported"
-            ? "unsupported"
-            : "failed",
-      preflightRequired: run.preflight_required,
-      preflight: run.preflight_required
-        ? preflight.status === "passed"
-          ? "passed"
-          : "failed"
-        : "not_applicable",
-      reviewDisposition: run.review_disposition,
-      provenanceMode: run.provenance_mode,
-      staleBase: false,
-      conflict: false,
-    });
-    const riskInputFingerprint = stableFingerprint({
-      run: run.id,
-      patch: patch.patch_fingerprint,
-      verification: verification.status,
-      risk: recomputedRisk,
-    });
-    if (
-      persistedRisk.risk_level !== recomputedRisk.level ||
-      persistedRisk.input_fingerprint !== riskInputFingerprint ||
-      JSON.stringify(persistedRisk.factors) !== JSON.stringify(recomputedRisk.factors) ||
-      !["LOW", "MEDIUM"].includes(recomputedRisk.level) ||
-      !recomputedRisk.draftPrEligible
-    ) {
-      throw new Error("draft_pr_risk_blocked");
+          invoke: (model) => model.plan(context, parsedDiagnosis),
+        },
+        dependencies.model,
+      );
+      const plan = validateProposedFixPlan({
+        proposal: envelope.value,
+        diagnosis: parsedDiagnosis,
+        preflightRequired: run.preflight_required,
+        reviewRequired: run.review_disposition === "review_required",
+      });
+      return {
+        recordKind: "plan",
+        record: {
+          plan,
+          planVersion: 1,
+          planFingerprint: stableFingerprint(plan),
+          provider: envelope.provider,
+          model: envelope.model,
+          schemaVersion: envelope.schemaVersion,
+          promptContractVersion: envelope.promptContractVersion,
+        },
+      };
     }
 
-    const { target, repository } = await loadRepository(run);
-    if (
-      `${repository.owner}/${repository.name}`.toLowerCase() !==
-      run.provider_repository_identity.toLowerCase()
-    ) {
-      throw new Error("fix_repository_identity_mismatch");
+    if (stage === "generate_patch") {
+      const { context } = await loadModelContext(run, dependencies.repositoryProvider);
+      const [diagnosis, planRow] = await Promise.all([
+        checked<{ diagnosis: unknown }>(
+          client
+            .from("fix_diagnoses")
+            .select("diagnosis")
+            .eq("fix_run_id", run.id)
+            .single() as PromiseLike<DbResult<{ diagnosis: unknown }>>,
+          "fix_diagnosis_unavailable",
+        ),
+        checked<PlanRow>(
+          client
+            .from("fix_plans")
+            .select("id,plan,plan_fingerprint")
+            .eq("fix_run_id", run.id)
+            .single() as PromiseLike<DbResult<PlanRow>>,
+          "fix_plan_unavailable",
+        ),
+      ]);
+      const plan = FixPlanSchema.parse(planRow.plan);
+      const parsedDiagnosis = DiagnosisSchema.parse(diagnosis.diagnosis);
+      const envelope = await invokeCodingModel(
+        {
+          stage: "generate_patch",
+          stageId,
+          claimToken,
+          attemptNumber,
+          inputFingerprint: stableFingerprint({
+            stage: "generate_patch",
+            context: context.contextFingerprint,
+            diagnosis: parsedDiagnosis,
+            plan,
+          }),
+          invoke: (model) => model.proposePatch(context, parsedDiagnosis, plan),
+        },
+        dependencies.model,
+      );
+      const attemptId = deterministicAttemptUuid(run.id, stageId, attemptNumber);
+      const proposal =
+        typeof envelope.value === "object" && envelope.value !== null
+          ? { ...envelope.value, attemptIdentity: attemptId }
+          : envelope.value;
+      const validated = validatePatchProposal({
+        proposal,
+        plan,
+        expectedBaseSha: run.commit_sha,
+        expectedPlanFingerprint: planRow.plan_fingerprint,
+        expectedEvidenceFingerprint: run.evidence_fingerprint,
+      });
+      const artifact = await new SupabasePrivatePatchArtifactStore().put({
+        fixRunId: run.id,
+        attemptId,
+        diff: validated.diff,
+      });
+      return {
+        recordKind: "patch",
+        record: {
+          planId: planRow.id,
+          attemptNumber,
+          baseSha: run.commit_sha,
+          patchFingerprint: validated.fingerprint,
+          artifactPath: artifact.path,
+          changedPaths: validated.changedPaths,
+          lineCount: validated.changedLines,
+          byteCount: artifact.byteCount,
+          provider: envelope.provider,
+          model: envelope.model,
+        },
+      };
     }
-    const readProvider = githubProvider();
-    const currentDefaultBranchSha = await readProvider.getHead(target);
-    const eligibilityBase = {
-      provenanceMode: run.provenance_mode,
-      productPolicyAllowsDraftPr: currentScope.productPolicyAllowsDraftPr,
-      repositoryAllowlisted: currentScope.repositoryAllowlisted,
-      installationRepositoryIdentity: `${repository.owner}/${repository.name}`,
-      repositoryIdentity: `${repository.owner}/${repository.name}`,
-      permissions: { contents: "write" as const, pull_requests: "write" as const },
-      risk: recomputedRisk,
-      verificationPassed: verification.status === "passed",
-      preflightRequired: run.preflight_required,
-      preflightPassed: preflight.status === "passed",
-      baseSha: run.commit_sha,
-      currentDefaultBranchSha,
-      unresolvedExternalOperation: false,
-      reviewDisposition: run.review_disposition,
-      reviewReason: run.review_reason,
-    };
-    assertDraftPrEligible(eligibilityBase);
 
-    const diff = Buffer.from(
-      await new SupabasePrivatePatchArtifactStore().get({ path: patch.artifact_path }),
-    ).toString("utf8");
-    const changedFiles = await readChangedFilesFromAppliedPatch({ run, patch, plan, diff });
-    const repositoryIdentity = `${repository.owner}/${repository.name}`;
-    if (!environment.GITHUB_APP_ID || !environment.GITHUB_APP_PRIVATE_KEY)
-      throw new Error("github_write_app_configuration_missing");
-    const scopedToken = await createScopedGitHubWriteToken({
-      appId: environment.GITHUB_APP_ID,
-      privateKey: environment.GITHUB_APP_PRIVATE_KEY,
-      installationId: target.installationId,
-      repositoryId: target.externalId,
-      owner: repository.owner,
-      repository: repository.name,
-    });
-    const provider = new GitHubAppDraftPRProvider({
-      installationToken: async () => scopedToken.token,
-      verifiedGrant: {
-        repositoryIdentity: scopedToken.repositoryIdentity,
+    if (stage === "apply_patch" || stage === "verify_patch") {
+      const patch = await checked<PatchRow>(
+        client
+          .from("fix_patches")
+          .select(
+            "id,plan_id,base_sha,patch_fingerprint,artifact_path,changed_paths,line_count,byte_count,status,provider,model",
+          )
+          .eq("fix_run_id", run.id)
+          .order("attempt_number", { ascending: false })
+          .limit(1)
+          .single() as PromiseLike<DbResult<PatchRow>>,
+        "fix_patch_unavailable",
+      );
+      const diff = Buffer.from(
+        await new SupabasePrivatePatchArtifactStore().get({ path: patch.artifact_path }),
+      ).toString("utf8");
+      const snapshotInput = {
+        expectedBaseSha: run.commit_sha,
+        materialize: (destination: string, commitSha: string) =>
+          materializeForRun(run, destination, commitSha, dependencies.repositoryProvider),
+        unifiedDiff: diff,
+      };
+      if (stage === "apply_patch") {
+        await withExactBaseGitHubSnapshot({ ...snapshotInput, run: async () => undefined });
+        return { recordKind: "patch", record: { planId: patch.plan_id, patchId: patch.id } };
+      }
+      const applied = await client
+        .from("fix_patches")
+        .select("status")
+        .eq("id", patch.id)
+        .eq("fix_run_id", run.id)
+        .single();
+      if (applied.error || applied.data?.status !== "applied")
+        throw new Error("fix_patch_not_applied");
+      const materialized = await withExactBaseGitHubSnapshot({
+        ...snapshotInput,
+        run: async (checkoutPath) => {
+          const names = await filesUnder(checkoutPath);
+          let packageJson: unknown = {};
+          let packageJsonText: string | null = null;
+          if (names.includes("package.json")) {
+            try {
+              packageJsonText = await readFile(path.join(checkoutPath, "package.json"), "utf8");
+              packageJson = JSON.parse(packageJsonText);
+            } catch {
+              throw new Error("verification_manifest_invalid");
+            }
+          }
+          const lockfiles: Record<string, string> = {};
+          for (const name of [
+            "package-lock.json",
+            "npm-shrinkwrap.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+          ])
+            if (names.includes(name))
+              lockfiles[name] = await readFile(path.join(checkoutPath, name), "utf8");
+          const environment = getEnvironment();
+          const cacheIdentity = packageJsonText
+            ? createDependencyCacheIdentity({
+                repositoryId: run.repository_id,
+                repositoryIdentity: run.provider_repository_identity,
+                commitSha: run.commit_sha,
+                packageJson: packageJsonText,
+                lockfiles,
+              })
+            : null;
+          const dependencyCache = dependencies.resolveDependencyCache
+            ? await dependencies.resolveDependencyCache(cacheIdentity)
+            : await resolveTrustedDependencyCache({
+                root: environment.FIX_DEPENDENCY_CACHE_ROOT,
+                publicKey: environment.FIX_DEPENDENCY_CACHE_PUBLIC_KEY,
+                identity: cacheIdentity,
+              });
+          if (dependencyCache.status === "rejected")
+            throw new Error(`fix_dependency_cache_${dependencyCache.reason}`);
+          const profile = resolveVerificationProfile({
+            packageJson,
+            files: names,
+            targetedTestPaths: FixPlanSchema.parse(
+              (
+                await checked(
+                  client
+                    .from("fix_plans")
+                    .select("plan")
+                    .eq("id", patch.plan_id)
+                    .single() as PromiseLike<DbResult<{ plan: unknown }>>,
+                  "fix_plan_unavailable",
+                )
+              ).plan,
+            ).expectedTests,
+            dependencyCacheAvailable: dependencyCache.status === "available",
+          });
+          if (profile.state !== "supported")
+            return { status: "unsupported" as const, profile, checks: [] };
+          if (dependencyCache.status !== "available")
+            return {
+              status: "unsupported" as const,
+              profile: {
+                ...profile,
+                state: "verification_unsupported" as const,
+                reason: "trusted_dependency_cache_unavailable",
+              },
+              checks: [],
+            };
+          const image = FIX_VERIFICATION_IMAGE;
+          const checks = [];
+          for (const command of profile.commands) {
+            checks.push({
+              commandClass: command.commandClass,
+              ...(await runVerificationInDocker({
+                checkoutPath,
+                image,
+                command,
+                dependencyCache,
+              })),
+            });
+          }
+          return {
+            status: checks.every((check) => check.status === "passed")
+              ? ("passed" as const)
+              : ("failed" as const),
+            profile,
+            checks,
+          };
+        },
+      });
+      const status = materialized.status === "passed" ? "passed" : materialized.status;
+      return {
+        recordKind: "verification",
+        record: {
+          patchId: patch.id,
+          patchFingerprint: patch.patch_fingerprint,
+          profileId: materialized.profile.id,
+          status,
+          checks: materialized.checks,
+          diagnosticSummary:
+            status === "unsupported"
+              ? (materialized.profile.reason ?? "verification_unsupported")
+              : "",
+          durationMs: 0,
+          attemptNumber,
+        },
+      };
+    }
+
+    if (stage === "preflight") {
+      if (run.provenance_mode === "evidence_only")
+        throw new Error("evidence_only_preflight_forbidden");
+      const patch = await checked<PatchRow>(
+        client
+          .from("fix_patches")
+          .select("id,patch_fingerprint,status")
+          .eq("fix_run_id", run.id)
+          .eq("status", "applied")
+          .order("attempt_number", { ascending: false })
+          .limit(1)
+          .single() as PromiseLike<DbResult<PatchRow>>,
+        "fix_preflight_patch_unavailable",
+      );
+      const { target, repository } = await loadRepository(run);
+      if (
+        `${repository.owner}/${repository.name}`.toLowerCase() !==
+        run.provider_repository_identity.toLowerCase()
+      )
+        throw new Error("fix_repository_identity_mismatch");
+      const currentSha = await githubProvider().getHead(target);
+      if (currentSha.toLowerCase() !== run.commit_sha.toLowerCase()) throw new Error("stale_base");
+      const result = await runCanonicalFixPreflight({
+        workspaceId: run.workspace_id,
+        workspaceDependencyId: run.workspace_dependency_id,
+        classificationId: run.classification_id,
+        repositoryId: run.repository_id,
+        baseSha: run.commit_sha,
+        provenanceMode: run.provenance_mode,
+      });
+      return {
+        recordKind: "preflight",
+        record: {
+          patchId: patch.id,
+          patchFingerprint: patch.patch_fingerprint,
+          status: result.status,
+          preflightRunId: result.preflightRunId,
+          failureCategory: result.category,
+        },
+      };
+    }
+
+    if (stage === "risk_assess") {
+      const RiskPatchRow = {
+        changed_paths: [] as string[],
+        line_count: 0,
+        plan_id: "",
+        id: "",
+        patch_fingerprint: "",
+      };
+      type RiskPatchRow = typeof RiskPatchRow;
+      const patch = await checked<RiskPatchRow>(
+        client
+          .from("fix_patches")
+          .select("changed_paths,line_count,plan_id,id,patch_fingerprint")
+          .eq("fix_run_id", run.id)
+          .eq("status", "applied")
+          .single() as PromiseLike<DbResult<RiskPatchRow>>,
+        "fix_applied_patch_unavailable",
+      );
+      const [planRow, verification, preflight] = await Promise.all([
+        checked<{ plan: unknown }>(
+          client.from("fix_plans").select("plan").eq("id", patch.plan_id).single() as PromiseLike<
+            DbResult<{ plan: unknown }>
+          >,
+          "fix_plan_unavailable",
+        ),
+        checked<{ status: string }>(
+          client
+            .from("fix_verification_runs")
+            .select("status")
+            .eq("fix_run_id", run.id)
+            .eq("patch_id", patch.id)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .single() as PromiseLike<DbResult<{ status: string }>>,
+          "fix_verification_unavailable",
+        ),
+        run.preflight_required
+          ? checked<{ status: string }>(
+              client
+                .from("fix_preflight_results")
+                .select("status")
+                .eq("fix_run_id", run.id)
+                .eq("patch_id", patch.id)
+                .single() as PromiseLike<DbResult<{ status: string }>>,
+              "fix_preflight_unavailable",
+            )
+          : Promise.resolve({ status: "not_applicable" }),
+      ]);
+      const plan = FixPlanSchema.parse(planRow.plan);
+      const risk = assessFixRisk({
+        changedPaths: patch.changed_paths,
+        changedLines: patch.line_count,
+        dependencyChanges: plan.dependencyChanges.length,
+        verification:
+          verification.status === "passed"
+            ? "passed"
+            : verification.status === "unsupported"
+              ? "unsupported"
+              : "failed",
+        preflightRequired: run.preflight_required,
+        preflight: run.preflight_required
+          ? preflight.status === "passed"
+            ? "passed"
+            : "failed"
+          : "not_applicable",
+        reviewDisposition: run.review_disposition,
+        provenanceMode: run.provenance_mode,
+        staleBase: false,
+        conflict: false,
+      });
+      return {
+        recordKind: "risk",
+        record: {
+          riskVersion: risk.version,
+          riskLevel: risk.level,
+          factors: risk.factors,
+          inputFingerprint: stableFingerprint({
+            run: run.id,
+            patch: patch.patch_fingerprint,
+            verification: verification.status,
+            risk,
+          }),
+        },
+      };
+    }
+
+    if (stage === "create_draft_pr") {
+      const environment = getEnvironment();
+      if (environment.FIX_GITHUB_DRAFT_PR_WRITES !== "1")
+        throw new Error("github_draft_pr_writes_disabled");
+      if (
+        run.source_mode !== "provider" ||
+        run.processing_mode !== "customer" ||
+        run.provenance_mode !== "customer" ||
+        run.status !== "creating_pr"
+      ) {
+        throw new Error("fix_draft_pr_provenance_or_state_invalid");
+      }
+      const currentScope = await loadCurrentDraftPrScope(run);
+      const patch = await checked<PatchRow>(
+        client
+          .from("fix_patches")
+          .select(
+            "id,plan_id,base_sha,patch_fingerprint,artifact_path,changed_paths,line_count,byte_count,status,provider,model",
+          )
+          .eq("fix_run_id", run.id)
+          .eq("status", "applied")
+          .order("attempt_number", { ascending: false })
+          .limit(1)
+          .single() as PromiseLike<DbResult<PatchRow>>,
+        "fix_applied_patch_unavailable",
+      );
+      if (patch.base_sha !== run.commit_sha) throw new Error("stale_base");
+      const [planRow, verification, persistedRisk, preflight] = await Promise.all([
+        checked<{ plan: unknown }>(
+          client
+            .from("fix_plans")
+            .select("plan")
+            .eq("id", patch.plan_id)
+            .eq("fix_run_id", run.id)
+            .single() as PromiseLike<DbResult<{ plan: unknown }>>,
+          "fix_plan_unavailable",
+        ),
+        checked<{ status: string; patch_fingerprint: string }>(
+          client
+            .from("fix_verification_runs")
+            .select("status,patch_fingerprint")
+            .eq("fix_run_id", run.id)
+            .eq("patch_id", patch.id)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .single() as PromiseLike<DbResult<{ status: string; patch_fingerprint: string }>>,
+          "fix_verification_unavailable",
+        ),
+        checked<{ risk_level: string; factors: string[]; input_fingerprint: string }>(
+          client
+            .from("fix_risk_assessments")
+            .select("risk_level,factors,input_fingerprint")
+            .eq("fix_run_id", run.id)
+            .single() as PromiseLike<
+            DbResult<{ risk_level: string; factors: string[]; input_fingerprint: string }>
+          >,
+          "fix_risk_assessment_unavailable",
+        ),
+        run.preflight_required
+          ? checked<{ status: string; patch_id: string; patch_fingerprint: string }>(
+              client
+                .from("fix_preflight_results")
+                .select("status,patch_id,patch_fingerprint")
+                .eq("fix_run_id", run.id)
+                .eq("patch_id", patch.id)
+                .single() as PromiseLike<
+                DbResult<{ status: string; patch_id: string; patch_fingerprint: string }>
+              >,
+              "fix_preflight_unavailable",
+            )
+          : Promise.resolve({
+              status: "not_applicable",
+              patch_id: patch.id,
+              patch_fingerprint: patch.patch_fingerprint,
+            }),
+      ]);
+      if (
+        verification.patch_fingerprint !== patch.patch_fingerprint ||
+        preflight.patch_id !== patch.id ||
+        preflight.patch_fingerprint !== patch.patch_fingerprint
+      ) {
+        throw new Error("fix_pr_verification_identity_mismatch");
+      }
+      const plan = FixPlanSchema.parse(planRow.plan);
+      const recomputedRisk = assessFixRisk({
+        changedPaths: patch.changed_paths,
+        changedLines: patch.line_count,
+        dependencyChanges: plan.dependencyChanges.length,
+        verification:
+          verification.status === "passed"
+            ? "passed"
+            : verification.status === "unsupported"
+              ? "unsupported"
+              : "failed",
+        preflightRequired: run.preflight_required,
+        preflight: run.preflight_required
+          ? preflight.status === "passed"
+            ? "passed"
+            : "failed"
+          : "not_applicable",
+        reviewDisposition: run.review_disposition,
+        provenanceMode: run.provenance_mode,
+        staleBase: false,
+        conflict: false,
+      });
+      const riskInputFingerprint = stableFingerprint({
+        run: run.id,
+        patch: patch.patch_fingerprint,
+        verification: verification.status,
+        risk: recomputedRisk,
+      });
+      if (
+        persistedRisk.risk_level !== recomputedRisk.level ||
+        persistedRisk.input_fingerprint !== riskInputFingerprint ||
+        JSON.stringify(persistedRisk.factors) !== JSON.stringify(recomputedRisk.factors) ||
+        !["LOW", "MEDIUM"].includes(recomputedRisk.level) ||
+        !recomputedRisk.draftPrEligible
+      ) {
+        throw new Error("draft_pr_risk_blocked");
+      }
+
+      const { target, repository } = await loadRepository(run);
+      if (
+        `${repository.owner}/${repository.name}`.toLowerCase() !==
+        run.provider_repository_identity.toLowerCase()
+      ) {
+        throw new Error("fix_repository_identity_mismatch");
+      }
+      const readProvider = githubProvider();
+      const currentDefaultBranchSha = await readProvider.getHead(target);
+      const eligibilityBase = {
+        provenanceMode: run.provenance_mode,
+        productPolicyAllowsDraftPr: currentScope.productPolicyAllowsDraftPr,
+        repositoryAllowlisted: currentScope.repositoryAllowlisted,
+        installationRepositoryIdentity: `${repository.owner}/${repository.name}`,
+        repositoryIdentity: `${repository.owner}/${repository.name}`,
+        permissions: { contents: "write" as const, pull_requests: "write" as const },
+        risk: recomputedRisk,
+        verificationPassed: verification.status === "passed",
+        preflightRequired: run.preflight_required,
+        preflightPassed: preflight.status === "passed",
+        baseSha: run.commit_sha,
+        currentDefaultBranchSha,
+        unresolvedExternalOperation: false,
+        reviewDisposition: run.review_disposition,
+        reviewReason: run.review_reason,
+      };
+      assertDraftPrEligible(eligibilityBase);
+
+      const diff = Buffer.from(
+        await new SupabasePrivatePatchArtifactStore().get({ path: patch.artifact_path }),
+      ).toString("utf8");
+      const changedFiles = await readChangedFilesFromAppliedPatch({ run, patch, plan, diff });
+      const repositoryIdentity = `${repository.owner}/${repository.name}`;
+      if (!environment.GITHUB_APP_ID || !environment.GITHUB_APP_PRIVATE_KEY)
+        throw new Error("github_write_app_configuration_missing");
+      const scopedToken = await createScopedGitHubWriteToken({
+        appId: environment.GITHUB_APP_ID,
+        privateKey: environment.GITHUB_APP_PRIVATE_KEY,
+        installationId: target.installationId,
+        repositoryId: target.externalId,
+        owner: repository.owner,
+        repository: repository.name,
+      });
+      const provider = new GitHubAppDraftPRProvider({
+        installationToken: async () => scopedToken.token,
+        verifiedGrant: {
+          repositoryIdentity: scopedToken.repositoryIdentity,
+          installationRepositoryIdentity: scopedToken.repositoryIdentity,
+          permissions: scopedToken.permissions,
+        },
+      });
+      const eligibility = {
+        ...eligibilityBase,
         installationRepositoryIdentity: scopedToken.repositoryIdentity,
         permissions: scopedToken.permissions,
-      },
-    });
-    const eligibility = {
-      ...eligibilityBase,
-      installationRepositoryIdentity: scopedToken.repositoryIdentity,
-      permissions: scopedToken.permissions,
-    };
-    assertDraftPrEligible(eligibility);
-    const requestFingerprint = stableFingerprint({
-      fixRunIdentity: run.idempotency_key,
-      repositoryIdentity,
-      baseSha: run.commit_sha,
-      patchFingerprint: patch.patch_fingerprint,
-      changedFiles: changedFiles.map((file) => ({
-        path: file.path,
-        deleted: file.deleted === true,
-        contentFingerprint: file.content === undefined ? null : stableFingerprint(file.content),
-      })),
-    });
-    const operationKey = externalOperationKey(
-      run.idempotency_key,
-      "github_draft_pr",
-      requestFingerprint,
-    );
-    const operation = await executeReconciledOperation({
-      store: new SupabaseExternalOperationStore({
-        fixRunId: run.id,
-        stageId,
-        claimToken,
-      }),
-      key: operationKey,
-      operationKind: "github_draft_pr",
-      requestFingerprint,
-      reconcile: () =>
-        provider.reconcileDraft({
-          owner: repository.owner,
-          repository: repository.name,
-          defaultBranch: repository.default_branch,
-          baseSha: run.commit_sha,
-          identityKey: run.idempotency_key,
-          changedFiles,
-          eligibility,
-        }),
-      execute: () =>
-        provider.createDraft({
-          owner: repository.owner,
-          repository: repository.name,
-          defaultBranch: repository.default_branch,
-          baseSha: run.commit_sha,
-          identityKey: run.idempotency_key,
-          changedFiles,
-          eligibility,
-        }),
-      externalId: (result) => result.headSha,
-      externalUrl: (result) => result.url,
-      safeToResumeAfterMissingReconciliation: true,
-    });
-    const result = operation.result;
-    const expectedBranch = deterministicFixBranch(run.idempotency_key);
-    let pullUrl: URL | null = null;
-    try {
-      pullUrl = new URL(result.url);
-    } catch {
-      pullUrl = null;
-    }
-    const pullPath = pullUrl?.pathname.split("/") ?? [];
-    if (
-      result.branch !== expectedBranch ||
-      !/^[a-f0-9]{40,64}$/i.test(result.headSha) ||
-      pullUrl?.origin !== "https://github.com" ||
-      pullUrl.search !== "" ||
-      pullUrl.hash !== "" ||
-      pullPath.length !== 5 ||
-      pullPath[1]?.toLowerCase() !== repository.owner.toLowerCase() ||
-      pullPath[2]?.toLowerCase() !== repository.name.toLowerCase() ||
-      pullPath[3] !== "pull" ||
-      !/^[1-9][0-9]*$/.test(pullPath[4] ?? "")
-    ) {
-      throw new Error("github_draft_pr_result_identity_invalid");
-    }
-    return {
-      recordKind: "pr_outcome",
-      record: {
-        externalOperationId: operation.operationId,
-        status: result.reconciled ? "reconciled_existing" : "draft_created",
-        branchName: result.branch,
-        pullRequestUrl: result.url,
+      };
+      assertDraftPrEligible(eligibility);
+      const requestFingerprint = stableFingerprint({
+        fixRunIdentity: run.idempotency_key,
+        repositoryIdentity,
         baseSha: run.commit_sha,
-        headSha: result.headSha,
-      },
-    };
-  }
-  throw new Error("fix_stage_unsupported");
-};
+        patchFingerprint: patch.patch_fingerprint,
+        changedFiles: changedFiles.map((file) => ({
+          path: file.path,
+          deleted: file.deleted === true,
+          contentFingerprint: file.content === undefined ? null : stableFingerprint(file.content),
+        })),
+      });
+      const operationKey = externalOperationKey(
+        run.idempotency_key,
+        "github_draft_pr",
+        requestFingerprint,
+      );
+      const operation = await executeReconciledOperation({
+        store: new SupabaseExternalOperationStore({
+          fixRunId: run.id,
+          stageId,
+          claimToken,
+        }),
+        key: operationKey,
+        operationKind: "github_draft_pr",
+        requestFingerprint,
+        reconcile: () =>
+          provider.reconcileDraft({
+            owner: repository.owner,
+            repository: repository.name,
+            defaultBranch: repository.default_branch,
+            baseSha: run.commit_sha,
+            identityKey: run.idempotency_key,
+            changedFiles,
+            eligibility,
+          }),
+        execute: () =>
+          provider.createDraft({
+            owner: repository.owner,
+            repository: repository.name,
+            defaultBranch: repository.default_branch,
+            baseSha: run.commit_sha,
+            identityKey: run.idempotency_key,
+            changedFiles,
+            eligibility,
+          }),
+        externalId: (result) => result.headSha,
+        externalUrl: (result) => result.url,
+        safeToResumeAfterMissingReconciliation: true,
+      });
+      const result = operation.result;
+      const expectedBranch = deterministicFixBranch(run.idempotency_key);
+      let pullUrl: URL | null = null;
+      try {
+        pullUrl = new URL(result.url);
+      } catch {
+        pullUrl = null;
+      }
+      const pullPath = pullUrl?.pathname.split("/") ?? [];
+      if (
+        result.branch !== expectedBranch ||
+        !/^[a-f0-9]{40,64}$/i.test(result.headSha) ||
+        pullUrl?.origin !== "https://github.com" ||
+        pullUrl.search !== "" ||
+        pullUrl.hash !== "" ||
+        pullPath.length !== 5 ||
+        pullPath[1]?.toLowerCase() !== repository.owner.toLowerCase() ||
+        pullPath[2]?.toLowerCase() !== repository.name.toLowerCase() ||
+        pullPath[3] !== "pull" ||
+        !/^[1-9][0-9]*$/.test(pullPath[4] ?? "")
+      ) {
+        throw new Error("github_draft_pr_result_identity_invalid");
+      }
+      return {
+        recordKind: "pr_outcome",
+        record: {
+          externalOperationId: operation.operationId,
+          status: result.reconciled ? "reconciled_existing" : "draft_created",
+          branchName: result.branch,
+          pullRequestUrl: result.url,
+          baseSha: run.commit_sha,
+          headSha: result.headSha,
+        },
+      };
+    }
+    throw new Error("fix_stage_unsupported");
+  };
+}
+
+export const processFixEngineStage: FixStageProcessor = createFixEngineStageProcessor();

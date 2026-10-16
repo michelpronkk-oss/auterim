@@ -385,6 +385,18 @@ describe("M15.78 Fix Engine V1 deterministic contracts", () => {
           return new Response(JSON.stringify({ object: { sha: baseSha } }));
         if (url.pathname.endsWith(`/git/commits/${baseSha}`))
           return new Response(JSON.stringify({ tree: { sha: "base-tree" } }));
+        if (url.pathname.endsWith("/git/trees/base-tree"))
+          return new Response(
+            JSON.stringify({
+              truncated: false,
+              tree: [
+                { path: "src/client.ts", mode: "100644", type: "blob" },
+                { path: "src/script.sh", mode: "100755", type: "blob" },
+                { path: "src/remove.sh", mode: "100755", type: "blob" },
+                { path: "src/readonly.ts", mode: "100644", type: "blob" },
+              ],
+            }),
+          );
         if (url.pathname.endsWith("/git/blobs"))
           return new Response(JSON.stringify({ sha: "blob-sha" }));
         if (url.pathname.endsWith("/git/trees"))
@@ -409,7 +421,13 @@ describe("M15.78 Fix Engine V1 deterministic contracts", () => {
       defaultBranch: "main",
       baseSha,
       identityKey: "e".repeat(64),
-      changedFiles: [{ path: "src/client.ts", content: "export const result = true;" }],
+      changedFiles: [
+        { path: "src/client.ts", content: "export const result = true;" },
+        { path: "src/script.sh", content: "#!/bin/sh\nexit 0\n" },
+        { path: "src/readonly.ts", content: "export const readonly = true;" },
+        { path: "src/new.ts", content: "export const created = true;" },
+        { path: "src/remove.sh", deleted: true },
+      ],
       eligibility: {
         provenanceMode: "customer",
         productPolicyAllowsDraftPr: true,
@@ -441,7 +459,77 @@ describe("M15.78 Fix Engine V1 deterministic contracts", () => {
     expect(calls.at(-1)?.body?.body).toContain(
       "Auterim policy requires human review (critical_change)",
     );
+    const treeBody = calls.find(
+      (call) => call.method === "POST" && call.path.endsWith("/git/trees"),
+    )?.body;
+    expect(treeBody?.tree).toEqual([
+      { path: "src/client.ts", mode: "100644", type: "blob", sha: "blob-sha" },
+      { path: "src/script.sh", mode: "100755", type: "blob", sha: "blob-sha" },
+      { path: "src/readonly.ts", mode: "100644", type: "blob", sha: "blob-sha" },
+      { path: "src/new.ts", mode: "100644", type: "blob", sha: "blob-sha" },
+      { path: "src/remove.sh", mode: "100755", type: "blob", sha: null },
+    ]);
     expect(calls.some((call) => call.method === "POST" && /\/pulls$/.test(call.path))).toBe(true);
+  });
+  it("rejects unsupported Git modes and explicit mode changes", async () => {
+    const baseSha = "a".repeat(40);
+    const createProvider = (mode: string) =>
+      new GitHubAppDraftPRProvider({
+        installationToken: async () => "in-memory-scoped-token",
+        verifiedGrant: {
+          repositoryIdentity: "owner/repo",
+          installationRepositoryIdentity: "owner/repo",
+          permissions: { contents: "write", pull_requests: "write" },
+        },
+        apiBaseUrl: "https://github.test",
+        fetcher: async (input) => {
+          const url = new URL(String(input));
+          if (url.pathname.endsWith("/git/ref/heads/main"))
+            return new Response(JSON.stringify({ object: { sha: baseSha } }));
+          if (url.pathname.endsWith(`/git/commits/${baseSha}`))
+            return new Response(JSON.stringify({ tree: { sha: "base-tree" } }));
+          if (url.pathname.endsWith("/git/trees/base-tree"))
+            return new Response(
+              JSON.stringify({
+                truncated: false,
+                tree: [{ path: "src/client.ts", mode, type: mode === "120000" ? "blob" : "blob" }],
+              }),
+            );
+          throw new Error("unexpected_mode_fixture_request");
+        },
+      });
+    const base = {
+      owner: "owner",
+      repository: "repo",
+      defaultBranch: "main",
+      baseSha,
+      identityKey: "f".repeat(64),
+      changedFiles: [{ path: "src/client.ts", content: "updated" }],
+      eligibility: {
+        provenanceMode: "customer" as const,
+        productPolicyAllowsDraftPr: true,
+        repositoryAllowlisted: true,
+        installationRepositoryIdentity: "owner/repo",
+        repositoryIdentity: "owner/repo",
+        permissions: { contents: "write" as const, pull_requests: "write" as const },
+        risk: assessFixRisk(risk({ reviewDisposition: "none" })),
+        verificationPassed: true,
+        preflightRequired: false,
+        preflightPassed: true,
+        baseSha,
+        currentDefaultBranchSha: baseSha,
+        unresolvedExternalOperation: false,
+      },
+    };
+    await expect(createProvider("120000").createDraft(base)).rejects.toThrow(
+      "github_base_file_mode_unsupported",
+    );
+    await expect(
+      createProvider("100755").createDraft({
+        ...base,
+        changedFiles: [{ path: "src/client.ts", content: "updated", mode: "100644" }],
+      }),
+    ).rejects.toThrow("github_file_mode_change_forbidden");
   });
   it("18 cross-workspace input is rejected", () => {
     expect(evaluateFixEligibility(eligibility({ repositoryWorkspaceId: "different" })).reason).toBe(
@@ -482,6 +570,38 @@ describe("M15.78 Fix Engine V1 deterministic contracts", () => {
         unresolvedExternalOperation: false,
       }),
     ).toThrow("evidence_only_draft_pr_forbidden");
+  });
+  it("keeps customer Preflight conditional and preserves canonical entitlement failure", async () => {
+    const canonical = vi.fn(async () => ({
+      status: "ineligible" as const,
+      category: "preflight_not_entitled",
+    }));
+    const scope = {
+      workspaceId: ids.workspace,
+      productId: ids.product,
+      repositoryId: ids.repository,
+      baseSha: sha,
+      patchFingerprint: "d".repeat(64),
+    };
+    await expect(
+      runFixPreflight({
+        provenanceMode: "customer",
+        required: false,
+        scope,
+        canonicalPreflight: canonical,
+      }),
+    ).resolves.toEqual({ status: "ineligible", category: "preflight_not_required" });
+    expect(canonical).not.toHaveBeenCalled();
+    await expect(
+      runFixPreflight({
+        provenanceMode: "customer",
+        required: true,
+        scope,
+        canonicalPreflight: canonical,
+      }),
+    ).resolves.toEqual({ status: "ineligible", category: "preflight_not_entitled" });
+    expect(canonical).toHaveBeenCalledOnce();
+    expect(canonical).toHaveBeenCalledWith(scope);
   });
   it("20 provider/customer path remains eligible when all live gates pass", () => {
     expect(evaluateFixEligibility(eligibility()).eligible).toBe(true);
@@ -637,6 +757,48 @@ describe("M15.78 Fix Engine V1 deterministic contracts", () => {
     });
     expect(JSON.stringify(profile)).not.toContain("npm install");
     expect(JSON.stringify(profile)).not.toContain("curl");
+  });
+  it("reports verification_unsupported when the exact trusted dependency cache is missing", () => {
+    const profile = resolveVerificationProfile({
+      packageJson: { devDependencies: { vitest: "1", typescript: "5" } },
+      files: ["package.json", "package-lock.json"],
+      dependencyCacheAvailable: false,
+    });
+    expect(profile).toMatchObject({
+      state: "verification_unsupported",
+      reason: "trusted_dependency_cache_unavailable",
+      commands: [],
+    });
+  });
+  it("fails closed when package manager and lockfile identity is ambiguous", () => {
+    const profile = resolveVerificationProfile({
+      packageJson: {
+        packageManager: "npm@10.8.0",
+        devDependencies: { vitest: "1", typescript: "5" },
+      },
+      files: ["package-lock.json", "pnpm-lock.yaml"],
+      dependencyCacheAvailable: true,
+    });
+    expect(profile).toMatchObject({
+      packageManager: "unsupported",
+      state: "verification_unsupported",
+      reason: "lockfile_not_recognized",
+    });
+  });
+  it("fails closed when declared package manager disagrees with the lockfile", () => {
+    const profile = resolveVerificationProfile({
+      packageJson: {
+        packageManager: "pnpm@9.0.0",
+        devDependencies: { vitest: "1", typescript: "5" },
+      },
+      files: ["package-lock.json"],
+      dependencyCacheAvailable: true,
+    });
+    expect(profile).toMatchObject({
+      packageManager: "unsupported",
+      state: "verification_unsupported",
+      reason: "lockfile_not_recognized",
+    });
   });
   it("adversarial: shell script from the repository remains isolated from API command input", () => {
     const profile = resolveVerificationProfile({
