@@ -48,6 +48,8 @@
     "acceptance:m1576:docker": "node scripts/acceptance-m1576-docker.mjs",
     "acceptance:m1577:docker": "node scripts/acceptance-m1577-docker.mjs",
     "acceptance:m1578:docker": "node scripts/acceptance-m1578-docker.mjs",
+    "fix-engine:cache:build": "node --experimental-strip-types scripts/build-fix-dependency-cache.mts",
+    "acceptance:m1578r:docker": "node scripts/acceptance-m1578r-docker.mjs",
     "eval:fix-engine": "vitest run tests/fix-engine.test.ts",
     "benchmark:fix-engine": "node scripts/benchmark-fix-engine.mjs",
     "eval:code-intelligence": "vitest run tests/code-intelligence.test.ts"

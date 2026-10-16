@@ -11,6 +11,19 @@ export interface PrivatePatchArtifactStore {
     diff: string;
   }): Promise<{ bucket: string; path: string; byteCount: number }>;
   get(input: { path: string }): Promise<Uint8Array>;
+  createSignedUrl(input: { path: string; expiresIn?: number }): Promise<string>;
+  createSignedReference(input: {
+    path: string;
+    sha256: string;
+    byteCount: number;
+    expiresIn?: number;
+  }): Promise<{
+    bucket: string;
+    path: string;
+    sha256: string;
+    byteCount: number;
+    signedUrl: string;
+  }>;
   remove(input: { paths: string[] }): Promise<void>;
 }
 
@@ -41,6 +54,40 @@ export class SupabasePrivatePatchArtifactStore implements PrivatePatchArtifactSt
     const bytes = new Uint8Array(await data.arrayBuffer());
     if (bytes.byteLength > MAX_ARTIFACT_BYTES) throw new Error("patch_artifact_size_invalid");
     return bytes;
+  }
+
+  async createSignedUrl(input: { path: string; expiresIn?: number }) {
+    if (!/^[0-9a-f-]{36}\/[0-9a-f-]{36}\.diff$/i.test(input.path))
+      throw new Error("invalid_patch_artifact_path");
+    const { data, error } = await createSupabaseServerClient()
+      .storage.from(BUCKET)
+      .createSignedUrl(input.path, Math.min(Math.max(input.expiresIn ?? 600, 30), 600));
+    if (error || !data?.signedUrl) throw new Error("private_patch_artifact_sign_failed");
+    return data.signedUrl;
+  }
+
+  async createSignedReference(input: {
+    path: string;
+    sha256: string;
+    byteCount: number;
+    expiresIn?: number;
+  }) {
+    if (
+      !/^[0-9a-f-]{36}\/([0-9a-f-]{36})\.diff$/i.test(input.path) ||
+      !/^[a-f0-9]{64}$/.test(input.sha256) ||
+      !Number.isSafeInteger(input.byteCount) ||
+      input.byteCount < 1 ||
+      input.byteCount > MAX_ARTIFACT_BYTES
+    )
+      throw new Error("invalid_patch_artifact_reference");
+    const signedUrl = await this.createSignedUrl({ path: input.path, expiresIn: input.expiresIn });
+    return {
+      bucket: BUCKET,
+      path: input.path,
+      sha256: input.sha256,
+      byteCount: input.byteCount,
+      signedUrl,
+    };
   }
 
   async remove(input: { paths: string[] }) {

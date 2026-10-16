@@ -42,6 +42,18 @@ export function resolveVerificationProfile(input: {
       state: "verification_unsupported",
       reason: "lockfile_not_recognized",
     };
+  // Only npm's flat node_modules layout is currently materialized by the
+  // signed cache builder. pnpm symlink stores and Yarn Plug'n'Play need a
+  // separately versioned cache adapter and are rejected until then.
+  if (packageManager !== "npm")
+    return {
+      id: "javascript-typescript-v1",
+      packageManager,
+      monorepo,
+      commands: [],
+      state: "verification_unsupported",
+      reason: "package_manager_layout_unsupported",
+    };
   if (input.dependencyCacheAvailable !== true)
     return {
       id: "javascript-typescript-v1",

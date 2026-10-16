@@ -16,11 +16,7 @@ import {
 import type { FixStageProcessor } from "@/lib/fix-engine/stage-runtime";
 import { validatePatchProposal } from "@/lib/fix-engine/patch";
 import { SupabasePrivatePatchArtifactStore } from "@/lib/fix-engine/artifact-store";
-import {
-  withExactBaseGitHubSnapshot,
-  runVerificationInDocker,
-  FIX_VERIFICATION_IMAGE,
-} from "@/lib/fix-engine/sandbox";
+import { withExactBaseGitHubSnapshot } from "@/lib/fix-engine/sandbox";
 import { resolveVerificationProfile } from "@/lib/fix-engine/verification-profile";
 import {
   createDependencyCacheIdentity,
@@ -47,6 +43,17 @@ import type {
   DependencyCacheIdentity,
   DependencyCacheResolution,
 } from "@/lib/fix-engine/dependency-cache";
+import {
+  createServerAuthoritativeVerificationExecutor,
+  type RemoteVerificationInput,
+  type VerificationExecutor,
+} from "@/lib/fix-engine/verification-executor";
+import {
+  createPrivateBaseSnapshotArtifact,
+  createSignedDependencyCacheReference,
+  type PrivateArtifactReference,
+  type SignedDependencyCacheReference,
+} from "@/lib/fix-engine/verification-artifacts";
 
 type StoredRun = {
   id: string;
@@ -547,6 +554,10 @@ async function readChangedFilesFromAppliedPatch(input: {
 export type FixEngineStageProcessorDependencies = {
   model?: FixCodingModel;
   repositoryProvider?: FixRepositoryProvider;
+  verificationExecutor?: VerificationExecutor;
+  resolveRemoteDependencyCache?: (
+    identity: DependencyCacheIdentity,
+  ) => Promise<SignedDependencyCacheReference>;
   resolveDependencyCache?: (
     identity: DependencyCacheIdentity | null,
   ) => Promise<DependencyCacheResolution>;
@@ -767,8 +778,32 @@ export function createFixEngineStageProcessor(
         .single();
       if (applied.error || applied.data?.status !== "applied")
         throw new Error("fix_patch_not_applied");
+      const verificationExecutor =
+        dependencies.verificationExecutor ?? createServerAuthoritativeVerificationExecutor();
+      const planRow = await checked<{ id: string; plan: unknown; plan_fingerprint: string }>(
+        client
+          .from("fix_plans")
+          .select("id,plan,plan_fingerprint")
+          .eq("id", patch.plan_id)
+          .eq("fix_run_id", run.id)
+          .single() as PromiseLike<
+          DbResult<{ id: string; plan: unknown; plan_fingerprint: string }>
+        >,
+        "fix_plan_unavailable",
+      );
+      const plan = FixPlanSchema.parse(planRow.plan);
+      let snapshotArtifact: PrivateArtifactReference | null = null;
       const materialized = await withExactBaseGitHubSnapshot({
         ...snapshotInput,
+        captureBaseSnapshot:
+          verificationExecutor.kind === "remote"
+            ? async (checkoutPath) => {
+                snapshotArtifact = await createPrivateBaseSnapshotArtifact({
+                  fixRunId: run.id,
+                  checkoutPath,
+                });
+              }
+            : undefined,
         run: async (checkoutPath) => {
           const names = await filesUnder(checkoutPath);
           let packageJson: unknown = {};
@@ -790,7 +825,6 @@ export function createFixEngineStageProcessor(
           ])
             if (names.includes(name))
               lockfiles[name] = await readFile(path.join(checkoutPath, name), "utf8");
-          const environment = getEnvironment();
           const cacheIdentity = packageJsonText
             ? createDependencyCacheIdentity({
                 repositoryId: run.repository_id,
@@ -800,63 +834,100 @@ export function createFixEngineStageProcessor(
                 lockfiles,
               })
             : null;
-          const dependencyCache = dependencies.resolveDependencyCache
-            ? await dependencies.resolveDependencyCache(cacheIdentity)
-            : await resolveTrustedDependencyCache({
-                root: environment.FIX_DEPENDENCY_CACHE_ROOT,
-                publicKey: environment.FIX_DEPENDENCY_CACHE_PUBLIC_KEY,
-                identity: cacheIdentity,
-              });
-          if (dependencyCache.status === "rejected")
-            throw new Error(`fix_dependency_cache_${dependencyCache.reason}`);
+          let localDependencyCache: Awaited<
+            ReturnType<typeof resolveTrustedDependencyCache>
+          > | null = null;
+          if (verificationExecutor.kind === "local_docker") {
+            const environment = getEnvironment();
+            localDependencyCache = dependencies.resolveDependencyCache
+              ? await dependencies.resolveDependencyCache(cacheIdentity)
+              : await resolveTrustedDependencyCache({
+                  root: environment.FIX_DEPENDENCY_CACHE_ROOT,
+                  publicKey: environment.FIX_DEPENDENCY_CACHE_PUBLIC_KEY,
+                  identity: cacheIdentity,
+                });
+            if (localDependencyCache.status === "rejected")
+              throw new Error(`fix_dependency_cache_${localDependencyCache.reason}`);
+          }
           const profile = resolveVerificationProfile({
             packageJson,
             files: names,
-            targetedTestPaths: FixPlanSchema.parse(
-              (
-                await checked(
-                  client
-                    .from("fix_plans")
-                    .select("plan")
-                    .eq("id", patch.plan_id)
-                    .single() as PromiseLike<DbResult<{ plan: unknown }>>,
-                  "fix_plan_unavailable",
-                )
-              ).plan,
-            ).expectedTests,
-            dependencyCacheAvailable: dependencyCache.status === "available",
+            targetedTestPaths: plan.expectedTests,
+            dependencyCacheAvailable:
+              verificationExecutor.kind === "remote"
+                ? cacheIdentity?.packageManager === "npm"
+                : localDependencyCache?.status === "available",
           });
           if (profile.state !== "supported")
             return { status: "unsupported" as const, profile, checks: [] };
-          if (dependencyCache.status !== "available")
-            return {
-              status: "unsupported" as const,
-              profile: {
-                ...profile,
-                state: "verification_unsupported" as const,
-                reason: "trusted_dependency_cache_unavailable",
-              },
-              checks: [],
+          let remote: RemoteVerificationInput | undefined;
+          if (verificationExecutor.kind === "remote") {
+            if (!cacheIdentity || cacheIdentity.packageManager !== "npm")
+              throw new Error("verification_cache_profile_unsupported");
+            const environment = getEnvironment();
+            if (
+              !dependencies.resolveRemoteDependencyCache &&
+              !environment.FIX_DEPENDENCY_CACHE_PUBLIC_KEY
+            )
+              throw new Error("verification_cache_signature_invalid");
+            if (!snapshotArtifact) throw new Error("verification_snapshot_not_available");
+            const cachePublicKey = environment.FIX_DEPENDENCY_CACHE_PUBLIC_KEY;
+            const [cache, patchReference] = await Promise.all([
+              dependencies.resolveRemoteDependencyCache
+                ? dependencies.resolveRemoteDependencyCache(cacheIdentity)
+                : createSignedDependencyCacheReference({
+                    identity: cacheIdentity,
+                    publicKey: cachePublicKey!,
+                  }),
+              new SupabasePrivatePatchArtifactStore().createSignedReference({
+                path: patch.artifact_path,
+                sha256: patch.patch_fingerprint,
+                byteCount: patch.byte_count,
+              }),
+            ]);
+            remote = {
+              workspaceId: run.workspace_id,
+              productId: run.product_id,
+              fixRunId: run.id,
+              planId: planRow.id,
+              planFingerprint: planRow.plan_fingerprint,
+              evidenceFingerprint: run.evidence_fingerprint,
+              patchId: patch.id,
+              patchFingerprint: patch.patch_fingerprint,
+              allowedPaths: plan.allowedFiles.map((file) => file.path),
+              repositoryId: run.repository_id,
+              repositoryIdentity: run.provider_repository_identity,
+              baseCommitSha: run.commit_sha,
+              dependencyCacheIdentity: cacheIdentity,
+              cache,
+              snapshot: snapshotArtifact,
+              patch: patchReference,
             };
-          const image = FIX_VERIFICATION_IMAGE;
-          const checks = [];
-          for (const command of profile.commands) {
-            checks.push({
-              commandClass: command.commandClass,
-              ...(await runVerificationInDocker({
-                checkoutPath,
-                image,
-                command,
-                dependencyCache,
-              })),
-            });
+          } else {
+            if (localDependencyCache?.status !== "available")
+              return {
+                status: "unsupported" as const,
+                profile: {
+                  ...profile,
+                  state: "verification_unsupported" as const,
+                  reason: "trusted_dependency_cache_unavailable",
+                },
+                checks: [],
+              };
           }
-          return {
-            status: checks.every((check) => check.status === "passed")
-              ? ("passed" as const)
-              : ("failed" as const),
+          const executed = await verificationExecutor.execute({
+            checkoutPath,
             profile,
-            checks,
+            commands: profile.commands,
+            localDependencyCache:
+              localDependencyCache?.status === "available" ? localDependencyCache : null,
+            remote,
+          });
+          return {
+            status: executed.status,
+            profile,
+            checks: executed.checks,
+            durationMs: executed.durationMs,
           };
         },
       });
@@ -873,7 +944,7 @@ export function createFixEngineStageProcessor(
             status === "unsupported"
               ? (materialized.profile.reason ?? "verification_unsupported")
               : "",
-          durationMs: 0,
+          durationMs: "durationMs" in materialized ? materialized.durationMs : 0,
           attemptNumber,
         },
       };
