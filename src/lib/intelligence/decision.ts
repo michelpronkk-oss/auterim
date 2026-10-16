@@ -6,6 +6,18 @@ import {
   type PolicyThresholds,
 } from "@/lib/intelligence/policy";
 import { buildIntelligenceEvidence } from "@/lib/intelligence/evidence";
+import {
+  ACTIVE_ROUTING_READINESS,
+  ACTIVE_THRESHOLD_VERSION,
+  CALIBRATION_CORPUS_VERSION,
+  CALIBRATED_ACTIVE_THRESHOLDS,
+  CALIBRATION_FIXTURE_COUNT,
+  CALIBRATION_HOLDOUT_METRICS,
+  CALIBRATION_VERSION,
+  INTELLIGENCE_ACTIVE_POLICY_VERSION,
+  activeCalibrationIsReady,
+  activeThresholdFingerprint,
+} from "@/lib/intelligence/calibration";
 import { enqueueIntelligenceRoute } from "@/lib/intelligence/router-queue";
 import {
   requestJevDecision,
@@ -33,6 +45,32 @@ export const INITIAL_SHADOW_THRESHOLDS: PolicyThresholds = {
   calibrationVersion: "uncalibrated-conservative-v1",
 };
 
+export function evaluateWithReadinessGate(input: {
+  classifier: Awaited<ReturnType<ChangeIntelligenceRepository["getClassifierSummary"]>>;
+  judgment: Parameters<typeof applyIntelligencePolicy>[0]["judgment"];
+  evidenceQuality: ReturnType<typeof buildIntelligenceEvidence>["quality"];
+  thresholds: PolicyThresholds;
+  activeReady: boolean;
+}) {
+  if (!input.activeReady) {
+    const criticalIncomplete =
+      input.evidenceQuality.sourceCriticality === "critical" && input.evidenceQuality.incomplete;
+    return {
+      route: input.judgment.route,
+      state: criticalIncomplete ? ("insufficient_evidence" as const) : ("escalate" as const),
+      reason: criticalIncomplete
+        ? ("critical_evidence_incomplete" as const)
+        : ("model_uncertain" as const),
+    };
+  }
+  return applyIntelligencePolicy({
+    classifier: input.classifier,
+    judgment: input.judgment,
+    evidenceQuality: input.evidenceQuality,
+    thresholds: input.thresholds,
+  });
+}
+
 export async function evaluateSourceChangeIntelligence(
   input: {
     sourceChangeId: string;
@@ -42,13 +80,15 @@ export async function evaluateSourceChangeIntelligence(
   dependencies: {
     repository?: ChangeIntelligenceRepository;
     evaluator?: typeof requestJevDecision;
-    thresholds?: PolicyThresholds;
+    mode?: "active" | "shadow";
+    enqueueRoute?: (sourceChangeId: string) => Promise<unknown>;
   } = {},
 ) {
   const repository = dependencies.repository ?? new SupabaseChangeIntelligenceRepository();
+  const enqueueRoute = dependencies.enqueueRoute ?? enqueueIntelligenceRoute;
   const start = await repository.begin(input);
   if (start.status === "completed") {
-    await enqueueIntelligenceRoute(input.sourceChangeId);
+    await enqueueRoute(input.sourceChangeId);
     return start;
   }
   if (start.status !== "processing") return start;
@@ -68,12 +108,31 @@ export async function evaluateSourceChangeIntelligence(
     } catch {
       /* JEV remains independent from classifier availability. */
     }
-    const policy = applyIntelligencePolicy({
+    const mode = dependencies.mode ?? "active";
+    const thresholds = mode === "shadow" ? INITIAL_SHADOW_THRESHOLDS : CALIBRATED_ACTIVE_THRESHOLDS;
+    const calibrationReady = mode === "shadow" || activeCalibrationIsReady();
+    const policy = evaluateWithReadinessGate({
       classifier,
       judgment,
       evidenceQuality: evidence.quality,
-      thresholds: dependencies.thresholds ?? INITIAL_SHADOW_THRESHOLDS,
+      thresholds,
+      activeReady: calibrationReady,
     });
+    const policyIdentity = {
+      mode: mode === "shadow" ? "shadow" : calibrationReady ? "active_calibrated" : "fail_closed",
+      policyVersion:
+        mode === "shadow" ? INTELLIGENCE_POLICY_VERSION : INTELLIGENCE_ACTIVE_POLICY_VERSION,
+      thresholdVersion:
+        mode === "shadow" ? "uncalibrated-conservative-v1" : ACTIVE_THRESHOLD_VERSION,
+      calibrationCorpusVersion: mode === "shadow" ? "none" : CALIBRATION_CORPUS_VERSION,
+      calibrationVersion:
+        mode === "shadow" ? INITIAL_SHADOW_THRESHOLDS.calibrationVersion : CALIBRATION_VERSION,
+      calibrationFixtureCount: mode === "shadow" ? 0 : CALIBRATION_FIXTURE_COUNT,
+      thresholdFingerprint: mode === "shadow" ? null : activeThresholdFingerprint(),
+      thresholds,
+      readiness: mode === "shadow" ? { shadowOnly: true } : ACTIVE_ROUTING_READINESS,
+      holdoutMetrics: mode === "shadow" ? null : CALIBRATION_HOLDOUT_METRICS,
+    } as const;
     await repository.record({
       sourceChangeId: input.sourceChangeId,
       evidenceFingerprint: start.evidenceFingerprint,
@@ -82,6 +141,7 @@ export async function evaluateSourceChangeIntelligence(
       judgment,
       quality: evidence.quality,
       policy,
+      policyIdentity,
     });
     completed = {
       status: "completed" as const,
@@ -103,7 +163,7 @@ export async function evaluateSourceChangeIntelligence(
   }
   // A dispatch failure must leave the immutable completed decision intact.
   // Trigger retry replays begin() and re-enqueues this idempotent router task.
-  await enqueueIntelligenceRoute(input.sourceChangeId);
+  await enqueueRoute(input.sourceChangeId);
   return completed;
 }
 

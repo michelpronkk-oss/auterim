@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, describe, expect, it } from "vitest";
+import { createPGliteSnapshotFactory, measurePGliteSetup } from "./pglite-snapshot-factory";
 
 const migrationNames = [
   "20261002232050_auterim_monitoring_foundation.sql",
@@ -38,11 +39,17 @@ const productMigrations = await Promise.all(
 
 const ownerId = "11111111-1111-4111-8111-111111111111";
 const outsiderId = "99999999-9999-4999-8999-999999999999";
-const dbs: PGlite[] = [];
+const snapshots = createPGliteSnapshotFactory<PGlite>("m15-dependency-lifecycle");
 
 async function database() {
-  const db = new PGlite();
-  await db.exec(`
+  return snapshots.create("default", async () => {
+    const db = await measurePGliteSetup(
+      "m15-dependency-lifecycle",
+      "construction",
+      async () => new PGlite(),
+    );
+    await measurePGliteSetup("m15-dependency-lifecycle", "bootstrap", () =>
+      db.exec(`
     create role anon;
     create role authenticated;
     create role service_role bypassrls;
@@ -53,11 +60,14 @@ async function database() {
     $$;
     grant usage on schema auth to anon, authenticated;
     grant execute on function auth.uid() to anon, authenticated;
-  `);
-  for (const migration of migrations) await db.exec(migration);
-  for (const migration of productMigrations) await db.exec(migration);
-  dbs.push(db);
-  return db;
+  `),
+    );
+    await measurePGliteSetup("m15-dependency-lifecycle", "migrations", async () => {
+      for (const migration of migrations) await db.exec(migration);
+      for (const migration of productMigrations) await db.exec(migration);
+    });
+    return db;
+  });
 }
 
 async function createProtectedDependency(db: PGlite) {
@@ -93,7 +103,7 @@ async function createProtectedDependency(db: PGlite) {
 
 describe("M15 dependency lifecycle migration", () => {
   afterAll(async () => {
-    await Promise.all(dbs.map((db) => db.close()));
+    await snapshots.close();
   });
 
   it("lets an owner disable one dependency idempotently while preserving its context and identity", async () => {

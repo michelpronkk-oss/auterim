@@ -254,7 +254,10 @@ function setup(options?: {
 
 describe("persisted remediation preparation", () => {
   beforeEach(() => vi.clearAllMocks());
-  afterEach(() => vi.unstubAllEnvs());
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
 
   it("builds a bounded patch candidate from public evidence at the exact verified commit", async () => {
     const { provider, filters, payloads } = setup();
@@ -357,6 +360,7 @@ describe("persisted remediation preparation", () => {
   });
 
   it("permits synthetic evidence only in the explicitly enabled non-production local integration run", async () => {
+    vi.spyOn(process, "cwd").mockReturnValue("C:\\Users\\miche\\Desktop\\Auterim");
     vi.stubEnv("NODE_ENV", "test");
     vi.stubEnv("AUTERIM_M15_LOCAL_INTEGRATION", "1");
     vi.stubEnv("AUTERIM_M15_LOCAL_SUPABASE_URL", "http://127.0.0.1:65431");

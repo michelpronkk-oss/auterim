@@ -145,6 +145,7 @@ function classifierRouteForCategory(category: string): IntelligenceRoute | null 
   const routes: Record<string, IntelligenceRoute> = {
     documentation: "docs_noise",
     deprecation: "deprecation",
+    sdk_change: "sdk_change",
     api_change: "breaking_api_change",
     security: "auth_or_security_change",
     pricing: "pricing_change",

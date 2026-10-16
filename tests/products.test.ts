@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { createPGliteSnapshotFactory, measurePGliteSetup } from "./pglite-snapshot-factory";
 
 const migrationNames = [
   "20261002232050_auterim_monitoring_foundation.sql",
@@ -45,9 +46,13 @@ const m15FollowupMigration = await readFile(
   "utf8",
 );
 
+const snapshots = createPGliteSnapshotFactory<PGlite>("products");
+
 async function database(includeProducts = true) {
-  const db = new PGlite();
-  await db.exec(`
+  return snapshots.create(includeProducts ? "products" : "base", async () => {
+    const db = await measurePGliteSetup("products", "construction", async () => new PGlite());
+    await measurePGliteSetup("products", "bootstrap", () =>
+      db.exec(`
     create role anon;
     create role authenticated;
     create role service_role bypassrls;
@@ -58,13 +63,17 @@ async function database(includeProducts = true) {
     $$;
     grant usage on schema auth to anon, authenticated;
     grant execute on function auth.uid() to anon, authenticated;
-  `);
-  for (const migration of migrations) await db.exec(migration);
-  if (includeProducts) {
-    await db.exec(productMigration);
-    await db.exec(m15FollowupMigration);
-  }
-  return db;
+  `),
+    );
+    await measurePGliteSetup("products", "migrations", async () => {
+      for (const migration of migrations) await db.exec(migration);
+      if (includeProducts) {
+        await db.exec(productMigration);
+        await db.exec(m15FollowupMigration);
+      }
+    });
+    return db;
+  });
 }
 
 let ownerSequence = 1;
@@ -98,6 +107,8 @@ async function newWorkspace(db: PGlite, slug: string, plan: "core" | "pro" | "bu
 }
 
 describe("protected product entitlement foundation", () => {
+  afterAll(async () => snapshots.close());
+
   afterEach(async () => {
     const completedDatabases = dbs.splice(0);
     await Promise.all(completedDatabases.map((db) => db.close()));

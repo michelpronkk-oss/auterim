@@ -6,22 +6,36 @@ const localSupabaseOrigins = new Set([
   "http://localhost:65431",
   "http://[::1]:65431",
 ]);
+const canonicalAuterimRoot = "c:\\users\\miche\\desktop\\auterim";
 
-export function isM15LocalAcceptanceRuntime() {
-  if (process.env.AUTERIM_M15_LOCAL_INTEGRATION !== "1") return false;
+export function isAllowedM15LocalRuntime(input: {
+  integrationEnabled: boolean;
+  supabaseUrl: string | undefined;
+  configuredRoot: string | undefined;
+  actualRoot: string;
+}) {
+  if (!input.integrationEnabled) return false;
 
-  const localUrl = process.env.AUTERIM_M15_LOCAL_SUPABASE_URL;
-  const configuredRoot = process.env.AUTERIM_M15_LOCAL_REPO_ROOT;
   try {
     return Boolean(
-      localUrl &&
-      localSupabaseOrigins.has(new URL(localUrl).origin) &&
-      configuredRoot &&
-      path.win32.resolve(configuredRoot).toLowerCase() === "c:\\users\\miche\\desktop\\auterim",
+      input.supabaseUrl &&
+      localSupabaseOrigins.has(new URL(input.supabaseUrl).origin) &&
+      input.configuredRoot &&
+      path.win32.resolve(input.configuredRoot).toLowerCase() === canonicalAuterimRoot &&
+      path.win32.resolve(input.actualRoot).toLowerCase() === canonicalAuterimRoot,
     );
   } catch {
     return false;
   }
+}
+
+export function isM15LocalAcceptanceRuntime() {
+  return isAllowedM15LocalRuntime({
+    integrationEnabled: process.env.AUTERIM_M15_LOCAL_INTEGRATION === "1",
+    supabaseUrl: process.env.AUTERIM_M15_LOCAL_SUPABASE_URL,
+    configuredRoot: process.env.AUTERIM_M15_LOCAL_REPO_ROOT,
+    actualRoot: process.cwd(),
+  });
 }
 
 export function isM15LocalAcceptanceEnabled() {

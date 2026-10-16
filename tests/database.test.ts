@@ -2,11 +2,12 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { SafeFetchError } from "@/lib/monitoring/fetcher";
 import { scanSource } from "@/lib/monitoring/scan";
 import type { MonitoringRepository, ScanOutcome } from "@/lib/monitoring/repository";
 import { evaluateBoundedEscalationEvidence } from "@/lib/intelligence/escalation";
+import { createPGliteSnapshotFactory, measurePGliteSetup } from "./pglite-snapshot-factory";
 
 const migrationPath = fileURLToPath(
   new URL(
@@ -442,12 +443,20 @@ const intelligenceRouterMigration = await readFile(
   "utf8",
 );
 
-async function makeDatabase(
+const snapshots = createPGliteSnapshotFactory<PGlite>("database");
+
+async function initializeDatabase(
   applyCompanySurfaceMigration = true,
   applyProductRepositoryProtectionMigration = true,
 ) {
-  const db = new PGlite({ extensions: { pgcrypto } });
-  await db.exec(`
+  const db = await measurePGliteSetup(
+    "database",
+    "construction",
+    async () => new PGlite({ extensions: { pgcrypto } }),
+  );
+  await db.waitReady;
+  await measurePGliteSetup("database", "schema_and_migrations", async () => {
+    await db.exec(`
     create role anon;
     create role authenticated;
     create role service_role bypassrls;
@@ -461,69 +470,86 @@ async function makeDatabase(
     grant usage on schema auth to anon, authenticated;
     grant execute on function auth.uid() to anon, authenticated;
   `);
-  await db.exec(migration);
-  await db.exec(classificationMigration);
-  await db.exec(impactMigration);
-  await db.exec(discoveryMigration);
-  await db.exec(discoverySignalsMigration);
-  await db.exec(onboardingMigration);
-  if (applyCompanySurfaceMigration) await db.exec(companySurfaceMigration);
-  await db.exec(preflightMigration);
-  await db.exec(preflightPrivilegeMigration);
-  await db.exec(billingMigration);
-  await db.exec(protectionMigration);
-  await db.exec(growthMigration);
-  await db.exec(growthBoundsMigration);
-  await db.exec(growthClaimAmbiguityMigration);
-  await db.exec(baselineDispatchRecoveryMigration);
-  await db.exec(connectorMigration);
-  await db.exec(growthFeedbackMigration);
-  await db.exec(growthSearchConsoleScopeMigration);
-  await db.exec(partialDiscoveryMigration);
-  await db.exec(discoveryOutcomeConsistencyMigration);
-  await db.exec(runtimeDiscoveryMigration);
-  await db.exec(onboardingWorkspaceIdempotencyMigration);
-  if (applyCompanySurfaceMigration) {
-    await db.exec(companySurfaceFinalizeMigration);
-    await db.exec(technologyObservationMigration);
-    await db.exec(technologyObservationReasonCodesMigration);
-    await db.exec(completeTechnologyFingerprintMigration);
-  }
-  await db.exec(protectionDependencyDetailMigration);
-  await db.exec(protectedProductMigration);
-  await db.exec(productScopedDependencyMigration);
-  await db.exec(persistedMoneyPathMigration);
-  await db.exec(phase4cCorrectnessMigration);
-  await db.exec(dependencyLifecycleMigration);
-  await db.exec(businessHandoffMigration);
-  await db.exec(staleWorkerExecutionMigration);
-  await db.exec(completionTimeStaleStateMigration);
-  await db.exec(preflightWorkerRpcAclMigration);
-  if (applyProductRepositoryProtectionMigration)
-    await db.exec(productRepositoryProtectionMigration);
-  if (applyProductRepositoryProtectionMigration) await db.exec(productScopedWorkerGuardsMigration);
-  if (applyProductRepositoryProtectionMigration)
-    await db.exec(deterministicLegacyRepositoryAttributionMigration);
-  if (applyProductRepositoryProtectionMigration)
-    await db.exec(legacyAttributionQuotaConsistencyMigration);
-  if (applyProductRepositoryProtectionMigration) await db.exec(onboardingV2Migration);
-  if (applyProductRepositoryProtectionMigration) await db.exec(workspaceMemberManagementMigration);
-  await db.exec(onboardingFunnelEventsMigration);
-  await db.exec(cliProductDiscoveryMigration);
-  await db.exec(cliDraftProductOnboardingMigration);
-  if (applyProductRepositoryProtectionMigration) {
-    // Model the broad inherited grants in Supabase's default public-schema setup.
-    await db.exec("alter default privileges in schema public grant all on tables to authenticated");
-    await db.exec(deploymentSurfacesMigration);
-    await db.exec(deploymentGrantHardeningMigration);
-    await db.exec(vercelAuthorizationRpcMigration);
-  }
-  await db.exec(baselineImpactAssessmentMigration);
-  if (applyProductRepositoryProtectionMigration) await db.exec(baselinePreflightMigration);
-  await db.exec(intelligenceDecisionMigration);
-  await db.exec(intelligenceRouterMigration);
+    await db.exec(migration);
+    await db.exec(classificationMigration);
+    await db.exec(impactMigration);
+    await db.exec(discoveryMigration);
+    await db.exec(discoverySignalsMigration);
+    await db.exec(onboardingMigration);
+    if (applyCompanySurfaceMigration) await db.exec(companySurfaceMigration);
+    await db.exec(preflightMigration);
+    await db.exec(preflightPrivilegeMigration);
+    await db.exec(billingMigration);
+    await db.exec(protectionMigration);
+    await db.exec(growthMigration);
+    await db.exec(growthBoundsMigration);
+    await db.exec(growthClaimAmbiguityMigration);
+    await db.exec(baselineDispatchRecoveryMigration);
+    await db.exec(connectorMigration);
+    await db.exec(growthFeedbackMigration);
+    await db.exec(growthSearchConsoleScopeMigration);
+    await db.exec(partialDiscoveryMigration);
+    await db.exec(discoveryOutcomeConsistencyMigration);
+    await db.exec(runtimeDiscoveryMigration);
+    await db.exec(onboardingWorkspaceIdempotencyMigration);
+    if (applyCompanySurfaceMigration) {
+      await db.exec(companySurfaceFinalizeMigration);
+      await db.exec(technologyObservationMigration);
+      await db.exec(technologyObservationReasonCodesMigration);
+      await db.exec(completeTechnologyFingerprintMigration);
+    }
+    await db.exec(protectionDependencyDetailMigration);
+    await db.exec(protectedProductMigration);
+    await db.exec(productScopedDependencyMigration);
+    await db.exec(persistedMoneyPathMigration);
+    await db.exec(phase4cCorrectnessMigration);
+    await db.exec(dependencyLifecycleMigration);
+    await db.exec(businessHandoffMigration);
+    await db.exec(staleWorkerExecutionMigration);
+    await db.exec(completionTimeStaleStateMigration);
+    await db.exec(preflightWorkerRpcAclMigration);
+    if (applyProductRepositoryProtectionMigration)
+      await db.exec(productRepositoryProtectionMigration);
+    if (applyProductRepositoryProtectionMigration)
+      await db.exec(productScopedWorkerGuardsMigration);
+    if (applyProductRepositoryProtectionMigration)
+      await db.exec(deterministicLegacyRepositoryAttributionMigration);
+    if (applyProductRepositoryProtectionMigration)
+      await db.exec(legacyAttributionQuotaConsistencyMigration);
+    if (applyProductRepositoryProtectionMigration) await db.exec(onboardingV2Migration);
+    if (applyProductRepositoryProtectionMigration)
+      await db.exec(workspaceMemberManagementMigration);
+    await db.exec(onboardingFunnelEventsMigration);
+    await db.exec(cliProductDiscoveryMigration);
+    await db.exec(cliDraftProductOnboardingMigration);
+    if (applyProductRepositoryProtectionMigration) {
+      // Model the broad inherited grants in Supabase's default public-schema setup.
+      await db.exec(
+        "alter default privileges in schema public grant all on tables to authenticated",
+      );
+      await db.exec(deploymentSurfacesMigration);
+      await db.exec(deploymentGrantHardeningMigration);
+      await db.exec(vercelAuthorizationRpcMigration);
+    }
+    await db.exec(baselineImpactAssessmentMigration);
+    if (applyProductRepositoryProtectionMigration) await db.exec(baselinePreflightMigration);
+    await db.exec(intelligenceDecisionMigration);
+    await db.exec(intelligenceRouterMigration);
+  });
   return db;
 }
+
+async function makeDatabase(
+  applyCompanySurfaceMigration = true,
+  applyProductRepositoryProtectionMigration = true,
+) {
+  const key = `${applyCompanySurfaceMigration}:${applyProductRepositoryProtectionMigration}`;
+  return snapshots.create(key, () =>
+    initializeDatabase(applyCompanySurfaceMigration, applyProductRepositoryProtectionMigration),
+  );
+}
+
+afterAll(async () => snapshots.close());
 
 class PGliteMonitoringRepository implements MonitoringRepository {
   constructor(private readonly db: PGlite) {}
