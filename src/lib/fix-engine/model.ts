@@ -226,7 +226,9 @@ export class StructuredChatCompletionFixModel implements FixCodingModel {
         redirect: "error",
         signal: signal ?? AbortSignal.timeout(60_000),
         headers: {
-          authorization: `Bearer ${this.config.apiKey}`,
+          ...(this.config.provider === "azure-openai"
+            ? { "api-key": this.config.apiKey }
+            : { authorization: `Bearer ${this.config.apiKey}` }),
           "content-type": "application/json",
           accept: "application/json",
         },
@@ -251,7 +253,7 @@ export class StructuredChatCompletionFixModel implements FixCodingModel {
       throw new Error(
         response.status >= 500 || response.status === 429
           ? "fix_model_provider_unavailable"
-          : "fix_model_provider_rejected",
+          : `fix_model_provider_rejected_${response.status}`,
       );
     const text = await response.text().catch(() => "");
     if (text.length > 256_000) throw new Error("fix_model_response_too_large");

@@ -506,6 +506,82 @@ describe.skipIf(!enabled)(
         },
       });
 
+      let failedDiagnosisInjected = false;
+      await expect(
+        runPersistedFixStage({
+          fixRunId: created.fixRunId,
+          stage: "diagnose",
+          processor: async (input) => {
+            if (failedDiagnosisInjected) return processor(input);
+            failedDiagnosisInjected = true;
+            const started = await client.rpc("begin_fix_model_attempt", {
+              p_stage_id: input.stageId,
+              p_claim_token: input.claimToken,
+              p_attempt_number: input.attemptNumber,
+              p_provider: "azure-openai",
+              p_model: "gpt-6.1-sol",
+              p_schema_version: "fix-engine-v1",
+              p_prompt_contract_version: "fix-coding-contract-v1",
+              p_input_fingerprint: "c".repeat(64),
+            });
+            expect(started.error).toBeNull();
+            const attemptId = (started.data as { attemptId?: unknown } | null)?.attemptId;
+            expect(typeof attemptId).toBe("string");
+            const finished = await client.rpc("finish_fix_model_attempt", {
+              p_stage_id: input.stageId,
+              p_claim_token: input.claimToken,
+              p_attempt_id: attemptId,
+              p_status: "failed",
+              p_model_version: null,
+              p_output_fingerprint: null,
+              p_latency_ms: 1,
+              p_input_tokens: null,
+              p_output_tokens: null,
+              p_cost_microusd: null,
+              p_failure_category: "fix_model_provider_rejected_401",
+            });
+            expect(finished.error).toBeNull();
+            throw new Error("fix_model_provider_rejected_401");
+          },
+        }),
+      ).rejects.toThrow("fix_model_provider_rejected_401");
+
+      const requeued = await client.rpc("requeue_internal_fix_diagnosis_after_model_auth_repair", {
+        p_fix_run_id: created.fixRunId,
+      });
+      expect(requeued.error).toBeNull();
+      expect(requeued.data).toMatchObject({
+        status: "retry_queued",
+        fixRunId: created.fixRunId,
+        retryGeneration: 1,
+      });
+      const requeueReplay = await client.rpc(
+        "requeue_internal_fix_diagnosis_after_model_auth_repair",
+        { p_fix_run_id: created.fixRunId },
+      );
+      expect(requeueReplay.error).toBeNull();
+      expect(requeueReplay.data).toMatchObject({
+        status: "already_used",
+        fixRunId: created.fixRunId,
+        retryGeneration: 1,
+      });
+      const anonymousClient = createClient(url!, process.env.AUTERIM_M1578_ANON_KEY!, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      });
+      const deniedRetry = await anonymousClient.rpc(
+        "requeue_internal_fix_diagnosis_after_model_auth_repair",
+        { p_fix_run_id: created.fixRunId },
+      );
+      expect(deniedRetry.error).not.toBeNull();
+      const { data: retryState, error: retryStateError } = await client
+        .from("fix_stage_queue")
+        .select("status,attempt_count,operator_retry_count")
+        .eq("fix_run_id", created.fixRunId)
+        .eq("stage", "diagnose")
+        .single();
+      expect(retryStateError).toBeNull();
+      expect(retryState).toEqual({ status: "queued", attempt_count: 1, operator_retry_count: 1 });
+
       const stages: FixStage[] = [];
       let stage: FixStage | null = "diagnose";
       while (stage) {
