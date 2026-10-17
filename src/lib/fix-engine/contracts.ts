@@ -137,6 +137,14 @@ export const FixPlanSchema = z
   .strict();
 export type FixPlan = z.infer<typeof FixPlanSchema>;
 
+// Policy-owned values are hydrated by Auterim from persisted run state.
+// The model schema is the strict remainder of the same immutable plan contract.
+export const FixPlanModelProposalSchema = FixPlanSchema.omit({
+  preflightApplicability: true,
+  humanReviewRequired: true,
+});
+export type FixPlanModelProposal = z.infer<typeof FixPlanModelProposalSchema>;
+
 export const PatchProposalSchema = z
   .object({
     unifiedDiff: z.string().min(1).max(131072),

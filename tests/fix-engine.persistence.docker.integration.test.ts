@@ -457,9 +457,7 @@ describe.skipIf(!enabled)(
             apiSchemaConfigChanges: ["api"],
             expectedTests: [],
             verificationProfile: "javascript-typescript-v1",
-            preflightApplicability: "not_applicable",
             riskFactors: [],
-            humanReviewRequired: true,
           });
         },
         proposePatch: async (context, _diagnosis, plan) =>
