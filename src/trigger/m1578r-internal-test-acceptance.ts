@@ -11,6 +11,7 @@ const TARGET = {
   repositoryId: "b2abf377-2dbc-4b9c-b546-b0604f3ee4fe",
   preservedAuterimRepositoryId: "3b4f4fe6-cbbd-4bbd-a340-71f7c268e2c4",
   repositoryExternalId: 1409364414,
+  preservedAuterimRepositoryExternalId: 1402431563,
   owner: "michelpronkk-oss",
   repository: "auterim-m15-github-qa",
   accountLogin: "michelpronkk-oss",
@@ -174,7 +175,7 @@ type Readiness = {
     selectedRepositoriesOnly: boolean;
     requiredWritePermissionsGranted: boolean;
     noUnexpectedWritePermissions: boolean;
-    qaRepositoryIsOnlyVisibleRepository: boolean;
+    allowedInstallationRepositoryScope: boolean;
     fixtureFilesPresentOnDefaultBranch: boolean;
     supportedNpmLockfilePresent: boolean;
     fixtureCommitMatchesDefaultHead: boolean | null;
@@ -190,6 +191,11 @@ type Readiness = {
   defaultBranch: string | null;
   defaultBranchSha: string | null;
   visibleRepositoryCount: number | null;
+  githubInstallation?: {
+    repositorySelection: "selected" | "all" | null;
+    permissions: Record<string, string> | null;
+    visibleRepositories: Array<{ id: number; fullName: string }> | null;
+  };
 };
 
 function safeFailureCategory(error: unknown) {
@@ -211,7 +217,7 @@ async function inspectReadiness(expectedFixtureCommitSha?: string): Promise<Read
     selectedRepositoriesOnly: false,
     requiredWritePermissionsGranted: false,
     noUnexpectedWritePermissions: false,
-    qaRepositoryIsOnlyVisibleRepository: false,
+    allowedInstallationRepositoryScope: false,
     fixtureFilesPresentOnDefaultBranch: false,
     supportedNpmLockfilePresent: false,
     fixtureCommitMatchesDefaultHead: null,
@@ -417,6 +423,16 @@ async function inspectReadiness(expectedFixtureCommitSha?: string): Promise<Read
       owner: TARGET.owner,
       repository: TARGET.repository,
       defaultBranch: repository.default_branch,
+      allowedRepositories: [
+        {
+          id: TARGET.repositoryExternalId,
+          fullName: `${TARGET.owner}/${TARGET.repository}`,
+        },
+        {
+          id: TARGET.preservedAuterimRepositoryExternalId,
+          fullName: `${TARGET.owner}/auterim`,
+        },
+      ],
       requiredPaths: [...M1578R_REQUIRED_FIXTURE_PATHS],
     });
   } catch (error) {
@@ -439,8 +455,7 @@ async function inspectReadiness(expectedFixtureCommitSha?: string): Promise<Read
   checks.selectedRepositoriesOnly = github.selectedRepositoriesOnly;
   checks.requiredWritePermissionsGranted = github.requiredWritePermissionsGranted;
   checks.noUnexpectedWritePermissions = github.noUnexpectedWritePermissions;
-  checks.qaRepositoryIsOnlyVisibleRepository =
-    github.visibleRepositoryCount === 1 && github.exactRepositoryVisible;
+  checks.allowedInstallationRepositoryScope = github.allowedRepositoryScopeMatches === true;
   checks.fixtureFilesPresentOnDefaultBranch = github.requiredPathsPresent === true;
   checks.supportedNpmLockfilePresent = github.npmLockfileFamily === "npm";
   checks.fixtureCommitMatchesDefaultHead = expectedFixtureCommitSha
@@ -460,7 +475,7 @@ async function inspectReadiness(expectedFixtureCommitSha?: string): Promise<Read
     checks.selectedRepositoriesOnly,
     checks.requiredWritePermissionsGranted,
     checks.noUnexpectedWritePermissions,
-    checks.qaRepositoryIsOnlyVisibleRepository,
+    checks.allowedInstallationRepositoryScope,
     checks.fixtureFilesPresentOnDefaultBranch,
     checks.supportedNpmLockfilePresent,
     checks.productionVerificationStorageReadable,
@@ -481,6 +496,11 @@ async function inspectReadiness(expectedFixtureCommitSha?: string): Promise<Read
     defaultBranch: github.defaultBranch,
     defaultBranchSha: github.defaultBranchSha,
     visibleRepositoryCount: github.visibleRepositoryCount,
+    githubInstallation: {
+      repositorySelection: github.repositorySelection ?? null,
+      permissions: github.grantedPermissions ?? null,
+      visibleRepositories: github.visibleRepositories ?? null,
+    },
   };
 }
 

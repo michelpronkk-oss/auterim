@@ -9,8 +9,13 @@ import {
 } from "../src/trigger/m1578r-internal-test-acceptance";
 
 const repositoryId = 1_409_364_414;
+const preservedRepositoryId = 1_402_431_563;
 const fixtureSha = "a".repeat(40);
 const installationToken = "installation-token-for-scope-read-only-test";
+const allowedRepositories = [
+  { id: repositoryId, fullName: "michelpronkk-oss/auterim-m15-github-qa" },
+  { id: preservedRepositoryId, fullName: "michelpronkk-oss/auterim" },
+];
 const requiredPaths = [
   "package.json",
   "package-lock.json",
@@ -64,12 +69,10 @@ function scopeFetcher(
     }
     if (url.endsWith("/installation/repositories?per_page=100")) {
       return response({
-        total_count: options.repositories?.length ?? 1,
+        total_count: options.repositories?.length ?? 2,
         repositories: options.repositories ?? [
-          {
-            id: repositoryId,
-            full_name: "michelpronkk-oss/auterim-m15-github-qa",
-          },
+          { id: repositoryId, full_name: "michelpronkk-oss/auterim-m15-github-qa" },
+          { id: preservedRepositoryId, full_name: "michelpronkk-oss/auterim" },
         ],
       });
     }
@@ -100,6 +103,7 @@ const baseInput = {
   owner: "michelpronkk-oss",
   repository: "auterim-m15-github-qa",
   defaultBranch: "main",
+  allowedRepositories,
   requiredPaths,
 };
 
@@ -108,7 +112,7 @@ describe("M15.78R bounded GitHub installation inspection", () => {
     expect(M1578R_REQUIRED_FIXTURE_PATHS).toEqual(requiredPaths);
   });
 
-  it("proves the exact selected QA-only installation using a temporary read-only token", async () => {
+  it("proves the exact selected QA plus preserved Auterim installation using a read-only token", async () => {
     const fixture = scopeFetcher();
     const result = await inspectGitHubInstallationScope({
       ...baseInput,
@@ -122,10 +126,18 @@ describe("M15.78R bounded GitHub installation inspection", () => {
       accountLogin: "michelpronkk-oss",
       installationActive: true,
       selectedRepositoriesOnly: true,
+      repositorySelection: "selected",
       requiredWritePermissionsGranted: true,
       noUnexpectedWritePermissions: true,
-      visibleRepositoryCount: 1,
+      grantedPermissions: {
+        contents: "write",
+        metadata: "read",
+        pull_requests: "write",
+      },
+      visibleRepositoryCount: 2,
+      visibleRepositories: [allowedRepositories[1], allowedRepositories[0]],
       exactRepositoryVisible: true,
+      allowedRepositoryScopeMatches: true,
       defaultBranch: "main",
       defaultBranchSha: fixtureSha,
       requiredPathsPresent: true,
@@ -157,7 +169,7 @@ describe("M15.78R bounded GitHub installation inspection", () => {
     expect(fixture.calls.some((call) => call.url.endsWith("/access_tokens"))).toBe(false);
   });
 
-  it("verifies the QA-only repository and fixture with a read-only token when write permissions are missing", async () => {
+  it("reports exact current read grants and verifies QA when write permissions are missing", async () => {
     const fixture = scopeFetcher({
       permissions: {
         contents: "read",
@@ -174,8 +186,14 @@ describe("M15.78R bounded GitHub installation inspection", () => {
     expect(result).toMatchObject({
       requiredWritePermissionsGranted: false,
       noUnexpectedWritePermissions: true,
-      visibleRepositoryCount: 1,
+      grantedPermissions: {
+        contents: "read",
+        metadata: "read",
+        pull_requests: "read",
+      },
+      visibleRepositoryCount: 2,
       exactRepositoryVisible: true,
+      allowedRepositoryScopeMatches: true,
       defaultBranch: "main",
       defaultBranchSha: fixtureSha,
       requiredPathsPresent: true,
@@ -188,10 +206,11 @@ describe("M15.78R bounded GitHub installation inspection", () => {
     ).toBe(false);
   });
 
-  it("stops on a broad visible repository set before reading the QA branch", async () => {
+  it("rejects any unrelated repository before reading the QA branch", async () => {
     const fixture = scopeFetcher({
       repositories: [
         { id: repositoryId, full_name: "michelpronkk-oss/auterim-m15-github-qa" },
+        { id: preservedRepositoryId, full_name: "michelpronkk-oss/auterim" },
         { id: 44, full_name: "michelpronkk-oss/unrelated" },
       ],
     });
@@ -201,8 +220,32 @@ describe("M15.78R bounded GitHub installation inspection", () => {
       fetcher: fixture.fetcher,
     });
 
-    expect(result.visibleRepositoryCount).toBe(2);
-    expect(result.exactRepositoryVisible).toBe(false);
+    expect(result.visibleRepositoryCount).toBe(3);
+    expect(result.exactRepositoryVisible).toBe(true);
+    expect(result.allowedRepositoryScopeMatches).toBe(false);
+    expect(result.visibleRepositories).toEqual(
+      [
+        allowedRepositories[1],
+        allowedRepositories[0],
+        { id: 44, fullName: "michelpronkk-oss/unrelated" },
+      ].sort((left, right) => left.fullName.localeCompare(right.fullName)),
+    );
+    expect(fixture.calls.some((call) => call.url.endsWith("/branches/main"))).toBe(false);
+  });
+
+  it("rejects a QA-only installation because it would remove protected Auterim access", async () => {
+    const fixture = scopeFetcher({
+      repositories: [{ id: repositoryId, full_name: "michelpronkk-oss/auterim-m15-github-qa" }],
+    });
+    const result = await inspectGitHubInstallationScope({
+      ...baseInput,
+      privateKey: fixture.privateKey,
+      fetcher: fixture.fetcher,
+    });
+
+    expect(result.exactRepositoryVisible).toBe(true);
+    expect(result.allowedRepositoryScopeMatches).toBe(false);
+    expect(result.visibleRepositories).toEqual([allowedRepositories[0]]);
     expect(fixture.calls.some((call) => call.url.endsWith("/branches/main"))).toBe(false);
   });
 });

@@ -158,10 +158,14 @@ export type GitHubInstallationScopeInspection = {
   accountLogin: string | null;
   installationActive: boolean;
   selectedRepositoriesOnly: boolean;
+  repositorySelection?: "all" | "selected" | null;
   requiredWritePermissionsGranted: boolean;
   noUnexpectedWritePermissions: boolean;
+  grantedPermissions?: Record<string, string> | null;
   visibleRepositoryCount: number | null;
+  visibleRepositories?: Array<{ id: number; fullName: string }> | null;
   exactRepositoryVisible: boolean;
+  allowedRepositoryScopeMatches?: boolean;
   defaultBranch: string | null;
   defaultBranchSha: string | null;
   requiredPathsPresent?: boolean;
@@ -182,6 +186,7 @@ export async function inspectGitHubInstallationScope(input: {
   owner: string;
   repository: string;
   defaultBranch: string;
+  allowedRepositories: Array<{ id: number; fullName: string }>;
   requiredPaths?: string[];
   fetcher?: typeof fetch;
 }): Promise<GitHubInstallationScopeInspection> {
@@ -194,6 +199,23 @@ export async function inspectGitHubInstallationScope(input: {
     !/^[A-Za-z0-9_.-]{1,100}$/.test(input.owner) ||
     !/^[A-Za-z0-9_.-]{1,100}$/.test(input.repository) ||
     !/^[A-Za-z0-9_.-]{1,100}$/.test(input.defaultBranch) ||
+    input.allowedRepositories.length < 1 ||
+    input.allowedRepositories.length > 10 ||
+    input.allowedRepositories.some(
+      (repository) =>
+        !Number.isSafeInteger(repository.id) ||
+        repository.id <= 0 ||
+        !/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(repository.fullName),
+    ) ||
+    new Set(input.allowedRepositories.map((repository) => repository.id)).size !==
+      input.allowedRepositories.length ||
+    new Set(input.allowedRepositories.map((repository) => repository.fullName.toLowerCase()))
+      .size !== input.allowedRepositories.length ||
+    !input.allowedRepositories.some(
+      (repository) =>
+        repository.id === input.repositoryId &&
+        repository.fullName.toLowerCase() === `${input.owner}/${input.repository}`.toLowerCase(),
+    ) ||
     (input.requiredPaths ?? []).some(
       (path) =>
         path.length > 200 ||
@@ -216,10 +238,14 @@ export async function inspectGitHubInstallationScope(input: {
       accountLogin: null,
       installationActive: false,
       selectedRepositoriesOnly: false,
+      repositorySelection: null,
       requiredWritePermissionsGranted: false,
       noUnexpectedWritePermissions: false,
+      grantedPermissions: null,
       visibleRepositoryCount: null,
+      visibleRepositories: null,
       exactRepositoryVisible: false,
+      allowedRepositoryScopeMatches: false,
       defaultBranch: null,
       defaultBranchSha: null,
     };
@@ -233,10 +259,15 @@ export async function inspectGitHubInstallationScope(input: {
   const account = installation.account as Record<string, unknown> | undefined;
   const accountLogin = typeof account?.login === "string" ? account.login : null;
   const installationPermissions = installation.permissions as Record<string, unknown> | undefined;
+  const grantedPermissions = normalizeGitHubPermissionGrants(installationPermissions);
   const installationIdentityMatches =
     installation.id === input.installationId && installation.app_id === Number(input.appId);
   const installationActive = !installation.suspended_at;
-  const selectedRepositoriesOnly = installation.repository_selection === "selected";
+  const repositorySelection =
+    installation.repository_selection === "selected" || installation.repository_selection === "all"
+      ? installation.repository_selection
+      : null;
+  const selectedRepositoriesOnly = repositorySelection === "selected";
   const requiredWritePermissionsGranted =
     installationPermissions?.contents === "write" &&
     installationPermissions?.pull_requests === "write";
@@ -261,10 +292,14 @@ export async function inspectGitHubInstallationScope(input: {
       accountLogin,
       installationActive,
       selectedRepositoriesOnly,
+      repositorySelection,
       requiredWritePermissionsGranted,
       noUnexpectedWritePermissions,
+      grantedPermissions,
       visibleRepositoryCount: null,
+      visibleRepositories: null,
       exactRepositoryVisible: false,
+      allowedRepositoryScopeMatches: false,
       defaultBranch: null,
       defaultBranchSha: null,
     };
@@ -308,25 +343,53 @@ export async function inspectGitHubInstallationScope(input: {
   ) {
     throw new Error("github_installation_repository_list_invalid");
   }
-  const exactRepositoryVisible =
-    totalCount === 1 &&
-    repositories.length === 1 &&
-    (repositories[0] as Record<string, unknown>)?.id === input.repositoryId &&
-    typeof (repositories[0] as Record<string, unknown>)?.full_name === "string" &&
-    String((repositories[0] as Record<string, unknown>).full_name).toLowerCase() ===
-      `${input.owner}/${input.repository}`.toLowerCase();
+  const visibleRepositories = repositories
+    .flatMap((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+      const repository = value as Record<string, unknown>;
+      if (
+        !Number.isSafeInteger(repository.id) ||
+        (repository.id as number) <= 0 ||
+        typeof repository.full_name !== "string" ||
+        !/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(repository.full_name)
+      ) {
+        return [];
+      }
+      return [{ id: repository.id as number, fullName: repository.full_name }];
+    })
+    .sort((left, right) => left.fullName.localeCompare(right.fullName));
+  if (visibleRepositories.length !== repositories.length)
+    throw new Error("github_installation_repository_list_invalid");
+  const exactRepositoryVisible = visibleRepositories.some(
+    (repository) =>
+      repository.id === input.repositoryId &&
+      repository.fullName.toLowerCase() === `${input.owner}/${input.repository}`.toLowerCase(),
+  );
+  const allowedRepositoryScopeMatches =
+    visibleRepositories.length === input.allowedRepositories.length &&
+    input.allowedRepositories.every((allowed) =>
+      visibleRepositories.some(
+        (visible) =>
+          visible.id === allowed.id &&
+          visible.fullName.toLowerCase() === allowed.fullName.toLowerCase(),
+      ),
+    );
 
-  if (!exactRepositoryVisible) {
+  if (!exactRepositoryVisible || !allowedRepositoryScopeMatches) {
     return {
       appIdentityMatches,
       installationIdentityMatches,
       accountLogin,
       installationActive,
       selectedRepositoriesOnly,
+      repositorySelection,
       requiredWritePermissionsGranted,
       noUnexpectedWritePermissions,
+      grantedPermissions,
       visibleRepositoryCount: totalCount as number,
-      exactRepositoryVisible: false,
+      visibleRepositories,
+      exactRepositoryVisible,
+      allowedRepositoryScopeMatches,
       defaultBranch: null,
       defaultBranchSha: null,
     };
@@ -381,13 +444,34 @@ export async function inspectGitHubInstallationScope(input: {
     accountLogin,
     installationActive,
     selectedRepositoriesOnly,
+    repositorySelection,
     requiredWritePermissionsGranted,
     noUnexpectedWritePermissions,
+    grantedPermissions,
     visibleRepositoryCount: totalCount as number,
+    visibleRepositories,
     exactRepositoryVisible,
+    allowedRepositoryScopeMatches,
     defaultBranch: input.defaultBranch,
     defaultBranchSha,
     ...(requiredPathsPresent !== undefined ? { requiredPathsPresent } : {}),
     ...(npmLockfileFamily !== undefined ? { npmLockfileFamily } : {}),
   };
+}
+
+function normalizeGitHubPermissionGrants(value: Record<string, unknown> | undefined) {
+  if (!value || Array.isArray(value)) return null;
+  const entries = Object.entries(value);
+  if (entries.length > 64) return null;
+  const permissions: Record<string, string> = {};
+  for (const [name, grant] of entries) {
+    if (!/^[a-z_]{1,64}$/.test(name)) return null;
+    permissions[name] =
+      typeof grant === "string" && ["read", "write", "admin"].includes(grant)
+        ? grant
+        : "unrecognized";
+  }
+  return Object.fromEntries(
+    Object.entries(permissions).sort(([left], [right]) => left.localeCompare(right)),
+  );
 }
