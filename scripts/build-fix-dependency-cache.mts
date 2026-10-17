@@ -5,7 +5,10 @@ import { lstat, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { createClient } from "@supabase/supabase-js";
-import { buildSignedNpmDependencyCache } from "../verification-runner/cache-builder.ts";
+import {
+  buildSignedNpmDependencyCache,
+  readExactCommitText,
+} from "../verification-runner/cache-builder.ts";
 import {
   canonicalJson,
   DependencyCacheManifestSchema,
@@ -60,9 +63,7 @@ if (!local) {
 }
 
 const root = path.resolve(sourcePath);
-const packageText = await readFile(path.join(root, "package.json"), "utf8").catch(() =>
-  fail("dependency_cache_package_manifest_missing"),
-);
+const packageText = readExactCommitText(root, commitSha.toLowerCase(), "package.json");
 const lockNames = ["package-lock.json", "npm-shrinkwrap.json"].filter((name) => {
   try {
     return existsSync(path.join(root, name));
@@ -71,7 +72,7 @@ const lockNames = ["package-lock.json", "npm-shrinkwrap.json"].filter((name) => 
   }
 });
 if (lockNames.length !== 1) fail("dependency_cache_lockfile_unsupported");
-const lockText = await readFile(path.join(root, lockNames[0]!), "utf8");
+const lockText = readExactCommitText(root, commitSha.toLowerCase(), lockNames[0]!);
 const identity = createDependencyCacheIdentity({
   repositoryId,
   repositoryIdentity: repositoryIdentity.toLowerCase(),
