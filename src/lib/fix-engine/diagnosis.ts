@@ -1,5 +1,6 @@
 import {
   DiagnosisSchema,
+  FixPlanModelProposalSchema,
   FixPlanSchema,
   type FixDiagnosis,
   isSafeRepoPath,
@@ -73,11 +74,17 @@ export function validateProposedFixPlan(input: {
   preflightRequired: boolean;
   reviewRequired?: boolean;
 }) {
-  const parsedPlan = FixPlanSchema.safeParse(input.proposal);
+  const parsedProposal = FixPlanModelProposalSchema.safeParse(input.proposal);
+  if (!parsedProposal.success) throw new Error("fix_plan_schema_invalid");
+  const parsedPlan = FixPlanSchema.safeParse({
+    ...parsedProposal.data,
+    preflightApplicability: input.preflightRequired ? "required" : "not_applicable",
+    humanReviewRequired:
+      input.reviewRequired === true ||
+      input.diagnosis.recommendedTransformationClass === "manual_review_only",
+  });
   if (!parsedPlan.success) throw new Error("fix_plan_schema_invalid");
   const plan = parsedPlan.data;
-  if ((plan.preflightApplicability === "required") !== input.preflightRequired)
-    throw new Error("fix_plan_preflight_policy_mismatch");
   const evidencePaths = new Set(input.diagnosis.affectedLocations.map((item) => item.span.path));
   const evidenceIds = new Set(input.diagnosis.affectedLocations.map((item) => item.evidenceId));
   const paths = new Set<string>();
@@ -87,13 +94,6 @@ export function validateProposedFixPlan(input: {
     if (file.evidenceIds.some((id) => !evidenceIds.has(id)) || file.evidenceIds.length === 0)
       throw new Error("fix_plan_evidence_not_grounded");
     paths.add(file.path);
-  }
-  if (
-    (input.reviewRequired ||
-      input.diagnosis.recommendedTransformationClass === "manual_review_only") &&
-    !plan.humanReviewRequired
-  ) {
-    throw new Error("fix_plan_cannot_remove_review_requirement");
   }
   return plan;
 }

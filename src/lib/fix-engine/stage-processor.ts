@@ -9,6 +9,7 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { validateProposedDiagnosis, validateProposedFixPlan } from "@/lib/fix-engine/diagnosis";
 import {
   buildBoundedModelContext,
+  FIX_CODING_PROMPT_CONTRACT_VERSION,
   StructuredChatCompletionFixModel,
   type FixCodingModel,
   type ModelEnvelope,
@@ -247,7 +248,7 @@ function codingModel() {
       endpoint: FIX_CODING_MODEL_ENDPOINT,
       apiKey: FIX_CODING_MODEL_API_KEY,
       schemaVersion: "fix-engine-v1",
-      promptContractVersion: "fix-coding-contract-v2",
+      promptContractVersion: FIX_CODING_PROMPT_CONTRACT_VERSION,
     }),
   };
 }
@@ -274,7 +275,7 @@ async function invokeCodingModel(
     p_provider: configured.provider,
     p_model: configured.modelName,
     p_schema_version: "fix-engine-v1",
-    p_prompt_contract_version: "fix-coding-contract-v2",
+    p_prompt_contract_version: FIX_CODING_PROMPT_CONTRACT_VERSION,
     p_input_fingerprint: input.inputFingerprint,
   });
   if (beginError || typeof started?.attemptId !== "string")

@@ -110,6 +110,11 @@ const plan: FixPlan = {
   riskFactors: [],
   humanReviewRequired: false,
 };
+const planModelProposal = Object.fromEntries(
+  Object.entries(plan).filter(
+    ([key]) => key !== "preflightApplicability" && key !== "humanReviewRequired",
+  ),
+);
 
 const goodDiff = [
   "diff --git a/src/client.ts b/src/client.ts",
@@ -161,14 +166,30 @@ describe("M15.78 Fix Engine V1 deterministic contracts", () => {
       }).changedPaths,
     ).toEqual(["src/client.ts"]);
   });
-  it("02 SDK symbol migration plan uses a grounded file", () => {
-    expect(
+  it("02 SDK symbol migration plan uses a grounded file and hydrates policy-owned fields", () => {
+    const result = validateProposedFixPlan({
+      proposal: planModelProposal,
+      diagnosis: diagnosisProposal,
+      preflightRequired: false,
+      reviewRequired: true,
+    });
+    expect(result.allowedFiles[0]?.path).toBe("src/client.ts");
+    expect(result.preflightApplicability).toBe("not_applicable");
+    expect(result.humanReviewRequired).toBe(true);
+  });
+  it("rejects model attempts to supply Auterim-owned plan policy fields", () => {
+    expect(() =>
       validateProposedFixPlan({
-        proposal: plan,
+        proposal: {
+          ...planModelProposal,
+          preflightApplicability: "required",
+          humanReviewRequired: false,
+        },
         diagnosis: diagnosisProposal,
-        preflightRequired: true,
-      }).allowedFiles[0]?.path,
-    ).toBe("src/client.ts");
+        preflightRequired: false,
+        reviewRequired: true,
+      }),
+    ).toThrow("fix_plan_schema_invalid");
   });
   it("03 function signature change remains a structured diagnosis", () => {
     const value = validateProposedDiagnosis({
@@ -1087,6 +1108,59 @@ describe("M15.78 Fix Engine V1 deterministic contracts", () => {
     expect(result.value).toEqual({ supported: true });
     expect(result.usage.inputTokens).toBe(10);
     expect(result.outputFingerprint).toMatch(/^[a-f0-9]{64}$/);
+  });
+  it("gives Plan the exact generated strict field and enum contract", async () => {
+    let body: Record<string, unknown> | undefined;
+    const model = new StructuredChatCompletionFixModel({
+      provider: "azure-openai",
+      model: "gpt-6.1-sol",
+      endpoint: "https://models.example.test/openai/v1/chat/completions",
+      apiKey: "test-only-secret-value",
+      schemaVersion: "fix-engine-v1",
+      promptContractVersion: "fix-coding-contract-v3",
+      fetcher: async (_input, init) => {
+        body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({
+            model: "gpt-6.1-sol",
+            choices: [{ message: { content: JSON.stringify(planModelProposal) } }],
+            usage: { prompt_tokens: 100, completion_tokens: 40 },
+          }),
+          { status: 200 },
+        );
+      },
+    });
+    await model.plan(
+      {
+        semanticRoute: "deprecation",
+        graphEvidence: [],
+        files: [{ path: "src/client.ts", content: "const x=1" }],
+        commitSha: sha,
+        repositoryTextIsUntrusted: true,
+        executableCommandsAllowed: false,
+        contextFingerprint: "a".repeat(64),
+      },
+      diagnosisProposal,
+    );
+    expect(body).toHaveProperty("response_format", { type: "json_object" });
+    expect(body).not.toHaveProperty("tools");
+    const messages = body?.messages as Array<{ role: string; content: string }>;
+    const systemMessage = messages.find((message) => message.role === "system")?.content ?? "";
+    expect(systemMessage).toContain(
+      "Auterim derives them from persisted policy and review provenance",
+    );
+    const schemaText = systemMessage.split("JSON Schema: ")[1];
+    expect(schemaText).toBeTruthy();
+    const schema = JSON.parse(schemaText!) as { properties: Record<string, unknown> };
+    const serializedSchema = JSON.stringify(schema);
+    expect(schema.properties).toHaveProperty("allowedFiles");
+    expect(schema.properties).toHaveProperty("dependencyChanges");
+    expect(schema.properties).toHaveProperty("verificationProfile");
+    expect(serializedSchema).toContain("endpoint_replacement");
+    expect(serializedSchema).toContain("javascript-typescript-v1");
+    expect(serializedSchema).toContain('"additionalProperties":false');
+    expect(schema.properties).not.toHaveProperty("preflightApplicability");
+    expect(schema.properties).not.toHaveProperty("humanReviewRequired");
   });
   it("uses Azure API-key authentication and reports only a safe HTTP rejection category", async () => {
     let capturedHeaders: Headers | undefined;

@@ -6,8 +6,8 @@ import { randomUUID } from "node:crypto";
 const root = path.resolve(process.cwd());
 const stack = path.join(root, "node_modules/.cache/auterim-m1578r-diagnosis-local");
 const expectedRemote = "https://github.com/michelpronkk-oss/auterim.git";
-const expectedBranch = "codex/m1578r-diagnosis-recovery";
-const expectedBaseSha = "332717c355e53730bada6a160d609a4fc11d1eb3";
+const expectedBranch = "codex/m1578r-plan-contract-recovery";
+const expectedBaseSha = "b9cb229cf5513772d171bfab892fb727682c23d4";
 const expectedApiUrl = "http://127.0.0.1:62970";
 const container = "supabase_db_auterim-m1578r-diagnosis-local";
 const verificationImage =
@@ -153,6 +153,36 @@ const dbResult = run("docker", [
   databaseChecks,
 ]).trim();
 assert(dbResult === "t|t|t|t|t|t|t|t|t|t", "m1578r_storage_rls_or_private_bucket_failed");
+
+const planRecoveryChecks = `
+select
+  (select relrowsecurity from pg_class where oid='public.fix_plan_recovery_authorizations'::regclass),
+  not exists (select 1 from pg_policies where schemaname='public' and tablename='fix_plan_recovery_authorizations'),
+  not has_table_privilege('authenticated','public.fix_plan_recovery_authorizations','SELECT'),
+  has_table_privilege('service_role','public.fix_plan_recovery_authorizations','SELECT'),
+  not has_table_privilege('service_role','public.fix_plan_recovery_authorizations','INSERT'),
+  has_function_privilege('service_role','public.authorize_internal_fix_plan_contract_recovery(uuid,text,text)','EXECUTE'),
+  not has_function_privilege('authenticated','public.authorize_internal_fix_plan_contract_recovery(uuid,text,text)','EXECUTE'),
+  exists (select 1 from pg_trigger where tgname='fix_plan_recovery_authorizations_immutable' and not tgisinternal);
+`;
+const planRecoveryResult = run("docker", [
+  "exec",
+  container,
+  "psql",
+  "-U",
+  "postgres",
+  "-d",
+  "postgres",
+  "-At",
+  "-F",
+  "|",
+  "-c",
+  planRecoveryChecks,
+]).trim();
+assert(
+  planRecoveryResult === "t|t|t|t|t|t|t|t",
+  "m1578r_plan_recovery_rls_or_service_boundary_failed",
+);
 
 const statusOutput = runSupabase([
   "status",

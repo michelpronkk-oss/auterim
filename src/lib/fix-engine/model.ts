@@ -1,4 +1,8 @@
 import { createHash } from "node:crypto";
+import { z } from "zod";
+import { FixPlanModelProposalSchema } from "@/lib/fix-engine/contracts";
+
+export const FIX_CODING_PROMPT_CONTRACT_VERSION = "fix-coding-contract-v3";
 
 export type ModelUsage = {
   inputTokens?: number;
@@ -197,11 +201,19 @@ export class StructuredChatCompletionFixModel implements FixCodingModel {
   }
 
   plan(context: FixModelContext, diagnosis: unknown, signal?: AbortSignal) {
+    const schema = z.toJSONSchema(FixPlanModelProposalSchema, { target: "draft-7" });
     return this.complete(
       "plan",
       { ...context, plan: { diagnosis } },
       {
-        task: "Return only a JSON object conforming to the immutable fix-plan contract. Permit only evidence-grounded files and list verification requirements. Never return commands.",
+        task: [
+          "Return exactly one JSON object that follows this JSON Schema. Every listed root and nested property is required; all other properties are forbidden.",
+          "Only propose files and evidence IDs already present in the supplied diagnosis. Do not invent paths, evidence, symbols, or tests.",
+          "preflightApplicability and humanReviewRequired are intentionally omitted: Auterim derives them from persisted policy and review provenance.",
+          "Use empty arrays for unsupported dependency changes, API/schema/configuration changes, risk factors, preconditions, or expected tests.",
+          "Never return commands, source text, secrets, or explanations.",
+          `JSON Schema: ${JSON.stringify(schema)}`,
+        ].join(" "),
       },
       signal,
     );
