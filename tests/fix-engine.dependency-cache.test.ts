@@ -1,5 +1,6 @@
-import { generateKeyPairSync, sign } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -10,6 +11,7 @@ import {
   serializeDependencyCacheManifest,
 } from "@/lib/fix-engine/dependency-cache";
 import { FIX_VERIFICATION_NETWORK_MODE } from "@/lib/fix-engine/sandbox";
+import { readExactCommitText } from "../verification-runner/cache-builder";
 
 const rootPaths: string[] = [];
 const repositoryId = "30000000-0000-4000-8000-000000000001";
@@ -68,6 +70,71 @@ async function makeCache(input: {
 }
 
 describe("M15.78 trusted dependency cache", () => {
+  it("fingerprints exact Git blob bytes instead of CRLF-smudged checkout text", async () => {
+    const root = await mkdtemp(path.join(process.env.TEMP ?? process.cwd(), "m1578-cache-eol-"));
+    rootPaths.push(root);
+    const repository = path.join(root, "repository");
+    await mkdir(repository);
+    const safeEnv = {
+      PATH: process.env.PATH ?? "",
+      NODE_ENV: "test" as const,
+      ...(process.platform === "win32" ? { SYSTEMROOT: process.env.SYSTEMROOT ?? "" } : {}),
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+    };
+    const git = (args: string[]) =>
+      execFileSync("git", ["-C", repository, ...args], {
+        encoding: "utf8",
+        windowsHide: true,
+        env: safeEnv,
+      }).trim();
+    const expectedPackage = '{"name":"eol-cache-fixture","packageManager":"npm@10.8.2"}\n';
+    const expectedLock = '{"name":"eol-cache-fixture","lockfileVersion":3,"packages":{}}\n';
+    await writeFile(path.join(repository, ".gitattributes"), "*.json text eol=crlf\n");
+    await writeFile(path.join(repository, "package.json"), expectedPackage);
+    await writeFile(path.join(repository, "package-lock.json"), expectedLock);
+    git(["init", "--quiet"]);
+    git(["config", "user.name", "Auterim cache fixture"]);
+    git(["config", "user.email", "cache-fixture@auterim.invalid"]);
+    git(["add", ".gitattributes", "package.json", "package-lock.json"]);
+    git(["commit", "--quiet", "-m", "test: commit cache identity files"]);
+    const commitSha = git(["rev-parse", "HEAD"]);
+    await rm(path.join(repository, "package.json"));
+    await rm(path.join(repository, "package-lock.json"));
+    git(["checkout", "--", "package.json", "package-lock.json"]);
+
+    const worktreePackage = await readFile(path.join(repository, "package.json"), "utf8");
+    const worktreeLock = await readFile(path.join(repository, "package-lock.json"), "utf8");
+    expect(worktreePackage).toContain("\r\n");
+    expect(worktreeLock).toContain("\r\n");
+    expect(git(["status", "--porcelain"])).toBe("");
+
+    const exactPackage = readExactCommitText(repository, commitSha, "package.json");
+    const exactLock = readExactCommitText(repository, commitSha, "package-lock.json");
+    expect(exactPackage).toBe(expectedPackage);
+    expect(exactLock).toBe(expectedLock);
+    const rawIdentity = createDependencyCacheIdentity({
+      repositoryId,
+      repositoryIdentity: "michelpronkk-oss/auterim",
+      commitSha,
+      packageJson: exactPackage,
+      lockfiles: { "package-lock.json": exactLock },
+    });
+    const smudgedIdentity = createDependencyCacheIdentity({
+      repositoryId,
+      repositoryIdentity: "michelpronkk-oss/auterim",
+      commitSha,
+      packageJson: worktreePackage,
+      lockfiles: { "package-lock.json": worktreeLock },
+    });
+    expect(rawIdentity).not.toBeNull();
+    expect(smudgedIdentity).not.toBeNull();
+    expect(rawIdentity?.packageManifestSha256).toBe(
+      createHash("sha256").update(expectedPackage).digest("hex"),
+    );
+    expect(rawIdentity?.lockfileSha256).not.toBe(smudgedIdentity?.lockfileSha256);
+  });
+
   it("accepts only a signed immutable cache with an exact repository/commit/lock identity", async () => {
     const { root, identity } = await makeCache({});
     const resolved = await resolveTrustedDependencyCache({

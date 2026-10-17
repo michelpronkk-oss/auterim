@@ -1,5 +1,5 @@
 import { createPrivateKey, randomUUID, sign } from "node:crypto";
-import { execFile, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { createWriteStream } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -27,6 +27,7 @@ import {
 const execFileAsync = promisify(execFile);
 const MAX_BUILD_MS = 10 * 60_000;
 const MAX_BUILD_OUTPUT = 64 * 1024;
+const MAX_IDENTITY_FILE_BYTES = 16 * 1024 * 1024;
 
 function cacheFailure(code: string): never {
   throw new Error(/^[a-z0-9_]{1,100}$/.test(code) ? code : "dependency_cache_build_failed");
@@ -175,6 +176,50 @@ async function assertCleanExactCommit(source: string, commitSha: string) {
     cacheFailure("dependency_cache_source_commit_mismatch");
 }
 
+/** Read identity inputs from the immutable Git tree, never a platform-smudged worktree. */
+export function readExactCommitText(
+  sourceRepositoryPath: string,
+  commitSha: string,
+  relativePath: string,
+) {
+  if (
+    !path.isAbsolute(sourceRepositoryPath) ||
+    !/^[a-f0-9]{40,64}$/i.test(commitSha) ||
+    !["package.json", "package-lock.json", "npm-shrinkwrap.json"].includes(relativePath)
+  )
+    cacheFailure("dependency_cache_identity_file_invalid");
+
+  let bytes: Buffer;
+  try {
+    bytes = execFileSync(
+      "git",
+      ["-C", sourceRepositoryPath, "show", `${commitSha}:${relativePath}`],
+      {
+        windowsHide: true,
+        timeout: 15_000,
+        maxBuffer: MAX_IDENTITY_FILE_BYTES,
+        encoding: "buffer",
+        env: {
+          PATH: process.env.PATH ?? "",
+          ...(process.platform === "win32" ? { SYSTEMROOT: process.env.SYSTEMROOT ?? "" } : {}),
+          NODE_ENV: "production",
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+        },
+      },
+    );
+  } catch {
+    cacheFailure("dependency_cache_identity_file_unavailable");
+  }
+  if (bytes.byteLength > MAX_IDENTITY_FILE_BYTES)
+    cacheFailure("dependency_cache_identity_file_limit");
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    cacheFailure("dependency_cache_identity_file_encoding_invalid");
+  }
+}
+
 /**
  * Build a signed immutable npm cache from a clean exact commit. npm lifecycle
  * scripts are disabled and the build container receives only package files.
@@ -190,10 +235,11 @@ export async function buildSignedNpmDependencyCache(input: {
   outputDirectory?: string;
 }) {
   await assertCleanExactCommit(input.sourceRepositoryPath, input.identity.commitSha);
-  const packageJsonText = await readFile(
-    path.join(input.sourceRepositoryPath, "package.json"),
-    "utf8",
-  ).catch(() => cacheFailure("dependency_cache_package_manifest_missing"));
+  const packageJsonText = readExactCommitText(
+    input.sourceRepositoryPath,
+    input.identity.commitSha,
+    "package.json",
+  );
   const packageJson = JSON.parse(packageJsonText) as {
     packageManager?: string;
     workspaces?: unknown;
@@ -207,7 +253,11 @@ export async function buildSignedNpmDependencyCache(input: {
   if (lockNames.length !== 1 || existsSync(path.join(input.sourceRepositoryPath, ".npmrc")))
     cacheFailure("dependency_cache_lockfile_unsupported");
   const lockName = lockNames[0]!;
-  const lockText = await readFile(path.join(input.sourceRepositoryPath, lockName), "utf8");
+  const lockText = readExactCommitText(
+    input.sourceRepositoryPath,
+    input.identity.commitSha,
+    lockName,
+  );
   validateNpmLock(lockText);
   const identity = createDependencyCacheIdentity({
     ...input.identity,
