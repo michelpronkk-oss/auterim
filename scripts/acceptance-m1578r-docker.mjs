@@ -37,6 +37,24 @@ function runSupabase(args) {
   return run("cmd.exe", ["/d", "/s", "/c", `npx supabase ${args.join(" ")}`]);
 }
 
+function waitForVerificationRunnerHealth(containerName) {
+  const deadline = Date.now() + 30_000;
+  const probe =
+    "fetch('http://127.0.0.1:8080/healthz').then(async r => { const b=await r.json(); if(!r.ok || b.protocolVersion!=='m1578-verification-runner-v1') process.exit(1); }).catch(()=>process.exit(1))";
+  while (Date.now() < deadline) {
+    try {
+      run("docker", ["exec", containerName, "node", "-e", probe], {
+        timeout: 5_000,
+        maxBuffer: 4096,
+      });
+      return;
+    } catch {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+    }
+  }
+  throw new Error("m1578r_runner_health_failed");
+}
+
 function assert(value, category) {
   if (!value) throw new Error(category);
 }
@@ -50,7 +68,10 @@ assert(
   run("git", ["branch", "--show-current"]).trim() === expectedBranch,
   "m1578r_branch_identity_failed",
 );
-assert(run("git", ["rev-parse", "HEAD"]).trim() === expectedBaseSha, "m1578r_base_sha_changed");
+assert(
+  run("git", ["merge-base", "HEAD", "origin/main"]).trim() === expectedBaseSha,
+  "m1578r_base_sha_changed",
+);
 assert(
   run("docker", ["context", "show"]).trim() === "desktop-linux",
   "m1578r_docker_context_failed",
@@ -108,7 +129,13 @@ select
       )
   ) as no_authenticated_storage_policy,
   has_table_privilege('service_role','storage.objects','SELECT') as service_role_storage_read,
-  has_table_privilege('service_role','storage.objects','INSERT') as service_role_storage_write;
+  has_table_privilege('service_role','storage.objects','INSERT') as service_role_storage_write,
+  (select relrowsecurity from pg_class where oid='public.fix_verification_snapshots'::regclass) as snapshot_rls,
+  not exists (select 1 from pg_policies where schemaname='public' and tablename='fix_verification_snapshots') as no_snapshot_policy,
+  not has_table_privilege('authenticated','public.fix_verification_snapshots','SELECT') as no_authenticated_snapshot_read,
+  has_table_privilege('service_role','public.fix_verification_snapshots','SELECT') as service_role_snapshot_metadata_read,
+  has_function_privilege('service_role','public.register_fix_verification_snapshot(uuid,uuid,text)','EXECUTE') as service_can_register_snapshot,
+  not has_function_privilege('authenticated','public.register_fix_verification_snapshot(uuid,uuid,text)','EXECUTE') as authenticated_cannot_register_snapshot;
 `;
 const dbResult = run("docker", [
   "exec",
@@ -124,7 +151,7 @@ const dbResult = run("docker", [
   "-c",
   databaseChecks,
 ]).trim();
-assert(dbResult === "t|t|t|t", "m1578r_storage_rls_or_private_bucket_failed");
+assert(dbResult === "t|t|t|t|t|t|t|t|t|t", "m1578r_storage_rls_or_private_bucket_failed");
 
 const statusOutput = runSupabase([
   "status",
@@ -189,18 +216,7 @@ try {
     smokeImage,
   ]);
   smokeStarted = true;
-  const health = run(
-    "docker",
-    [
-      "exec",
-      smokeName,
-      "node",
-      "-e",
-      "fetch('http://127.0.0.1:8080/healthz').then(async r => { const b=await r.json(); if(!r.ok || b.protocolVersion!=='m1578-verification-runner-v1') process.exit(1); }).catch(()=>process.exit(1))",
-    ],
-    { timeout: 30_000 },
-  );
-  void health;
+  waitForVerificationRunnerHealth(smokeName);
 } finally {
   if (smokeStarted) run("docker", ["rm", "-f", smokeName]);
   run("docker", ["volume", "rm", smokeVolume]);
@@ -230,7 +246,7 @@ const env = {
   AUTERIM_M1576_SERVICE_KEY: serviceKey,
   AUTERIM_M1576_ANON_KEY: anonKey,
   AUTERIM_M1576_FIXTURE_COMMIT_SHA: expectedBaseSha,
-  AUTERIM_M1576_PREVIOUS_COMMIT_SHA: run("git", ["rev-parse", "HEAD^"]).trim(),
+  AUTERIM_M1576_PREVIOUS_COMMIT_SHA: run("git", ["rev-parse", `${expectedBaseSha}^`]).trim(),
   AUTERIM_M1577_POLICY_DOCKER_ACCEPTANCE: "1",
   NEXT_PUBLIC_SUPABASE_URL: apiUrl,
   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: anonKey,
@@ -257,6 +273,9 @@ runVitest(
   ["tests/fix-engine.docker.integration.test.ts", "tests/fix-engine.test.ts"],
   "M15.78 regression Docker matrix",
 );
+// Keep the exact-commit Code Intelligence fixture independent from the Fix
+// Engine persistence fixture that may have reused the same repository/commit.
+runSupabase(["db", "reset", "--local", "--no-seed", "--workdir", path.relative(root, stack)]);
 runVitest(
   [
     "tests/code-intelligence.docker.integration.test.ts",

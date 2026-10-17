@@ -129,6 +129,57 @@ export async function removePrivateVerificationArtifact(path: string) {
   if (error) throw new Error("verification_snapshot_cleanup_failed");
 }
 
+export async function removePrivateVerificationArtifacts(paths: string[]) {
+  const safe = paths
+    .filter((path) => /^snapshots\/[0-9a-f-]{36}\/[a-f0-9]{64}\.tar\.gz$/i.test(path))
+    .slice(0, 100);
+  if (safe.length !== paths.length || new Set(safe).size !== safe.length)
+    throw new Error("verification_snapshot_cleanup_scope_invalid");
+  if (safe.length === 0) return;
+  const { error } = await createSupabaseServerClient().storage.from(BUCKET).remove(safe);
+  if (error) throw new Error("verification_snapshot_cleanup_failed");
+}
+
+export async function registerPrivateVerificationSnapshot(input: {
+  fixRunId: string;
+  workspaceId: string;
+  sha256: string;
+}) {
+  if (
+    !/^[0-9a-f-]{36}$/i.test(input.fixRunId) ||
+    !/^[0-9a-f-]{36}$/i.test(input.workspaceId) ||
+    !/^[a-f0-9]{64}$/.test(input.sha256)
+  )
+    throw new Error("verification_snapshot_identity_invalid");
+  const { data, error } = await createSupabaseServerClient().rpc(
+    "register_fix_verification_snapshot",
+    {
+      p_fix_run_id: input.fixRunId,
+      p_workspace_id: input.workspaceId,
+      p_snapshot_sha256: input.sha256,
+    },
+  );
+  const expectedPath = `snapshots/${input.fixRunId}/${input.sha256}.tar.gz`;
+  if (error || data !== expectedPath)
+    throw new Error("verification_snapshot_retention_register_failed");
+}
+
+export async function markPrivateVerificationSnapshotTerminal(input: {
+  fixRunId: string;
+  workspaceId: string;
+  sha256: string;
+}) {
+  const { data, error } = await createSupabaseServerClient().rpc(
+    "mark_fix_verification_snapshot_terminal",
+    {
+      p_fix_run_id: input.fixRunId,
+      p_workspace_id: input.workspaceId,
+      p_snapshot_sha256: input.sha256,
+    },
+  );
+  if (error || data !== true) throw new Error("verification_snapshot_retention_terminal_failed");
+}
+
 export function dependencyCacheObjectPrefix(identity: DependencyCacheIdentity) {
   return `caches/${identity.repositoryId}/${identity.commitSha}/${dependencyCacheIdentityKey(identity)}`;
 }

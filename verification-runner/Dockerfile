@@ -4,7 +4,7 @@ RUN apk add --no-cache docker-cli
 WORKDIR /opt/auterim-runner
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
-COPY archive.ts contracts.ts docker-executor.ts server.ts main.ts ./
+COPY archive.ts contracts.ts docker-executor.ts spool.ts server.ts main.ts ./
 RUN mkdir -p /srv/auterim-runner && chown -R node:node /opt/auterim-runner /srv/auterim-runner
 
 ENV NODE_ENV=production

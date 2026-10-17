@@ -13,6 +13,7 @@ import {
   dependencyCacheIdentityKey,
   FIX_VERIFICATION_RUNTIME_PROFILE,
 } from "../src/lib/fix-engine/cache-identity.ts";
+import { npmLockRequiresInstallScripts } from "../src/lib/fix-engine/verification-profile.ts";
 import {
   canonicalJson,
   MAX_ARCHIVE_EXPANDED_BYTES,
@@ -120,7 +121,11 @@ function validateNpmLock(lockText: string) {
     cacheFailure("dependency_cache_lock_unsupported");
   for (const [name, raw] of Object.entries(lock.packages)) {
     if (!raw || typeof raw !== "object") cacheFailure("dependency_cache_lock_invalid");
-    const packageEntry = raw as { resolved?: unknown; integrity?: unknown; link?: unknown };
+    const packageEntry = raw as {
+      resolved?: unknown;
+      integrity?: unknown;
+      link?: unknown;
+    };
     if (packageEntry.link === true) cacheFailure("dependency_cache_symlink_layout_unsupported");
     if (!name) continue;
     if (typeof packageEntry.resolved !== "string")
@@ -147,6 +152,7 @@ function validateNpmLock(lockText: string) {
     )
       cacheFailure("dependency_cache_integrity_missing");
   }
+  if (npmLockRequiresInstallScripts(lockText)) cacheFailure("dependency_install_scripts_required");
 }
 
 async function assertCleanExactCommit(source: string, commitSha: string) {

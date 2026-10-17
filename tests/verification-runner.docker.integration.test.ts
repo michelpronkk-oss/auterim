@@ -86,12 +86,11 @@ describe.skipIf(!enabled)("M15.78R trusted npm cache and remote Docker verificat
         name: "m1578r-deterministic-fixture",
         version: "1.0.0",
         private: true,
-        type: "module",
         packageManager: "npm@10.8.2",
         scripts: {
           preinstall: "node -e \"require('node:fs').writeFileSync('lifecycle-ran', 'yes')\"",
         },
-        devDependencies: { vitest: "3.2.4", typescript: "5.9.3" },
+        devDependencies: { jest: "29.7.0", typescript: "5.9.3" },
       };
       await writeFile(
         path.join(repository, "package.json"),
@@ -107,6 +106,8 @@ describe.skipIf(!enabled)("M15.78R trusted npm cache and remote Docker verificat
               module: "NodeNext",
               moduleResolution: "NodeNext",
               noEmit: true,
+              skipLibCheck: true,
+              types: [],
             },
             include: ["src/**/*.ts"],
           },
@@ -115,15 +116,20 @@ describe.skipIf(!enabled)("M15.78R trusted npm cache and remote Docker verificat
         ),
       );
       await writeFile(
-        path.join(repository, "src/endpoint.ts"),
-        'export const endpoint: string = "/v1/old";\n',
+        path.join(repository, "jest.config.js"),
+        'module.exports = { testEnvironment: "node" };\n',
+      );
+      await writeFile(path.join(repository, "src/endpoint.js"), 'exports.endpoint = "/v1/old";\n');
+      await writeFile(
+        path.join(repository, "src/typecheck.ts"),
+        'export const fixtureTypecheck: string = "valid";\n',
       );
       await writeFile(
-        path.join(repository, "test/endpoint.test.ts"),
+        path.join(repository, "test/endpoint.test.js"),
         [
-          'import { expect, test } from "vitest";',
-          'import { endpoint } from "../src/endpoint.ts";',
-          'import { writeFileSync } from "node:fs";',
+          'const { expect, test } = require("@jest/globals");',
+          'const { endpoint } = require("../src/endpoint");',
+          'const { writeFileSync } = require("node:fs");',
           'test("the candidate endpoint patch is applied", () => expect(endpoint).toBe("/v1/new"));',
           'test("the verifier is constrained", async () => {',
           "  expect(process.getuid?.()).toBe(1000);",
@@ -189,8 +195,10 @@ describe.skipIf(!enabled)("M15.78R trusted npm cache and remote Docker verificat
         "package.json",
         "package-lock.json",
         "tsconfig.json",
-        "src/endpoint.ts",
-        "test/endpoint.test.ts",
+        "jest.config.js",
+        "src/endpoint.js",
+        "src/typecheck.ts",
+        "test/endpoint.test.js",
       ]);
       await git(["commit", "--quiet", "-m", "test: create isolated verifier fixture"]);
       const commitSha = (await git(["rev-parse", "HEAD"])).stdout.trim();
@@ -222,22 +230,19 @@ describe.skipIf(!enabled)("M15.78R trusted npm cache and remote Docker verificat
         maxFiles: 50_000,
         maxBytes: 512 * 1024 * 1024,
       });
-      expect(existsSync(path.join(cacheInspection, "vitest", "vitest.mjs"))).toBe(true);
+      expect(existsSync(path.join(cacheInspection, "jest", "bin", "jest.js"))).toBe(true);
       expect(existsSync(path.join(cacheInspection, "typescript", "bin", "tsc"))).toBe(true);
 
       const fixRunId = "1f3042a6-08a8-4df2-b776-8c30c90615df";
       const patchId = "2f4f848d-356a-4316-9b8f-a23d2c54dd19";
       const planId = "4a4bc3d9-ae3d-4ce0-9cae-570d2fb6b648";
-      const patchText = (await git(["diff", "--no-ext-diff", "--", "src/endpoint.ts"])).stdout;
+      const patchText = (await git(["diff", "--no-ext-diff", "--", "src/endpoint.js"])).stdout;
       const baseSnapshot = await createPrivateBaseSnapshotArtifact({
         fixRunId,
         checkoutPath: repository,
       });
-      await writeFile(
-        path.join(repository, "src/endpoint.ts"),
-        'export const endpoint: string = "/v1/new";\n',
-      );
-      const patch = (await git(["diff", "--no-ext-diff", "--", "src/endpoint.ts"])).stdout;
+      await writeFile(path.join(repository, "src/endpoint.js"), 'exports.endpoint = "/v1/new";\n');
+      const patch = (await git(["diff", "--no-ext-diff", "--", "src/endpoint.js"])).stdout;
       expect(patch).not.toBe(patchText);
       const patchFingerprint = runnerHash(patch);
       const patchPath = `${fixRunId}/${patchId}.diff`;
@@ -266,14 +271,17 @@ describe.skipIf(!enabled)("M15.78R trusted npm cache and remote Docker verificat
         "package.json",
         "package-lock.json",
         "tsconfig.json",
-        "src/endpoint.ts",
-        "test/endpoint.test.ts",
+        "jest.config.js",
+        "src/endpoint.js",
+        "src/typecheck.ts",
+        "test/endpoint.test.js",
       ];
       const profile = resolveVerificationProfile({
         packageJson,
         files,
-        targetedTestPaths: ["test/endpoint.test.ts"],
+        targetedTestPaths: ["test/endpoint.test.js"],
         dependencyCacheAvailable: true,
+        packageLock: lockText,
       });
       expect(profile.state).toBe("supported");
       expect(profile.packageManager).toBe("npm");
@@ -303,7 +311,7 @@ describe.skipIf(!enabled)("M15.78R trusted npm cache and remote Docker verificat
           evidenceFingerprint: "8".repeat(64),
           patchId,
           patchFingerprint,
-          allowedPaths: ["src/endpoint.ts"],
+          allowedPaths: ["src/endpoint.js"],
           repositoryId,
           repositoryIdentity,
           baseCommitSha: commitSha,

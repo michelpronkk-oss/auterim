@@ -343,7 +343,20 @@ describe.skipIf(!enabled)(
           name: "m1578-verification-fixture",
           devDependencies: { vitest: "1.0.0", typescript: "1.0.0" },
         }) + "\n";
-      const packageLock = "deterministic-fixture-lock-v1\n";
+      const packageLock =
+        JSON.stringify({
+          name: "m1578-verification-fixture",
+          version: "1.0.0",
+          lockfileVersion: 3,
+          requires: true,
+          packages: {
+            "": {
+              name: "m1578-verification-fixture",
+              version: "1.0.0",
+              devDependencies: { vitest: "1.0.0", typescript: "1.0.0" },
+            },
+          },
+        }) + "\n";
       const sourceText = 'export const before = "source";\n';
       const cacheKeys = generateKeyPairSync("ed25519");
       let cacheRootPath: string | null = null;
@@ -545,6 +558,26 @@ describe.skipIf(!enabled)(
         status: "passed",
         profile_id: "javascript-typescript-v1",
       });
+      if (remoteAcceptance) {
+        const { data: retainedSnapshot, error: retainedSnapshotError } = await client
+          .from("fix_verification_snapshots")
+          .select(
+            "workspace_id,fix_run_id,snapshot_sha256,artifact_path,status,terminal_at,purged_at",
+          )
+          .eq("workspace_id", workspaceId)
+          .eq("fix_run_id", created.fixRunId)
+          .single();
+        expect(retainedSnapshotError).toBeNull();
+        expect(retainedSnapshot).toMatchObject({
+          workspace_id: workspaceId,
+          fix_run_id: created.fixRunId,
+          status: "terminal",
+          purged_at: null,
+        });
+        expect(retainedSnapshot?.artifact_path).toBe(
+          `snapshots/${created.fixRunId}/${retainedSnapshot?.snapshot_sha256}.tar.gz`,
+        );
+      }
       expect(
         (verification?.checks as Array<{ status: string }>).every(
           (check) => check.status === "passed",

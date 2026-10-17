@@ -51,9 +51,12 @@ import {
 import {
   createPrivateBaseSnapshotArtifact,
   createSignedDependencyCacheReference,
+  markPrivateVerificationSnapshotTerminal,
+  registerPrivateVerificationSnapshot,
   type PrivateArtifactReference,
   type SignedDependencyCacheReference,
 } from "@/lib/fix-engine/verification-artifacts";
+import { VerificationRunnerFailure } from "@/lib/fix-engine/verification-retry";
 
 type StoredRun = {
   id: string;
@@ -853,6 +856,7 @@ export function createFixEngineStageProcessor(
             packageJson,
             files: names,
             targetedTestPaths: plan.expectedTests,
+            packageLock: lockfiles["package-lock.json"] ?? lockfiles["npm-shrinkwrap.json"],
             dependencyCacheAvailable:
               verificationExecutor.kind === "remote"
                 ? cacheIdentity?.packageManager === "npm"
@@ -915,20 +919,50 @@ export function createFixEngineStageProcessor(
                 checks: [],
               };
           }
-          const executed = await verificationExecutor.execute({
-            checkoutPath,
-            profile,
-            commands: profile.commands,
-            localDependencyCache:
-              localDependencyCache?.status === "available" ? localDependencyCache : null,
-            remote,
-          });
-          return {
-            status: executed.status,
-            profile,
-            checks: executed.checks,
-            durationMs: executed.durationMs,
-          };
+          if (remote && snapshotArtifact) {
+            await registerPrivateVerificationSnapshot({
+              fixRunId: run.id,
+              workspaceId: run.workspace_id,
+              sha256: snapshotArtifact.sha256,
+            });
+          }
+          try {
+            const executed = await verificationExecutor.execute({
+              checkoutPath,
+              profile,
+              commands: profile.commands,
+              localDependencyCache:
+                localDependencyCache?.status === "available" ? localDependencyCache : null,
+              remote,
+            });
+            if (remote && snapshotArtifact) {
+              await markPrivateVerificationSnapshotTerminal({
+                fixRunId: run.id,
+                workspaceId: run.workspace_id,
+                sha256: snapshotArtifact.sha256,
+              });
+            }
+            return {
+              status: executed.status,
+              profile,
+              checks: executed.checks,
+              durationMs: executed.durationMs,
+            };
+          } catch (error) {
+            if (
+              remote &&
+              snapshotArtifact &&
+              error instanceof VerificationRunnerFailure &&
+              !error.retryable
+            ) {
+              await markPrivateVerificationSnapshotTerminal({
+                fixRunId: run.id,
+                workspaceId: run.workspace_id,
+                sha256: snapshotArtifact.sha256,
+              });
+            }
+            throw error;
+          }
         },
       });
       const status = materialized.status === "passed" ? "passed" : materialized.status;

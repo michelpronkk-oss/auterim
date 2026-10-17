@@ -18,6 +18,7 @@ import {
 } from "../../../verification-runner/contracts";
 import type { PrivateArtifactReference } from "@/lib/fix-engine/verification-artifacts";
 import type { DependencyCacheManifestV2 } from "../../../verification-runner/contracts";
+import { retryableRunnerFailure, terminalRunnerFailure } from "@/lib/fix-engine/verification-retry";
 
 function requestSignatureInput(
   method: string,
@@ -104,14 +105,13 @@ function assertSignedResult(
   secret: string,
 ) {
   const providedText = response.headers.get("x-auterim-result-signature") ?? "";
-  if (!/^[a-f0-9]{64}$/.test(providedText))
-    throw new Error("verification_runner_result_unauthenticated");
+  if (!/^[a-f0-9]{64}$/.test(providedText)) throw terminalRunnerFailure("runner_result_invalid");
   const expected = createHmac("sha256", secret)
     .update(verificationResultSignatureInput(result.jobId, sha256(bytes)), "utf8")
     .digest();
   const provided = Buffer.from(providedText, "hex");
   if (provided.length !== expected.length || !timingSafeEqual(provided, expected))
-    throw new Error("verification_runner_result_unauthenticated");
+    throw terminalRunnerFailure("runner_result_invalid");
 }
 
 function validateResult(value: unknown, expected: VerificationJobRequest): VerificationJobResult {
@@ -136,8 +136,37 @@ function validateResult(value: unknown, expected: VerificationJobRequest): Verif
     result.profileVersion !== expected.identity.profileVersion ||
     sha256(canonicalJson(base)) !== resultFingerprint
   )
-    throw new Error("verification_runner_result_identity_mismatch");
+    throw terminalRunnerFailure("runner_result_invalid");
   return result;
+}
+
+function failureForResponse(value: unknown, status: number) {
+  const category = responseFailure(value);
+  if (status === 401 || category === "runner_authentication_failed")
+    return terminalRunnerFailure("runner_auth_failed");
+  if (category === "runner_protocol_unsupported")
+    return terminalRunnerFailure("runner_protocol_unsupported");
+  if (status === 503 && category === "verification_runner_queue_full")
+    return retryableRunnerFailure("runner_queue_full");
+  if (
+    status === 503 &&
+    ["verification_runner_state_unavailable", "verification_runner_state_corrupt"].includes(
+      category ?? "",
+    )
+  )
+    return retryableRunnerFailure("runner_state_temporarily_unavailable");
+  if (status >= 500) return retryableRunnerFailure("runner_unavailable");
+  if (category?.includes("snapshot")) return terminalRunnerFailure("snapshot_identity_mismatch");
+  if (category?.includes("patch")) return terminalRunnerFailure("patch_identity_mismatch");
+  if (category?.includes("cache_signature"))
+    return terminalRunnerFailure("cache_signature_invalid");
+  if (category?.includes("cache_tree")) return terminalRunnerFailure("cache_tree_invalid");
+  if (category?.includes("cache")) return terminalRunnerFailure("cache_identity_mismatch");
+  if (category === "verification_command_unsupported")
+    return terminalRunnerFailure("verification_unsupported");
+  if (category === "verification_command_failed")
+    return terminalRunnerFailure("verification_failed");
+  return terminalRunnerFailure("runner_result_invalid");
 }
 
 export function createVerificationJobRequest(input: {
@@ -222,6 +251,8 @@ export class RemoteVerificationRunnerClient {
     let response: Response | null = null;
     let value: unknown = null;
     let responseBytes: Buffer | null = null;
+    let lastTransportFailure:
+      "runner_transport_ambiguous" | "runner_timeout_when_execution_may_continue" | null = null;
     try {
       response = await fetch(new URL(postPath, this.baseUrl), {
         method: "POST",
@@ -236,9 +267,12 @@ export class RemoteVerificationRunnerClient {
       const parsed = await parseBoundedJsonResponse(response);
       value = parsed.value;
       responseBytes = parsed.bytes;
-    } catch {
+    } catch (error) {
       // The POST may have reached the runner. Reconcile by immutable job ID before failing.
       response = null;
+      lastTransportFailure = isTimeout(error)
+        ? "runner_timeout_when_execution_may_continue"
+        : "runner_transport_ambiguous";
     }
 
     const started = Date.now();
@@ -251,22 +285,23 @@ export class RemoteVerificationRunnerClient {
         accepted.jobId !== validated.jobId ||
         accepted.requestFingerprint !== validated.requestFingerprint
       )
-        throw new Error("verification_runner_result_stale");
+        throw terminalRunnerFailure("runner_result_invalid");
     }
     while (true) {
       if (response && response.status !== 202 && response.status !== 200) {
-        throw new Error(responseFailure(value) ?? "verification_runner_rejected");
+        throw failureForResponse(value, response.status);
       }
       if (response?.status === 200) {
         const failed = responseFailure(value);
-        if (failed) throw new Error(failed);
-        if (!responseBytes) throw new Error("verification_runner_response_invalid");
+        if (failed) throw failureForResponse(value, response.status);
+        if (!responseBytes) throw terminalRunnerFailure("runner_result_invalid");
         const result = validateResult(value, validated);
         assertSignedResult(response, responseBytes, result, this.config.authSecret);
         return result;
       }
       if (!shouldPoll && response) throw new Error("verification_runner_response_invalid");
-      if (Date.now() - started >= maxWait) throw new Error("verification_runner_timeout");
+      if (Date.now() - started >= maxWait)
+        throw retryableRunnerFailure(lastTransportFailure ?? "runner_poll_timeout");
       await new Promise((resolve) => setTimeout(resolve, 1_000));
       const statusPath = `/v1/verification-jobs/${validated.jobId}`;
       try {
@@ -279,6 +314,7 @@ export class RemoteVerificationRunnerClient {
         const parsed = await parseBoundedJsonResponse(response);
         value = parsed.value;
         responseBytes = parsed.bytes;
+        lastTransportFailure = null;
         if (response.status === 404 && !safelyResubmitted) {
           // A lost POST can leave no job to poll. Resubmit the same immutable job once;
           // the durable job ID makes this safe if the original POST was only delayed.
@@ -306,14 +342,16 @@ export class RemoteVerificationRunnerClient {
                 acceptedBody.jobId !== validated.jobId ||
                 acceptedBody.requestFingerprint !== validated.requestFingerprint
               )
-                throw new Error("verification_runner_result_stale");
+                throw terminalRunnerFailure("runner_result_invalid");
             }
           } catch (error) {
-            if (error instanceof Error && error.message === "verification_runner_result_stale")
-              throw error;
+            if (error instanceof Error && error.message === "runner_result_invalid") throw error;
             response = null;
             value = null;
             responseBytes = null;
+            lastTransportFailure = isTimeout(error)
+              ? "runner_timeout_when_execution_may_continue"
+              : "runner_transport_ambiguous";
           }
         } else if (response.status === 202) {
           const bodyValue = parsed.value as { jobId?: unknown; requestFingerprint?: unknown };
@@ -321,17 +359,28 @@ export class RemoteVerificationRunnerClient {
             bodyValue.jobId !== validated.jobId ||
             bodyValue.requestFingerprint !== validated.requestFingerprint
           )
-            throw new Error("verification_runner_result_stale");
+            throw terminalRunnerFailure("runner_result_invalid");
         }
         shouldPoll = response === null || response.status === 202;
       } catch (error) {
-        if (error instanceof Error && error.message === "verification_runner_result_stale")
-          throw error;
+        if (error instanceof Error && error.message === "runner_result_invalid") throw error;
         response = null;
         value = null;
         responseBytes = null;
         shouldPoll = true;
+        lastTransportFailure = isTimeout(error)
+          ? "runner_timeout_when_execution_may_continue"
+          : "runner_transport_ambiguous";
       }
     }
   }
+}
+
+function isTimeout(error: unknown) {
+  return (
+    error instanceof Error &&
+    (error.name === "TimeoutError" ||
+      error.name === "AbortError" ||
+      /timed out/i.test(error.message))
+  );
 }

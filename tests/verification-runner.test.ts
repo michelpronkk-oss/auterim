@@ -1,5 +1,5 @@
-import { createHmac, generateKeyPairSync } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHmac, generateKeyPairSync, sign } from "node:crypto";
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
@@ -13,6 +13,12 @@ import {
   type VerificationJobResult,
 } from "../verification-runner/contracts";
 import {
+  type MaterializedVerificationJob,
+  assertMaterializedArtifact,
+  persistMaterializedJobManifest,
+  toMaterializedVerificationJob,
+} from "../verification-runner/spool";
+import {
   createVerificationJobRequest,
   parseBoundedJsonResponse,
   RemoteVerificationRunnerClient,
@@ -23,16 +29,25 @@ import {
 } from "../verification-runner/server";
 import { extractSafeTarGzip, packSafeDirectory } from "../verification-runner/archive";
 import { resolveVerificationProfile } from "../src/lib/fix-engine/verification-profile";
+import {
+  isVerificationRunnerRetryableFailure,
+  retryableRunnerFailure,
+  terminalRunnerFailure,
+} from "../src/lib/fix-engine/verification-retry";
 
 const AUTH_SECRET = "m1578r-test-auth-secret-01234567890123456789";
+const CACHE_KEYS = generateKeyPairSync("ed25519");
 const WORKSPACE_ID = "e140d48e-9dc0-4552-a9a4-a81fe3872422";
 const PRODUCT_ID = "de1f2a12-de3c-4644-8892-b6c2d458a300";
 const REPOSITORY_ID = "3b4f4fe6-cbbd-4bbd-a340-71f7c268e2c4";
 const BASE_SHA = "88634998e2aa823378da88cb209e4381595acf8c";
-const SNAPSHOT_SHA = "1".repeat(64);
-const PATCH_SHA = "2".repeat(64);
+const SNAPSHOT_BYTES = Buffer.alloc(256, 0x61);
+const PATCH_BYTES = Buffer.alloc(64, 0x61);
+const CACHE_BYTES = Buffer.alloc(128, 0x61);
+const SNAPSHOT_SHA = sha256(SNAPSHOT_BYTES);
+const PATCH_SHA = sha256(PATCH_BYTES);
 const TREE_SHA = "3".repeat(64);
-const ARCHIVE_SHA = "4".repeat(64);
+const ARCHIVE_SHA = sha256(CACHE_BYTES);
 const MANIFEST_SHA = "5".repeat(64);
 const LOCK_SHA = "6".repeat(64);
 const snapshotPath = (fixRunId: string, fingerprint: string) =>
@@ -117,7 +132,11 @@ function makeRequest(
       signedUrl: `http://127.0.0.1:54321/storage/v1/object/sign/fix-engine-verification-artifacts/caches/${REPOSITORY_ID}/${BASE_SHA}/${cacheIdentityKey}/dependencies.tar.gz?token=local`,
     },
     cacheManifest,
-    cacheSignature: Buffer.alloc(64, 9).toString("base64"),
+    cacheSignature: sign(
+      null,
+      Buffer.from(canonicalJson(cacheManifest)),
+      CACHE_KEYS.privateKey,
+    ).toString("base64"),
     commands: [
       {
         commandClass: "typecheck",
@@ -129,7 +148,7 @@ function makeRequest(
   return { ...request, ...overrides } as VerificationJobRequest;
 }
 
-function resultFor(request: VerificationJobRequest): VerificationJobResult {
+function resultFor(request: MaterializedVerificationJob): VerificationJobResult {
   const checks = [
     {
       commandClass: "typecheck" as const,
@@ -223,12 +242,86 @@ describe("M15.78R remote verification runner", () => {
     }
   });
 
+  it("rejects npm dependencies that require install preparation and preserves the retry taxonomy", () => {
+    const base = {
+      packageJson: {
+        packageManager: "npm@10.8.2",
+        devDependencies: { vitest: "5.0.3", typescript: "5.9.3" },
+      },
+      files: ["package.json", "package-lock.json", "test/basic.test.ts"],
+      targetedTestPaths: ["test/basic.test.ts"],
+      dependencyCacheAvailable: true,
+    };
+    expect(resolveVerificationProfile(base).state).toBe("supported");
+    expect(
+      resolveVerificationProfile({
+        ...base,
+        packageLock: {
+          lockfileVersion: 3,
+          packages: {
+            "": {},
+            "node_modules/native-helper": { hasInstallScript: true },
+          },
+        },
+      }),
+    ).toMatchObject({
+      state: "verification_unsupported",
+      reason: "dependency_install_scripts_required",
+    });
+    expect(
+      resolveVerificationProfile({
+        ...base,
+        packageLock: {
+          lockfileVersion: 3,
+          packages: {
+            "": {},
+            "node_modules/fsevents": {
+              hasInstallScript: true,
+              optional: true,
+              os: ["darwin"],
+            },
+          },
+        },
+      }).state,
+    ).toBe("supported");
+    expect(
+      resolveVerificationProfile({
+        ...base,
+        packageLock: { lockfileVersion: 3, packages: [] },
+      }),
+    ).toMatchObject({ state: "verification_unsupported", reason: "package_lock_invalid" });
+
+    for (const category of [
+      "runner_unavailable",
+      "runner_queue_full",
+      "runner_state_temporarily_unavailable",
+      "runner_transport_ambiguous",
+      "runner_poll_timeout",
+      "runner_timeout_when_execution_may_continue",
+    ] as const)
+      expect(isVerificationRunnerRetryableFailure(retryableRunnerFailure(category))).toBe(true);
+    for (const category of [
+      "runner_auth_failed",
+      "runner_protocol_unsupported",
+      "runner_result_invalid",
+      "snapshot_identity_mismatch",
+      "patch_identity_mismatch",
+      "cache_identity_mismatch",
+      "cache_signature_invalid",
+      "cache_tree_invalid",
+      "verification_unsupported",
+      "verification_failed",
+    ] as const)
+      expect(isVerificationRunnerRetryableFailure(terminalRunnerFailure(category))).toBe(false);
+  });
+
   async function startRunner(
-    execute?: (request: VerificationJobRequest) => Promise<VerificationJobResult>,
+    execute?: (request: MaterializedVerificationJob) => Promise<VerificationJobResult>,
     limits: {
       maxConcurrency?: number;
       maxQueuedJobs?: number;
       maxJobRecords?: number;
+      maxSpoolBytes?: number;
       cachePublicKey?: string;
     } = {},
   ) {
@@ -237,9 +330,29 @@ describe("M15.78R remote verification runner", () => {
     const runner = createVerificationRunnerServer({
       authSecret: AUTH_SECRET,
       artifactOrigin: "http://127.0.0.1:54321",
-      cachePublicKey: cachePublicKey ?? "ed25519 test-only public key",
+      cachePublicKey:
+        cachePublicKey ?? CACHE_KEYS.publicKey.export({ type: "spki", format: "pem" }).toString(),
       jobStorePath: path.join(root, "jobs"),
       workRoot: path.join(root, "work"),
+      materialize: async (request, spoolRoot, secret) => {
+        const job = toMaterializedVerificationJob(request);
+        const directory = path.join(spoolRoot, job.jobId);
+        await mkdir(directory, { recursive: true });
+        for (const artifact of [job.snapshot, job.patch, job.cacheArchive]) {
+          const content =
+            artifact.fileName === "snapshot.tar.gz"
+              ? SNAPSHOT_BYTES
+              : artifact.fileName === "patch.diff"
+                ? PATCH_BYTES
+                : CACHE_BYTES;
+          await writeFile(path.join(directory, artifact.fileName), content, {
+            flag: "wx",
+            mode: 0o600,
+          });
+        }
+        await persistMaterializedJobManifest(directory, job, secret);
+        return job;
+      },
       ...runnerLimits,
       execute,
     });
@@ -270,6 +383,85 @@ describe("M15.78R remote verification runner", () => {
     expect(executions).toBe(1);
   });
 
+  it("executes admitted artifacts after their signed URLs expire and reconciles a long-running job once", async () => {
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let firstStarted!: () => void;
+    const firstStartedSignal = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const executions = new Map<string, number>();
+    const { base, root } = await startRunner(
+      async (job) => {
+        executions.set(job.jobId, (executions.get(job.jobId) ?? 0) + 1);
+        if (job.jobId === firstRequest.jobId) {
+          firstStarted();
+          await firstGate;
+        }
+        const directory = path.join(root, "jobs", "artifacts", job.jobId);
+        await Promise.all([
+          assertMaterializedArtifact(directory, job.snapshot),
+          assertMaterializedArtifact(directory, job.patch),
+          assertMaterializedArtifact(directory, job.cacheArchive),
+        ]);
+        return resultFor(job);
+      },
+      { maxConcurrency: 1, maxQueuedJobs: 2 },
+    );
+    const firstRequest = makeRequest();
+    const queuedRequest = makeRequest({}, "e0c4a13d-5c28-47e5-865b-2e9d4ae7d2cd");
+    queuedRequest.snapshot.url = queuedRequest.snapshot.url.replace("token=local", "token=expired");
+    queuedRequest.patch.url = queuedRequest.patch.url.replace("token=local", "token=expired");
+    queuedRequest.cacheArchive.url = queuedRequest.cacheArchive.url.replace(
+      "token=local",
+      "token=expired",
+    );
+    const firstClient = new RemoteVerificationRunnerClient({
+      url: base,
+      authSecret: AUTH_SECRET,
+      maxWaitMs: 15_000,
+    });
+    const firstCompletion = firstClient.execute(firstRequest);
+    await firstStartedSignal;
+
+    const shortClient = new RemoteVerificationRunnerClient({
+      url: base,
+      authSecret: AUTH_SECRET,
+      maxWaitMs: 1_000,
+    });
+    await expect(shortClient.execute(queuedRequest)).rejects.toMatchObject({
+      category: "runner_poll_timeout",
+      retryable: true,
+    });
+    const spoolDirectory = path.join(root, "jobs", "artifacts", queuedRequest.jobId);
+    const manifestText = await readFile(path.join(spoolDirectory, "admission.json"), "utf8");
+    expect(manifestText).not.toContain("token=expired");
+    expect(manifestText).not.toContain('"url"');
+    const admitted = JSON.parse(manifestText).job as MaterializedVerificationJob;
+    expect(admitted.jobId).toBe(queuedRequest.jobId);
+    expect(admitted.requestFingerprint).toBe(queuedRequest.requestFingerprint);
+    await Promise.all([
+      assertMaterializedArtifact(spoolDirectory, admitted.snapshot),
+      assertMaterializedArtifact(spoolDirectory, admitted.patch),
+      assertMaterializedArtifact(spoolDirectory, admitted.cacheArchive),
+    ]);
+
+    releaseFirst();
+    await firstCompletion;
+    for (let attempt = 0; attempt < 100 && !executions.has(queuedRequest.jobId); attempt += 1)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    const replay = await new RemoteVerificationRunnerClient({
+      url: base,
+      authSecret: AUTH_SECRET,
+      maxWaitMs: 5_000,
+    }).execute(queuedRequest);
+    expect(replay.jobId).toBe(queuedRequest.jobId);
+    expect(executions.get(firstRequest.jobId)).toBe(1);
+    expect(executions.get(queuedRequest.jobId)).toBe(1);
+  });
+
   it("rejects unauthenticated and replayed request capabilities", async () => {
     const { base } = await startRunner(async (request) => resultFor(request));
     const request = makeRequest();
@@ -278,6 +470,13 @@ describe("M15.78R remote verification runner", () => {
     expect(first.status).toBe(202);
     const replay = await signedFetch(base, "POST", "/v1/verification-jobs", body, "b".repeat(48));
     expect(replay.status).toBe(401);
+    await expect(
+      new RemoteVerificationRunnerClient({
+        url: base,
+        authSecret: "wrong-auth-secret-012345678901234567890123",
+        maxWaitMs: 1_000,
+      }).execute(request),
+    ).rejects.toMatchObject({ category: "runner_auth_failed", retryable: false });
     const unauthenticated = await fetch(new URL("/v1/verification-jobs", base), {
       method: "POST",
       body: body.toString("utf8"),
@@ -344,9 +543,7 @@ describe("M15.78R remote verification runner", () => {
       authSecret: AUTH_SECRET,
       maxWaitMs: 5_000,
     });
-    await expect(client.execute(makeRequest())).rejects.toThrow(
-      "verification_cache_signature_invalid",
-    );
+    await expect(client.execute(makeRequest())).rejects.toThrow("cache_signature_invalid");
   });
 
   it("rejects a signed result bound to a different commit", async () => {
@@ -365,7 +562,7 @@ describe("M15.78R remote verification runner", () => {
         authSecret: AUTH_SECRET,
         maxWaitMs: 5_000,
       }).execute(makeRequest()),
-    ).rejects.toThrow("verification_runner_result_identity_mismatch");
+    ).rejects.toThrow("runner_result_invalid");
   });
 
   it("recovers an interrupted immutable job record after runner restart", async () => {
@@ -402,9 +599,33 @@ describe("M15.78R remote verification runner", () => {
       authSecret: AUTH_SECRET,
       maxWaitMs: 15_000,
     });
-    expect((await client.execute(request)).status).toBe("passed");
-    expect((await client.execute(request)).jobId).toBe(request.jobId);
-    expect(executions).toBe(1);
+    await expect(client.execute(request)).rejects.toThrow("runner_result_invalid");
+    expect(executions).toBe(0);
+  });
+
+  it("removes only an incomplete admission directory after a runner crash", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "m1578r-runner-admission-restart-test-"));
+    const jobStorePath = path.join(root, "jobs");
+    const spoolRoot = path.join(jobStorePath, "artifacts");
+    const staleAdmission = path.join(
+      spoolRoot,
+      `.${"a".repeat(64)}.12345678-1234-4123-8123-123456789abc.admitting`,
+    );
+    await mkdir(staleAdmission, { recursive: true });
+    await writeFile(path.join(staleAdmission, "snapshot.tar.gz"), "incomplete");
+    const runner = createVerificationRunnerServer({
+      authSecret: AUTH_SECRET,
+      artifactOrigin: "http://127.0.0.1:54321",
+      cachePublicKey: "ed25519 test-only public key",
+      jobStorePath,
+      execute: async (job) => resultFor(job),
+    });
+    await runner.listen(0, "127.0.0.1");
+    cleanups.push(async () => {
+      await runner.close();
+      await rm(root, { recursive: true, force: true });
+    });
+    await expect(lstat(staleAdmission)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("fails closed when the remote runner is unavailable", async () => {
@@ -419,7 +640,10 @@ describe("M15.78R remote verification runner", () => {
         authSecret: AUTH_SECRET,
         maxWaitMs: 1_000,
       }).execute(makeRequest()),
-    ).rejects.toThrow("verification_runner_timeout");
+    ).rejects.toMatchObject({
+      category: "runner_transport_ambiguous",
+      retryable: true,
+    });
   });
 
   it("fails closed if the durable result record has been tampered with", async () => {
@@ -539,6 +763,13 @@ describe("M15.78R remote verification runner", () => {
     expect(secondResponse.status).toBe(202);
     expect(thirdResponse.status).toBe(503);
     expect(await thirdResponse.json()).toEqual({ error: "verification_runner_queue_full" });
+    await expect(
+      new RemoteVerificationRunnerClient({
+        url: base,
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 1_000,
+      }).execute(third),
+    ).rejects.toMatchObject({ category: "runner_queue_full", retryable: true });
     release();
 
     const client = new RemoteVerificationRunnerClient({

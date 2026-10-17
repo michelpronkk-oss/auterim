@@ -2,6 +2,7 @@ import { createHmac, randomUUID, timingSafeEqual, verify as verifySignature } fr
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import {
   chmod,
+  copyFile,
   lstat,
   mkdir,
   mkdtemp,
@@ -39,6 +40,13 @@ import {
   type VerificationJobRequest,
   type VerificationJobResult,
 } from "./contracts.ts";
+import {
+  assertMaterializedArtifact,
+  persistMaterializedJobManifest,
+  readMaterializedJobManifest,
+  toMaterializedVerificationJob,
+  type MaterializedVerificationJob,
+} from "./spool.ts";
 
 const execFileAsync = promisify(execFile);
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -49,6 +57,8 @@ const MAX_QUEUED_JOBS = 100;
 const MAX_JOB_RECORDS = 50_000;
 const MAX_JOB_RECORD_BYTES = 64 * 1024;
 const MAX_JOB_DURATION_MS = 15 * 60_000;
+const MAX_SPOOL_BYTES = 2 * 1024 * 1024 * 1024;
+const MAX_SPOOL_JOBS = MAX_CONCURRENCY + MAX_QUEUED_JOBS;
 
 type SafeFailure = { status: "failed"; category: string };
 type JobStatus =
@@ -69,7 +79,15 @@ export type VerificationRunnerConfig = {
   /** Test seam; completed records are retained for replay safety. */
   maxJobRecords?: number;
   /** Test seam; production uses the same Docker executor below. */
-  execute?: (request: VerificationJobRequest) => Promise<VerificationJobResult>;
+  execute?: (request: MaterializedVerificationJob) => Promise<VerificationJobResult>;
+  /** Test seam for bounded spool capacity. */
+  maxSpoolBytes?: number;
+  /** Test seam; Production always uses the built-in artifact validator/materializer. */
+  materialize?: (
+    request: VerificationJobRequest,
+    spoolRoot: string,
+    secret: string,
+  ) => Promise<MaterializedVerificationJob>;
 };
 
 function publicError(response: ServerResponse, status: number, error: string) {
@@ -296,7 +314,10 @@ async function inspectDependencyTree(
   return { files, byteCount, treeSha256: sha256(canonicalJson(files)) };
 }
 
-function verifyCacheManifest(request: VerificationJobRequest, publicKey: string) {
+function verifyCacheManifest(
+  request: Pick<VerificationJobRequest, "identity" | "cacheManifest" | "cacheSignature">,
+  publicKey: string,
+) {
   const manifest = DependencyCacheManifestSchema.parse(request.cacheManifest);
   if (
     manifest.buildStatus !== "complete" ||
@@ -428,13 +449,113 @@ async function applyPatch(root: string, patchPath: string) {
   });
 }
 
+async function materializeVerificationJob(input: {
+  request: VerificationJobRequest;
+  artifactOrigin: string;
+  cachePublicKey: string;
+  spoolRoot: string;
+  authSecret: string;
+}) {
+  const { request } = input;
+  const job = toMaterializedVerificationJob(request);
+  const staging = path.join(input.spoolRoot, `.${request.jobId}.${randomUUID()}.admitting`);
+  await mkdir(staging, { recursive: false, mode: 0o700 });
+  try {
+    const snapshotArchive = path.join(staging, job.snapshot.fileName);
+    const patchPath = path.join(staging, job.patch.fileName);
+    const cacheArchive = path.join(staging, job.cacheArchive.fileName);
+    await Promise.all([
+      downloadArtifact({
+        url: request.snapshot.url,
+        expectedSha256: request.snapshot.sha256,
+        expectedBytes: request.snapshot.byteCount,
+        maxBytes: MAX_SNAPSHOT_BYTES,
+        origin: input.artifactOrigin,
+        role: "snapshot",
+        request,
+        destination: snapshotArchive,
+      }),
+      downloadArtifact({
+        url: request.patch.url,
+        expectedSha256: request.patch.sha256,
+        expectedBytes: request.patch.byteCount,
+        maxBytes: MAX_PATCH_BYTES,
+        origin: input.artifactOrigin,
+        role: "patch",
+        request,
+        destination: patchPath,
+      }),
+      downloadArtifact({
+        url: request.cacheArchive.url,
+        expectedSha256: request.cacheArchive.sha256,
+        expectedBytes: request.cacheArchive.byteCount,
+        maxBytes: MAX_CACHE_ARCHIVE_BYTES,
+        origin: input.artifactOrigin,
+        role: "cache",
+        request,
+        destination: cacheArchive,
+      }),
+    ]);
+    verifyCacheManifest(request, input.cachePublicKey);
+    const snapshotCheck = path.join(staging, ".snapshot-check");
+    const cacheCheck = path.join(staging, ".cache-check");
+    await mkdir(snapshotCheck, { recursive: true, mode: 0o700 });
+    await mkdir(cacheCheck, { recursive: true, mode: 0o700 });
+    try {
+      const snapshot = await extractSafeTarGzip(snapshotArchive, snapshotCheck, {
+        maxFiles: MAX_ARCHIVE_FILES,
+        maxBytes: MAX_SNAPSHOT_BYTES,
+        forbidSensitiveFiles: true,
+      });
+      if (!snapshot.fileCount) throw new Error("verification_snapshot_empty");
+      await makeWritable(snapshotCheck);
+      await assertNoSnapshotSecrets(snapshotCheck);
+      assertPatchPaths(await readFile(patchPath, "utf8"), request.identity.allowedPaths);
+      const cache = await extractSafeTarGzip(cacheArchive, cacheCheck, {
+        maxFiles: MAX_ARCHIVE_FILES,
+        maxBytes: MAX_ARCHIVE_EXPANDED_BYTES,
+      });
+      await makeReadOnly(cacheCheck);
+      const tree = await inspectDependencyTree(cacheCheck, cache.treeFiles);
+      if (
+        tree.treeSha256 !== request.cacheManifest.treeSha256 ||
+        tree.files.length !== request.cacheManifest.fileCount ||
+        tree.byteCount !== request.cacheManifest.byteCount
+      )
+        throw new Error("verification_cache_tree_fingerprint_mismatch");
+    } finally {
+      await rm(snapshotCheck, { recursive: true, force: true });
+      await rm(cacheCheck, { recursive: true, force: true });
+    }
+    await persistMaterializedJobManifest(staging, job, input.authSecret);
+    const final = path.join(input.spoolRoot, request.jobId);
+    try {
+      await rename(staging, final);
+    } catch (error) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
+      if (code !== "EEXIST" && code !== "ENOTEMPTY") throw error;
+      const existing = await readMaterializedJobManifest(final, input.authSecret);
+      if (existing.requestFingerprint !== request.requestFingerprint)
+        throw new Error("verification_job_id_conflict");
+      await rm(staging, { recursive: true, force: true });
+      return existing;
+    }
+    return job;
+  } catch (error) {
+    await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
 export async function executeVerificationJob(
-  request: VerificationJobRequest,
+  request: MaterializedVerificationJob,
   config: {
     artifactOrigin: string;
     cachePublicKey: string;
     workRoot?: string;
   },
+  spoolDirectory: string,
 ) {
   const workRoot = path.resolve(config.workRoot ?? tmpdir());
   await mkdir(workRoot, { recursive: true, mode: 0o700 });
@@ -447,37 +568,15 @@ export async function executeVerificationJob(
   const cachePath = path.join(root, "cache", "node_modules");
   try {
     verifyCacheManifest(request, config.cachePublicKey);
+    const materialized = await Promise.all([
+      assertMaterializedArtifact(spoolDirectory, request.snapshot),
+      assertMaterializedArtifact(spoolDirectory, request.patch),
+      assertMaterializedArtifact(spoolDirectory, request.cacheArchive),
+    ]);
     await Promise.all([
-      downloadArtifact({
-        url: request.snapshot.url,
-        expectedSha256: request.snapshot.sha256,
-        expectedBytes: request.snapshot.byteCount,
-        maxBytes: MAX_SNAPSHOT_BYTES,
-        origin: config.artifactOrigin,
-        role: "snapshot",
-        request,
-        destination: snapshotArchive,
-      }),
-      downloadArtifact({
-        url: request.patch.url,
-        expectedSha256: request.patch.sha256,
-        expectedBytes: request.patch.byteCount,
-        maxBytes: MAX_PATCH_BYTES,
-        origin: config.artifactOrigin,
-        role: "patch",
-        request,
-        destination: patchPath,
-      }),
-      downloadArtifact({
-        url: request.cacheArchive.url,
-        expectedSha256: request.cacheArchive.sha256,
-        expectedBytes: request.cacheArchive.byteCount,
-        maxBytes: MAX_CACHE_ARCHIVE_BYTES,
-        origin: config.artifactOrigin,
-        role: "cache",
-        request,
-        destination: cacheArchive,
-      }),
+      copyFile(materialized[0], snapshotArchive),
+      copyFile(materialized[1], patchPath),
+      copyFile(materialized[2], cacheArchive),
     ]);
     await mkdir(snapshotPath, { recursive: true, mode: 0o700 });
     const snapshot = await extractSafeTarGzip(snapshotArchive, snapshotPath, {
@@ -652,9 +751,11 @@ export function createVerificationRunnerServer(config: VerificationRunnerConfig)
   if (origin.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(origin.hostname))
     throw new Error("verification_runner_artifact_origin_invalid");
   const store = path.resolve(config.jobStorePath);
+  const spoolRoot = path.join(store, "artifacts");
   const execute =
     config.execute ??
-    ((request: VerificationJobRequest) => executeVerificationJob(request, config));
+    ((request: MaterializedVerificationJob) =>
+      executeVerificationJob(request, config, path.join(store, "artifacts", request.jobId)));
   const concurrency = Math.min(
     Math.max(config.maxConcurrency ?? MAX_CONCURRENCY, 1),
     MAX_CONCURRENCY,
@@ -665,15 +766,51 @@ export function createVerificationRunnerServer(config: VerificationRunnerConfig)
   const maxJobRecords = Number.isSafeInteger(config.maxJobRecords)
     ? Math.min(Math.max(config.maxJobRecords!, 1), 100_000)
     : MAX_JOB_RECORDS;
-  const queue: Array<{ request: VerificationJobRequest; jobId: string }> = [];
+  const queue: Array<{ request: MaterializedVerificationJob; jobId: string }> = [];
   const active = new Map<string, Promise<void>>();
   const reserved = new Map<string, string>();
   const retainReservation = new Set<string>();
-  const submitting = new Set<string>();
+  const submitting = new Map<string, { requestFingerprint: string; promise: Promise<void> }>();
   const recordReservations = new Set<string>();
+  const admissionReservations = new Map<string, number>();
   const seenNonces = new Map<string, number>();
   let activeCount = 0;
   let persistedJobCount = 0;
+  let spooledBytes = 0;
+  const maxSpoolBytes = Math.min(
+    Math.max(config.maxSpoolBytes ?? MAX_SPOOL_BYTES, MAX_CACHE_ARCHIVE_BYTES),
+    MAX_SPOOL_BYTES,
+  );
+
+  const removeSpool = async (jobId: string) => {
+    if (!/^[a-f0-9]{64}$/.test(jobId))
+      throw new Error("verification_runner_spool_identity_invalid");
+    const target = path.join(spoolRoot, jobId);
+    if (path.dirname(target) !== spoolRoot)
+      throw new Error("verification_runner_spool_path_invalid");
+    const info = await lstat(target).catch((error: unknown) => {
+      if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")
+        return null;
+      throw error;
+    });
+    if (!info) return;
+    if (info.isSymbolicLink() || !info.isDirectory())
+      throw new Error("verification_runner_spool_path_invalid");
+    await rm(target, { recursive: true, force: false });
+  };
+
+  const getSpoolBytes = async (jobId: string) => {
+    const directory = path.join(spoolRoot, jobId);
+    const files = ["snapshot.tar.gz", "patch.diff", "cache.tar.gz", "admission.json"];
+    let total = 0;
+    for (const name of files) {
+      const info = await lstat(path.join(directory, name)).catch(() => null);
+      if (!info || !info.isFile() || info.isSymbolicLink())
+        throw new Error("verification_runner_spool_artifact_invalid");
+      total += info.size;
+    }
+    return total;
+  };
 
   const schedule = () => {
     while (activeCount < concurrency && queue.length) {
@@ -702,6 +839,9 @@ export function createVerificationRunnerServer(config: VerificationRunnerConfig)
             { status: "completed", requestFingerprint: item.request.requestFingerprint, result },
             config.authSecret,
           );
+          const size = await getSpoolBytes(item.jobId).catch(() => 0);
+          await removeSpool(item.jobId);
+          spooledBytes = Math.max(0, spooledBytes - size);
         } catch (error) {
           const message = error instanceof Error ? error.message : "";
           const code =
@@ -721,6 +861,7 @@ export function createVerificationRunnerServer(config: VerificationRunnerConfig)
             /^[a-z0-9_]{2,40}$/.test(code)
               ? `verification_runner_${stage}_${code}`
               : category;
+          let terminalPersisted = false;
           await writeJob(
             store,
             item.jobId,
@@ -730,7 +871,16 @@ export function createVerificationRunnerServer(config: VerificationRunnerConfig)
               failure: { status: "failed", category: safeCategory },
             },
             config.authSecret,
-          ).catch(() => retainReservation.add(item.jobId));
+          )
+            .then(() => {
+              terminalPersisted = true;
+            })
+            .catch(() => retainReservation.add(item.jobId));
+          if (terminalPersisted && safeCategory !== "verification_runner_interrupted") {
+            const size = await getSpoolBytes(item.jobId).catch(() => 0);
+            await removeSpool(item.jobId).catch(() => undefined);
+            spooledBytes = Math.max(0, spooledBytes - size);
+          }
         }
       })().finally(() => {
         active.delete(item.jobId);
@@ -809,6 +959,7 @@ export function createVerificationRunnerServer(config: VerificationRunnerConfig)
           throw new Error("verification_cache_artifact_mismatch");
         if (parsed.cacheManifest.identityKey !== parsed.identity.cacheIdentityKey)
           throw new Error("verification_cache_identity_mismatch");
+        verifyCacheManifest(parsed, config.cachePublicKey);
         for (const command of parsed.commands) assertSafeVerificationCommand(command);
         validateArtifactUrl(parsed.snapshot.url, "snapshot", config.artifactOrigin, parsed);
         validateArtifactUrl(parsed.patch.url, "patch", config.artifactOrigin, parsed);
@@ -836,9 +987,7 @@ export function createVerificationRunnerServer(config: VerificationRunnerConfig)
         signedResult(response, prior.result, config.authSecret);
         return;
       }
-      const canResumeInterrupted =
-        prior?.status === "failed" && prior.failure.category === "verification_runner_interrupted";
-      if (prior?.status === "failed" && !canResumeInterrupted) {
+      if (prior?.status === "failed") {
         json(response, 200, prior.failure);
         return;
       }
@@ -847,41 +996,122 @@ export function createVerificationRunnerServer(config: VerificationRunnerConfig)
         publicError(response, 409, "verification_job_id_conflict");
         return;
       }
-      if (
-        !active.has(parsed.jobId) &&
-        !queue.some((item) => item.jobId === parsed.jobId) &&
-        !reservedFingerprint
-      ) {
-        if (activeCount + queue.length + submitting.size >= concurrency + maxQueuedJobs) {
-          publicError(response, 503, "verification_runner_queue_full");
+      const sameAdmission = submitting.get(parsed.jobId);
+      if (sameAdmission) {
+        if (sameAdmission.requestFingerprint !== parsed.requestFingerprint) {
+          publicError(response, 409, "verification_job_id_conflict");
           return;
         }
-        if (!prior && persistedJobCount + recordReservations.size >= maxJobRecords) {
-          publicError(response, 503, "verification_runner_job_store_full");
-          return;
-        }
-        reserved.set(parsed.jobId, parsed.requestFingerprint);
-        submitting.add(parsed.jobId);
-        if (!prior) recordReservations.add(parsed.jobId);
         try {
-          await writeJob(
-            store,
-            parsed.jobId,
-            { status: "queued", requestFingerprint: parsed.requestFingerprint },
-            config.authSecret,
-          );
-          if (!prior) persistedJobCount += 1;
-          submitting.delete(parsed.jobId);
-          recordReservations.delete(parsed.jobId);
-          queue.push({ request: parsed, jobId: parsed.jobId });
-          schedule();
+          await sameAdmission.promise;
         } catch {
-          submitting.delete(parsed.jobId);
-          recordReservations.delete(parsed.jobId);
-          reserved.delete(parsed.jobId);
           publicError(response, 503, "verification_runner_state_unavailable");
           return;
         }
+        json(response, 202, {
+          status: "accepted",
+          jobId: parsed.jobId,
+          requestFingerprint: parsed.requestFingerprint,
+        });
+        return;
+      }
+      if (prior?.status === "queued" || prior?.status === "running") {
+        if (prior.status === "queued" && !queue.some((item) => item.jobId === parsed.jobId)) {
+          try {
+            const materialized = await readMaterializedJobManifest(
+              path.join(spoolRoot, parsed.jobId),
+              config.authSecret,
+            );
+            if (materialized.requestFingerprint !== parsed.requestFingerprint)
+              throw new Error("verification_job_id_conflict");
+            reserved.set(parsed.jobId, parsed.requestFingerprint);
+            queue.push({ request: materialized, jobId: parsed.jobId });
+            schedule();
+          } catch {
+            publicError(response, 503, "verification_runner_state_unavailable");
+            return;
+          }
+        }
+        json(response, 202, {
+          status: prior.status,
+          jobId: parsed.jobId,
+          requestFingerprint: parsed.requestFingerprint,
+        });
+        return;
+      }
+      const expectedBytes =
+        parsed.snapshot.byteCount + parsed.patch.byteCount + parsed.cacheArchive.byteCount;
+      const capacity = concurrency + maxQueuedJobs;
+      if (
+        activeCount + queue.length + submitting.size >= capacity ||
+        activeCount + queue.length + submitting.size >= MAX_SPOOL_JOBS
+      ) {
+        publicError(response, 503, "verification_runner_queue_full");
+        return;
+      }
+      if (persistedJobCount + recordReservations.size >= maxJobRecords) {
+        publicError(response, 503, "verification_runner_job_store_full");
+        return;
+      }
+      const reservedBytes = [...admissionReservations.values()].reduce(
+        (sum, value) => sum + value,
+        0,
+      );
+      if (spooledBytes + reservedBytes + expectedBytes + 64 * 1024 > maxSpoolBytes) {
+        publicError(response, 503, "verification_runner_queue_full");
+        return;
+      }
+      admissionReservations.set(parsed.jobId, expectedBytes + 64 * 1024);
+      recordReservations.add(parsed.jobId);
+      const admission = (async () => {
+        const materialized = config.materialize
+          ? await config.materialize(parsed, spoolRoot, config.authSecret)
+          : await materializeVerificationJob({
+              request: parsed,
+              artifactOrigin: config.artifactOrigin,
+              cachePublicKey: config.cachePublicKey,
+              spoolRoot,
+              authSecret: config.authSecret,
+            });
+        const size = await getSpoolBytes(parsed.jobId);
+        if (spooledBytes + size > maxSpoolBytes) {
+          await removeSpool(parsed.jobId);
+          throw new Error("verification_runner_queue_full");
+        }
+        await writeJob(
+          store,
+          parsed.jobId,
+          { status: "queued", requestFingerprint: parsed.requestFingerprint },
+          config.authSecret,
+        );
+        persistedJobCount += 1;
+        spooledBytes += size;
+        reserved.set(parsed.jobId, parsed.requestFingerprint);
+        queue.push({ request: materialized, jobId: parsed.jobId });
+        schedule();
+      })();
+      submitting.set(parsed.jobId, {
+        requestFingerprint: parsed.requestFingerprint,
+        promise: admission,
+      });
+      try {
+        await admission;
+      } catch (error) {
+        recordReservations.delete(parsed.jobId);
+        const message = error instanceof Error ? error.message : "";
+        const transient =
+          message === "verification_artifact_unavailable" ||
+          message === "verification_runner_queue_full" ||
+          message === "verification_runner_state_unavailable";
+        const safeMessage = /^[a-z0-9_]{1,100}$/.test(message)
+          ? message
+          : "verification_runner_state_unavailable";
+        publicError(response, transient ? 503 : 400, safeMessage);
+        return;
+      } finally {
+        submitting.delete(parsed.jobId);
+        admissionReservations.delete(parsed.jobId);
+        recordReservations.delete(parsed.jobId);
       }
       json(response, 202, {
         status: "accepted",
@@ -926,15 +1156,28 @@ export function createVerificationRunnerServer(config: VerificationRunnerConfig)
     server,
     async listen(port = 0, host = "127.0.0.1") {
       await mkdir(store, { recursive: true, mode: 0o700 });
+      await mkdir(spoolRoot, { recursive: true, mode: 0o700 });
       const entries = await readdir(store, { withFileTypes: true });
       persistedJobCount = entries.filter(
         (entry) => entry.isFile() && /^[a-f0-9]{64}\.json$/.test(entry.name),
       ).length;
+      const knownJobs = new Set<string>();
       for (const entry of entries) {
         if (!entry.isFile() || !/^[a-f0-9]{64}\.json$/.test(entry.name)) continue;
         const jobId = entry.name.slice(0, 64);
+        knownJobs.add(jobId);
         const prior = await readJob(store, jobId, config.authSecret);
-        if (prior?.status === "running" || prior?.status === "queued") {
+        if (prior?.status === "queued") {
+          const materialized = await readMaterializedJobManifest(
+            path.join(spoolRoot, jobId),
+            config.authSecret,
+          );
+          if (materialized.requestFingerprint !== prior.requestFingerprint)
+            throw new Error("verification_runner_spool_identity_mismatch");
+          spooledBytes += await getSpoolBytes(jobId).catch(() => 0);
+          reserved.set(jobId, prior.requestFingerprint);
+          queue.push({ request: materialized, jobId });
+        } else if (prior?.status === "running") {
           await writeJob(
             store,
             jobId,
@@ -945,8 +1188,51 @@ export function createVerificationRunnerServer(config: VerificationRunnerConfig)
             },
             config.authSecret,
           );
+          // The previous process may have launched customer code before it died.
+          // Retain the admitted artifacts for reconciliation and never execute twice.
+          spooledBytes += await getSpoolBytes(jobId).catch(() => 0);
+        } else if (prior?.status === "failed") {
+          if (prior.failure.category === "verification_runner_interrupted")
+            spooledBytes += await getSpoolBytes(jobId).catch(() => 0);
+          else await removeSpool(jobId);
+        } else if (prior?.status === "completed") {
+          await removeSpool(jobId);
         }
       }
+      const spoolEntries = await readdir(spoolRoot, { withFileTypes: true });
+      for (const entry of spoolEntries) {
+        if (/^\.[a-f0-9]{64}\.[0-9a-f-]{36}\.admitting$/.test(entry.name)) {
+          if (!entry.isDirectory()) throw new Error("verification_runner_spool_entry_invalid");
+          const staleAdmission = path.join(spoolRoot, entry.name);
+          const info = await lstat(staleAdmission);
+          if (info.isSymbolicLink() || !info.isDirectory())
+            throw new Error("verification_runner_spool_entry_invalid");
+          await rm(staleAdmission, { recursive: true, force: false });
+          continue;
+        }
+        if (!entry.isDirectory() || !/^[a-f0-9]{64}$/.test(entry.name))
+          throw new Error("verification_runner_spool_entry_invalid");
+        if (knownJobs.has(entry.name)) continue;
+        const materialized = await readMaterializedJobManifest(
+          path.join(spoolRoot, entry.name),
+          config.authSecret,
+        );
+        const size = await getSpoolBytes(entry.name);
+        if (spooledBytes + size > maxSpoolBytes)
+          throw new Error("verification_runner_spool_capacity_exceeded");
+        await writeJob(
+          store,
+          entry.name,
+          { status: "queued", requestFingerprint: materialized.requestFingerprint },
+          config.authSecret,
+        );
+        persistedJobCount += 1;
+        spooledBytes += size;
+        reserved.set(entry.name, materialized.requestFingerprint);
+        queue.push({ request: materialized, jobId: entry.name });
+      }
+      if (spooledBytes > maxSpoolBytes)
+        throw new Error("verification_runner_spool_capacity_exceeded");
       await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
         server.listen(port, host, () => {
@@ -957,6 +1243,7 @@ export function createVerificationRunnerServer(config: VerificationRunnerConfig)
       const address = server.address();
       if (!address || typeof address === "string")
         throw new Error("verification_runner_listen_failed");
+      schedule();
       return { host, port: address.port };
     },
     async close() {
