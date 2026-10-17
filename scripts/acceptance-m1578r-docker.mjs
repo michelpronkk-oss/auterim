@@ -1,15 +1,15 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 const root = path.resolve(process.cwd());
-const stack = path.join(root, "node_modules/.cache/auterim-m1578r-local");
+const stack = path.join(root, "node_modules/.cache/auterim-m1578r-diagnosis-local");
 const expectedRemote = "https://github.com/michelpronkk-oss/auterim.git";
-const expectedBranch = "codex/m1578-production-verification-runner";
-const expectedBaseSha = "63f995e4f2bd974968934136578953f49b12e91e";
-const expectedApiUrl = "http://127.0.0.1:61970";
-const container = "supabase_db_auterim-m1578r-local";
+const expectedBranch = "codex/m1578r-diagnosis-recovery";
+const expectedBaseSha = "332717c355e53730bada6a160d609a4fc11d1eb3";
+const expectedApiUrl = "http://127.0.0.1:62970";
+const container = "supabase_db_auterim-m1578r-diagnosis-local";
 const verificationImage =
   "node:24.8.0-alpine3.22@sha256:3e843c608bb5232f39ecb2b25e41214b958b0795914707374c8acc28487dea17";
 const smokeName = `auterim-m1578r-runner-${randomUUID().slice(0, 8)}`;
@@ -94,11 +94,11 @@ assert(
 assert(existsSync(path.join(stack, "supabase/config.toml")), "m1578r_isolated_stack_missing");
 const stackConfig = readFileSync(path.join(stack, "supabase/config.toml"), "utf8");
 assert(
-  /project_id\s*=\s*["']auterim-m1578r-local["']/.test(stackConfig),
+  /project_id\s*=\s*["']auterim-m1578r-diagnosis-local["']/.test(stackConfig),
   "m1578r_stack_identity_failed",
 );
 assert(
-  /port\s*=\s*61970/.test(stackConfig) && /port\s*=\s*61971/.test(stackConfig),
+  /port\s*=\s*62970/.test(stackConfig) && /port\s*=\s*62971/.test(stackConfig),
   "m1578r_stack_ports_failed",
 );
 assert(
@@ -106,6 +106,7 @@ assert(
   "m1578r_local_database_unavailable",
 );
 
+mkdirSync(path.join(stack, "supabase/migrations"), { recursive: true });
 for (const filename of readdirSync(path.join(root, "supabase/migrations")).filter((name) =>
   name.endsWith(".sql"),
 )) {

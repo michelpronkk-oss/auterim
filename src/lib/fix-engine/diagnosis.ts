@@ -30,7 +30,13 @@ export function validateProposedDiagnosis(input: {
     input.commitSha.toLowerCase() !== input.expectedCommitSha.toLowerCase()
   )
     throw new Error("diagnosis_identity_mismatch");
-  const diagnosis = DiagnosisSchema.parse(input.proposal);
+  const parsedDiagnosis = DiagnosisSchema.safeParse(input.proposal);
+  if (!parsedDiagnosis.success) {
+    // Zod issue text can include untrusted model values. Keep the failure
+    // deterministic and safe while preserving the provider attempt separately.
+    throw new Error("fix_diagnosis_schema_invalid");
+  }
+  const diagnosis = parsedDiagnosis.data;
   const byId = new Map(input.evidence.map((item) => [item.id, item]));
   for (const location of diagnosis.affectedLocations) {
     const evidence = byId.get(location.evidenceId);
@@ -67,7 +73,9 @@ export function validateProposedFixPlan(input: {
   preflightRequired: boolean;
   reviewRequired?: boolean;
 }) {
-  const plan = FixPlanSchema.parse(input.proposal);
+  const parsedPlan = FixPlanSchema.safeParse(input.proposal);
+  if (!parsedPlan.success) throw new Error("fix_plan_schema_invalid");
+  const plan = parsedPlan.data;
   if ((plan.preflightApplicability === "required") !== input.preflightRequired)
     throw new Error("fix_plan_preflight_policy_mismatch");
   const evidencePaths = new Set(input.diagnosis.affectedLocations.map((item) => item.span.path));

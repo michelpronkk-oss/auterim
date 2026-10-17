@@ -121,6 +121,19 @@ async function completeClaimedStage(
   };
 }
 
+export function stageArtifactPersistenceFailureCategory(error: {
+  message?: unknown;
+  code?: unknown;
+}): string {
+  const message = typeof error.message === "string" ? error.message : "";
+  if (/^fix_[a-z0-9_]{1,90}$/.test(message)) return message;
+  const code =
+    typeof error.code === "string" && /^[0-9A-Z]{5}$/.test(error.code)
+      ? error.code.toLowerCase()
+      : null;
+  return code ? `fix_stage_record_failed_${code}` : "fix_stage_record_failed";
+}
+
 export async function createPersistedFixRun(graphBuildId: string) {
   if (!uuid.safeParse(graphBuildId).success) throw new Error("invalid_graph_build_id");
   const { data, error } = await createSupabaseServerClient().rpc("create_fix_run_from_graph", {
@@ -179,8 +192,14 @@ export async function runPersistedFixStage(input: {
       fixRunId: uuid,
       claimToken: uuid,
       stage: FixStageSchema,
-      attemptNumber: z.number().int().min(1).max(3),
+      attemptNumber: z.number().int().min(1).max(4),
+      recoveryGeneration: z.number().int().min(0).max(1).default(0),
     })
+    .refine(
+      (value) =>
+        value.attemptNumber <= 3 ||
+        (value.stage === "diagnose" && value.attemptNumber === 4 && value.recoveryGeneration === 1),
+    )
     .parse(claimData);
   const { data: rawRun, error: runError } = await client
     .from("fix_runs")
@@ -274,18 +293,7 @@ export async function runPersistedFixStage(input: {
               .catch(() => undefined);
           }
         }
-        const category = typeof error.message === "string" ? error.message : "";
-        const code =
-          typeof error.code === "string" && /^[0-9A-Z]{5}$/.test(error.code)
-            ? error.code.toLowerCase()
-            : null;
-        throw new Error(
-          /^fix_[a-z0-9_]{1,90}$/.test(category)
-            ? category
-            : code
-              ? `fix_stage_record_failed_${code}`
-              : "fix_stage_record_failed",
-        );
+        throw new Error(stageArtifactPersistenceFailureCategory(error));
       }
     }
     const completed = await completeClaimedStage(client, claim.stageId, claim.claimToken);

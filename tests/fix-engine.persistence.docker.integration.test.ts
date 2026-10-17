@@ -321,7 +321,7 @@ describe.skipIf(!enabled)(
       const { data: run, error: runError } = await client
         .from("fix_runs")
         .select(
-          "id,workspace_id,product_id,repository_id,commit_sha,evidence_fingerprint,source_mode,processing_mode,provenance_mode,preflight_required,review_disposition,review_reason,production_exposure_state",
+          "id,workspace_id,product_id,repository_id,source_change_id,analysis_run_id,commit_sha,evidence_fingerprint,identity_fingerprint,source_mode,processing_mode,provenance_mode,preflight_required,review_disposition,review_reason,production_exposure_state",
         )
         .eq("id", created.fixRunId)
         .single();
@@ -404,13 +404,18 @@ describe.skipIf(!enabled)(
           return createSignedDependencyCacheReference({ identity, publicKey });
         };
       }
+      let returnInvalidDiagnosis = false;
+      let diagnosisProviderCalls = 0;
       const fixtureModel: FixCodingModel = {
-        provider: "fixture",
-        modelName: "m1578-deterministic-model-v1",
+        // The deterministic adapter simulates the frozen Production provider
+        // identity without making a network model call in Docker.
+        provider: "azure-openai",
+        modelName: "gpt-6.1-sol",
         diagnose: async (context: FixModelContext) => {
+          diagnosisProviderCalls += 1;
           const item = context.graphEvidence[0];
           if (!item) throw new Error("fixture_graph_evidence_missing");
-          return envelope("diagnose", "m1578-deterministic-model-v1", {
+          const proposal = {
             rootCauseCategory: "endpoint_contract_changed",
             affectedLocations: [
               {
@@ -423,7 +428,14 @@ describe.skipIf(!enabled)(
             recommendedTransformationClass: "endpoint_replacement",
             confidenceClass: "exact",
             changeFamily: "endpoint",
-          });
+          };
+          return envelope(
+            "diagnose",
+            "m1578-deterministic-model-v1",
+            returnInvalidDiagnosis
+              ? { ...proposal, untrustedExtra: "must-not-be-logged" }
+              : proposal,
+          );
         },
         plan: async (_context: FixModelContext, diagnosis: unknown) => {
           const item = (
@@ -522,7 +534,7 @@ describe.skipIf(!enabled)(
           p_provider: "azure-openai",
           p_model: "gpt-6.1-sol",
           p_schema_version: "fix-engine-v1",
-          p_prompt_contract_version: "fix-coding-contract-v1",
+          p_prompt_contract_version: "fix-coding-contract-v2",
           p_input_fingerprint: "c".repeat(64),
         });
         expect(started.error).toBeNull();
@@ -616,8 +628,168 @@ describe.skipIf(!enabled)(
       expect(retryStateError).toBeNull();
       expect(retryState).toEqual({ status: "queued", attempt_count: 2, operator_retry_count: 2 });
 
-      const stages: FixStage[] = [];
-      let stage: FixStage | null = "diagnose";
+      returnInvalidDiagnosis = true;
+      await expect(
+        runPersistedFixStage({
+          fixRunId: created.fixRunId,
+          stage: "diagnose",
+          processor: retryTestProcessor,
+        }),
+      ).rejects.toThrow("fix_diagnosis_schema_invalid");
+      returnInvalidDiagnosis = false;
+
+      const [
+        { data: failedStage, error: failedStageError },
+        { data: modelAttempts, error: attemptsError },
+      ] = await Promise.all([
+        client
+          .from("fix_stage_queue")
+          .select("status,attempt_count,operator_retry_count,failure_category")
+          .eq("fix_run_id", created.fixRunId)
+          .eq("stage", "diagnose")
+          .single(),
+        client
+          .from("fix_model_attempts")
+          .select(
+            "attempt_number,status,failure_category,provider,model,input_tokens,output_tokens,output_fingerprint",
+          )
+          .eq("fix_run_id", created.fixRunId)
+          .eq("stage", "diagnose")
+          .order("attempt_number"),
+      ]);
+      expect(failedStageError).toBeNull();
+      expect(attemptsError).toBeNull();
+      expect(failedStage).toMatchObject({
+        status: "failed",
+        attempt_count: 3,
+        operator_retry_count: 2,
+        failure_category: "fix_diagnosis_schema_invalid",
+      });
+      expect(modelAttempts).toHaveLength(3);
+      expect(modelAttempts?.[0]).toMatchObject({
+        attempt_number: 1,
+        status: "failed",
+        failure_category: "fix_model_provider_rejected_401",
+        provider: "azure-openai",
+        model: "gpt-6.1-sol",
+      });
+      expect(modelAttempts?.[1]).toMatchObject({
+        attempt_number: 2,
+        status: "failed",
+        failure_category: "fix_model_provider_rejected_400",
+        provider: "azure-openai",
+        model: "gpt-6.1-sol",
+      });
+      expect(modelAttempts?.[2]).toMatchObject({
+        attempt_number: 3,
+        status: "succeeded",
+        failure_category: null,
+        provider: "azure-openai",
+        model: "gpt-6.1-sol",
+        input_tokens: 0,
+        output_tokens: 0,
+      });
+      const diagnosesBeforeRecovery = await client
+        .from("fix_diagnoses")
+        .select("id")
+        .eq("fix_run_id", created.fixRunId);
+      expect(diagnosesBeforeRecovery.error).toBeNull();
+      expect(diagnosesBeforeRecovery.data).toEqual([]);
+
+      const recovery = await client.rpc("authorize_internal_fix_diagnosis_recovery", {
+        p_fix_run_id: created.fixRunId,
+        p_authorization_reference: "M15.78R user-authorized single post-model recovery",
+        p_trigger_run_id: "run_dockeracceptance12345678",
+      });
+      expect(recovery.error).toBeNull();
+      expect(recovery.data).toMatchObject({
+        status: "retry_queued",
+        fixRunId: created.fixRunId,
+        recoveryGeneration: 1,
+      });
+      const recoveryReplay = await client.rpc("authorize_internal_fix_diagnosis_recovery", {
+        p_fix_run_id: created.fixRunId,
+        p_authorization_reference: "M15.78R user-authorized single post-model recovery",
+        p_trigger_run_id: "run_dockeracceptance12345678",
+      });
+      expect(recoveryReplay.error).toBeNull();
+      expect(recoveryReplay.data).toMatchObject({
+        status: "already_authorized",
+        recoveryGeneration: 1,
+      });
+
+      const recoveryLedger = await client
+        .from("fix_stage_recovery_authorizations")
+        .select(
+          "workspace_id,product_id,repository_id,source_change_id,commit_sha,graph_build_id,analysis_run_id,identity_fingerprint,evidence_fingerprint,prior_run_status,prior_run_failure_category,prior_stage_status,prior_stage_failure_category,prior_attempt_count,prior_operator_retry_count,prior_model_output_fingerprint,authorization_actor,authorization_reference,authorization_reason",
+        )
+        .eq("fix_run_id", created.fixRunId)
+        .single();
+      expect(recoveryLedger.error).toBeNull();
+      expect(recoveryLedger.data).toMatchObject({
+        workspace_id: workspaceId,
+        product_id: productId,
+        repository_id: repositoryId,
+        source_change_id: run!.source_change_id,
+        commit_sha: graph!.commit_sha,
+        graph_build_id: graph!.id,
+        analysis_run_id: run!.analysis_run_id,
+        identity_fingerprint: run!.identity_fingerprint,
+        evidence_fingerprint: run!.evidence_fingerprint,
+        prior_run_status: "diagnosis_failed",
+        prior_attempt_count: 3,
+        prior_operator_retry_count: 2,
+        prior_run_failure_category: "fix_diagnosis_schema_invalid",
+        prior_stage_status: "failed",
+        prior_stage_failure_category: "fix_diagnosis_schema_invalid",
+        authorization_actor: "codex_operator",
+        authorization_reference: "M15.78R user-authorized single post-model recovery",
+        authorization_reason: "diagnosis_contract_observability_repair",
+      });
+      expect(recoveryLedger.data?.prior_model_output_fingerprint).toMatch(/^[a-f0-9]{64}$/);
+      const recoveryCount = await client
+        .from("fix_stage_recovery_authorizations")
+        .select("id", { count: "exact", head: true })
+        .eq("fix_run_id", created.fixRunId)
+        .eq("stage", "diagnose");
+      expect(recoveryCount.error).toBeNull();
+      expect(recoveryCount.count).toBe(1);
+
+      const deniedRecovery = await anonymousClient.rpc(
+        "authorize_internal_fix_diagnosis_recovery",
+        {
+          p_fix_run_id: created.fixRunId,
+          p_authorization_reference: "M15.78R user-authorized single post-model recovery",
+          p_trigger_run_id: "run_dockeracceptance12345678",
+        },
+      );
+      expect(deniedRecovery.error).not.toBeNull();
+
+      const recoveredDiagnosis = await runPersistedFixStage({
+        fixRunId: created.fixRunId,
+        stage: "diagnose",
+        processor: retryTestProcessor,
+      });
+      expect(recoveredDiagnosis).toMatchObject({
+        status: "completed",
+        nextStage: "plan",
+        replayed: false,
+      });
+      const recoveredStage = await client
+        .from("fix_stage_queue")
+        .select("status,attempt_count,operator_retry_count")
+        .eq("fix_run_id", created.fixRunId)
+        .eq("stage", "diagnose")
+        .single();
+      expect(recoveredStage.data).toEqual({
+        status: "completed",
+        attempt_count: 4,
+        operator_retry_count: 2,
+      });
+      expect(diagnosisProviderCalls).toBe(2);
+
+      const stages: FixStage[] = ["diagnose"];
+      let stage: FixStage | null = recoveredDiagnosis.nextStage;
       while (stage) {
         if (stages.length >= 8) throw new Error("fix_stage_bound_exceeded");
         stages.push(stage);
@@ -716,6 +888,13 @@ describe.skipIf(!enabled)(
       });
       expect(replay).toMatchObject({ status: "completed", replayed: true });
       expect(replayCalls).toBe(0);
+      expect(diagnosisProviderCalls).toBe(2);
+      const diagnosisRows = await client
+        .from("fix_diagnoses")
+        .select("id,output_fingerprint")
+        .eq("fix_run_id", created.fixRunId);
+      expect(diagnosisRows.error).toBeNull();
+      expect(diagnosisRows.data).toHaveLength(1);
       if (cacheRootPath) await rm(cacheRootPath, { recursive: true, force: true });
     }, 270_000);
   },
