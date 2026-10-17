@@ -50,7 +50,10 @@ if (!local) {
   if (url.hostname !== `${EXPECTED_PROJECT_REF}.supabase.co`)
     fail("dependency_cache_builder_supabase_url_mismatch");
   try {
-    execFileSync("npm", ["run", "project:check"], { stdio: "ignore", timeout: 60_000 });
+    execFileSync(process.execPath, ["--experimental-strip-types", "scripts/project-check.mts"], {
+      stdio: "ignore",
+      timeout: 60_000,
+    });
   } catch {
     fail("dependency_cache_builder_project_check_failed");
   }
