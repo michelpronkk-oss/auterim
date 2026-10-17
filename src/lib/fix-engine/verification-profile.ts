@@ -1,4 +1,4 @@
-import { resolveLockedPackageManager } from "@/lib/fix-engine/package-manager";
+import { resolveLockedPackageManager } from "./package-manager.ts";
 
 export type VerificationCommandClass = "targeted_test" | "test" | "typecheck" | "lint" | "build";
 export type VerificationCommand = {
@@ -239,4 +239,4 @@ export function assertStructuredCommand(command: VerificationCommand): void {
   if (!allowedEntryPoints.has(command.args[0] ?? ""))
     throw new Error("verification_entrypoint_not_allowlisted");
 }
-import { isSafeRepoPath } from "@/lib/fix-engine/contracts";
+import { isSafeRepoPath } from "./contracts.ts";
