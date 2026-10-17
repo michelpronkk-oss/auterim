@@ -44,6 +44,7 @@ export function hasOnlyExpectedActiveProductRepositoryMapping(
 
 export const M1578RInternalTestAcceptanceInputSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("verify") }).strict(),
+  z.object({ action: z.literal("diagnose_entitlement") }).strict(),
   z
     .object({
       action: z.literal("create_source"),
@@ -51,6 +52,102 @@ export const M1578RInternalTestAcceptanceInputSchema = z.discriminatedUnion("act
     })
     .strict(),
 ]);
+
+type BillingSubscription = {
+  plan?: unknown;
+  status?: unknown;
+  trialStartedAt?: unknown;
+  trialEndsAt?: unknown;
+  currentPeriodStart?: unknown;
+  currentPeriodEnd?: unknown;
+};
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function timestamp(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** Mirrors private.workspace_can_run_preflight for a safe, fixed-scope diagnostic. */
+export function diagnosePreflightEntitlement(input: { snapshot: unknown; preflightRuns: number }) {
+  const snapshot = asRecord(input.snapshot);
+  const subscription = asRecord(snapshot?.subscription) as BillingSubscription | null;
+  const nowValue = snapshot?.serverNow;
+  const now = timestamp(nowValue);
+  if (
+    !snapshot ||
+    now === null ||
+    !Number.isSafeInteger(input.preflightRuns) ||
+    input.preflightRuns < 0
+  ) {
+    return { status: "unavailable" as const, failureReasons: ["billing_snapshot_invalid"] };
+  }
+
+  const plan = typeof subscription?.plan === "string" ? subscription.plan : null;
+  const subscriptionStatus = typeof subscription?.status === "string" ? subscription.status : null;
+  const trialStartedAt =
+    typeof subscription?.trialStartedAt === "string" ? subscription.trialStartedAt : null;
+  const trialEndsAt =
+    typeof subscription?.trialEndsAt === "string" ? subscription.trialEndsAt : null;
+  const currentPeriodStart =
+    typeof subscription?.currentPeriodStart === "string" ? subscription.currentPeriodStart : null;
+  const currentPeriodEnd =
+    typeof subscription?.currentPeriodEnd === "string" ? subscription.currentPeriodEnd : null;
+  const monthStart = new Date(now).toISOString().slice(0, 7) + "-01T00:00:00.000Z";
+  const usageWindowStart = currentPeriodStart ?? trialStartedAt ?? monthStart;
+  const preflightLimit = plan === "pro" ? 500 : plan === "business" ? 5000 : 0;
+  const failureReasons: string[] = [];
+
+  if (!subscription) {
+    failureReasons.push("subscription_missing");
+  } else if (subscriptionStatus === "trialing") {
+    if (plan !== "pro") failureReasons.push("trial_plan_not_pro");
+    const trialStart = timestamp(trialStartedAt);
+    const trialEnd = timestamp(trialEndsAt);
+    if (trialStart === null || trialStart > now) failureReasons.push("trial_not_started");
+    if (trialEnd === null) failureReasons.push("trial_end_missing");
+    else if (trialEnd <= now) failureReasons.push("trial_expired");
+  } else if (subscriptionStatus === "active") {
+    if (plan !== "pro" && plan !== "business") failureReasons.push("plan_not_preflight_eligible");
+    const periodEnd = timestamp(currentPeriodEnd);
+    if (periodEnd === null || periodEnd <= now) failureReasons.push("current_period_expired");
+  } else {
+    if (
+      subscriptionStatus === "expired" &&
+      timestamp(trialEndsAt) !== null &&
+      timestamp(trialEndsAt)! <= now
+    ) {
+      failureReasons.push("trial_expired");
+    } else if (subscriptionStatus === "past_due") {
+      failureReasons.push("subscription_past_due");
+    } else {
+      failureReasons.push("subscription_status_not_eligible");
+    }
+  }
+
+  if (input.preflightRuns > preflightLimit) failureReasons.push("preflight_usage_limit_exceeded");
+  return {
+    status: failureReasons.length === 0 ? ("eligible" as const) : ("ineligible" as const),
+    workspaceId: TARGET.workspaceId,
+    plan,
+    subscriptionStatus,
+    trialStartedAt,
+    trialEndsAt,
+    currentPeriodStart,
+    currentPeriodEnd,
+    serverNow: nowValue,
+    usageWindowStart,
+    preflightRuns: input.preflightRuns,
+    preflightLimit,
+    failureReasons,
+  };
+}
 
 type Readiness = {
   status: "ready" | "blocked";
@@ -390,6 +487,42 @@ export const m1578rInternalTestAcceptanceTask = schemaTask({
   maxDuration: 180,
   queue: { concurrencyLimit: 1 },
   run: async (input) => {
+    if (input.action === "diagnose_entitlement") {
+      const client = createSupabaseServerClient();
+      const { data: snapshot, error: snapshotError } = await client.rpc(
+        "get_workspace_billing_snapshot_service",
+        { p_workspace_id: TARGET.workspaceId },
+      );
+      if (snapshotError) {
+        return { status: "unavailable", failureReasons: ["billing_snapshot_unavailable"] } as const;
+      }
+      const snapshotRecord = asRecord(snapshot);
+      const subscription = asRecord(snapshotRecord?.subscription);
+      const now = timestamp(snapshotRecord?.serverNow);
+      if (!snapshotRecord || now === null) {
+        return { status: "unavailable", failureReasons: ["billing_snapshot_invalid"] } as const;
+      }
+      const currentPeriodStart =
+        typeof subscription?.currentPeriodStart === "string"
+          ? subscription.currentPeriodStart
+          : null;
+      const trialStartedAt =
+        typeof subscription?.trialStartedAt === "string" ? subscription.trialStartedAt : null;
+      const usageWindowStart =
+        currentPeriodStart ??
+        trialStartedAt ??
+        `${new Date(now).toISOString().slice(0, 7)}-01T00:00:00.000Z`;
+      const { count, error: usageError } = await client
+        .from("preflight_runs")
+        .select("id", { count: "exact", head: true })
+        .eq("workspace_id", TARGET.workspaceId)
+        .gte("created_at", usageWindowStart);
+      if (usageError || count === null) {
+        return { status: "unavailable", failureReasons: ["preflight_usage_unavailable"] } as const;
+      }
+      return diagnosePreflightEntitlement({ snapshot, preflightRuns: count });
+    }
+
     const readiness = await inspectReadiness(
       input.action === "create_source" ? input.fixtureCommitSha : undefined,
     );
