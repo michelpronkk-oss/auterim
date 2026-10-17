@@ -253,7 +253,6 @@ export async function inspectGitHubInstallationScope(input: {
     accountLogin?.toLowerCase() !== input.expectedAccountLogin.toLowerCase() ||
     !installationActive ||
     !selectedRepositoriesOnly ||
-    !requiredWritePermissionsGranted ||
     !noUnexpectedWritePermissions
   ) {
     return {

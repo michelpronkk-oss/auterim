@@ -4,6 +4,7 @@ import { inspectGitHubInstallationScope } from "../src/lib/fix-engine/github-wri
 import {
   hasExpectedActiveProductRepositoryMappings,
   diagnosePreflightEntitlement,
+  M1578R_REQUIRED_FIXTURE_PATHS,
   M1578RInternalTestAcceptanceInputSchema,
 } from "../src/trigger/m1578r-internal-test-acceptance";
 
@@ -15,7 +16,7 @@ const requiredPaths = [
   "package-lock.json",
   "jest.config.js",
   "src/endpoint.js",
-  "src/types.ts",
+  "src/typecheck.ts",
   "test/endpoint.test.js",
   "tsconfig.json",
 ];
@@ -103,6 +104,10 @@ const baseInput = {
 };
 
 describe("M15.78R bounded GitHub installation inspection", () => {
+  it("pins readiness to files present at the immutable QA fixture commit", () => {
+    expect(M1578R_REQUIRED_FIXTURE_PATHS).toEqual(requiredPaths);
+  });
+
   it("proves the exact selected QA-only installation using a temporary read-only token", async () => {
     const fixture = scopeFetcher();
     const result = await inspectGitHubInstallationScope({
@@ -150,6 +155,37 @@ describe("M15.78R bounded GitHub installation inspection", () => {
     expect(result.noUnexpectedWritePermissions).toBe(false);
     expect(result.visibleRepositoryCount).toBeNull();
     expect(fixture.calls.some((call) => call.url.endsWith("/access_tokens"))).toBe(false);
+  });
+
+  it("verifies the QA-only repository and fixture with a read-only token when write permissions are missing", async () => {
+    const fixture = scopeFetcher({
+      permissions: {
+        contents: "read",
+        pull_requests: "read",
+        metadata: "read",
+      },
+    });
+    const result = await inspectGitHubInstallationScope({
+      ...baseInput,
+      privateKey: fixture.privateKey,
+      fetcher: fixture.fetcher,
+    });
+
+    expect(result).toMatchObject({
+      requiredWritePermissionsGranted: false,
+      noUnexpectedWritePermissions: true,
+      visibleRepositoryCount: 1,
+      exactRepositoryVisible: true,
+      defaultBranch: "main",
+      defaultBranchSha: fixtureSha,
+      requiredPathsPresent: true,
+      npmLockfileFamily: "npm",
+    });
+    const tokenRequest = fixture.calls.find((call) => call.url.endsWith("/access_tokens"));
+    expect(JSON.parse(tokenRequest?.body ?? "{}")).toEqual({ permissions: { contents: "read" } });
+    expect(
+      fixture.calls.some((call) => call.method !== "GET" && !call.url.endsWith("/access_tokens")),
+    ).toBe(false);
   });
 
   it("stops on a broad visible repository set before reading the QA branch", async () => {
