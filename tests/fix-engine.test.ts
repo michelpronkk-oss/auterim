@@ -18,6 +18,7 @@ import { buildProtectionMemoryEvent } from "@/lib/fix-engine/protection-memory";
 import { isSafeRepoPath, type FixDiagnosis, type FixPlan } from "@/lib/fix-engine/contracts";
 import { scoreFixBenchmark } from "@/lib/fix-engine/benchmark";
 import { StructuredChatCompletionFixModel } from "@/lib/fix-engine/model";
+import { stageArtifactPersistenceFailureCategory } from "@/lib/fix-engine/stage-runtime";
 
 const ids = {
   workspace: "10000000-0000-4000-8000-000000000001",
@@ -189,6 +190,69 @@ describe("M15.78 Fix Engine V1 deterministic contracts", () => {
       expectedCommitSha: sha,
     });
     expect(value.diagnosis.affectedLocations).toHaveLength(1);
+  });
+  it("maps malformed model diagnosis to a safe schema category without echoing values", () => {
+    expect(() =>
+      validateProposedDiagnosis({
+        proposal: { ...diagnosisProposal, rootCauseCategory: "secret-looking-untrusted-value" },
+        evidence: [
+          {
+            id: ids.edge,
+            path: "src/client.ts",
+            span: { startLine: 3, startColumn: 2, endLine: 3, endColumn: 20 },
+            externalEntity: "https://api.example.test/v2",
+            symbol: "client",
+          },
+        ],
+        workspaceId: ids.workspace,
+        expectedWorkspaceId: ids.workspace,
+        repositoryId: ids.repository,
+        expectedRepositoryId: ids.repository,
+        commitSha: sha,
+        expectedCommitSha: sha,
+      }),
+    ).toThrow("fix_diagnosis_schema_invalid");
+  });
+  it("keeps evidence provenance validation distinct from schema validation", () => {
+    expect(() =>
+      validateProposedDiagnosis({
+        proposal: {
+          ...diagnosisProposal,
+          affectedLocations: [
+            {
+              ...diagnosisProposal.affectedLocations[0]!,
+              span: { ...diagnosisProposal.affectedLocations[0]!.span, startLine: 4 },
+            },
+          ],
+        },
+        evidence: [
+          {
+            id: ids.edge,
+            path: "src/client.ts",
+            span: { startLine: 3, startColumn: 2, endLine: 3, endColumn: 20 },
+            externalEntity: "https://api.example.test/v2",
+            symbol: "client",
+          },
+        ],
+        workspaceId: ids.workspace,
+        expectedWorkspaceId: ids.workspace,
+        repositoryId: ids.repository,
+        expectedRepositoryId: ids.repository,
+        commitSha: sha,
+        expectedCommitSha: sha,
+      }),
+    ).toThrow("diagnosis_evidence_provenance_mismatch");
+  });
+  it("preserves safe artifact persistence categories without leaking free-form errors", () => {
+    expect(
+      stageArtifactPersistenceFailureCategory({ message: "fix_diagnosis_contract_invalid" }),
+    ).toBe("fix_diagnosis_contract_invalid");
+    expect(
+      stageArtifactPersistenceFailureCategory({ message: "raw database detail", code: "23514" }),
+    ).toBe("fix_stage_record_failed_23514");
+    expect(stageArtifactPersistenceFailureCategory({ message: "untrusted secret text" })).toBe(
+      "fix_stage_record_failed",
+    );
   });
   it("04 deprecated API/package keeps its semantic route separate from evidence type", () => {
     const identity = buildCanonicalFixIdentity({
@@ -1014,6 +1078,11 @@ describe("M15.78 Fix Engine V1 deterministic contracts", () => {
     });
     expect(body).not.toHaveProperty("tools");
     expect(body).toHaveProperty("response_format", { type: "json_object" });
+    const requestText = JSON.stringify(body);
+    expect(requestText).toContain("rootCauseCategory");
+    expect(requestText).toContain("symbol must be null");
+    expect(requestText).toContain("unsupported_or_ambiguous");
+    expect(requestText).toContain("add properties");
     expect(auth).toBe("Bearer test-only-secret-value");
     expect(result.value).toEqual({ supported: true });
     expect(result.usage.inputTokens).toBe(10);

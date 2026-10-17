@@ -180,7 +180,17 @@ export class StructuredChatCompletionFixModel implements FixCodingModel {
       "diagnosis",
       context,
       {
-        task: "Return only a JSON object conforming to the diagnosis contract. Use only evidence IDs, paths, spans and external entities already supplied. If evidence is insufficient, use unsupported_or_ambiguous.",
+        task: [
+          "Return exactly one JSON object with no additional properties.",
+          "Root properties: rootCauseCategory, affectedLocations, recommendedTransformationClass, confidenceClass, changeFamily.",
+          "rootCauseCategory must be one of: endpoint_contract_changed, sdk_symbol_changed, package_deprecated, function_signature_changed, schema_contract_changed, configuration_contract_changed, authentication_contract_changed, unsupported_or_ambiguous.",
+          "affectedLocations must contain 1 to 25 objects. Each object has exactly: evidenceId, span, symbol, externalEntity. evidenceId is a supplied UUID. span has exactly path, startLine, startColumn, endLine, endColumn. symbol must be null because graphEvidence does not supply symbols. externalEntity must be an exact supplied string.",
+          "recommendedTransformationClass must be one of: endpoint_replacement, symbol_migration, package_migration, signature_adaptation, schema_adaptation, configuration_update, manual_review_only.",
+          "confidenceClass must be one of: exact, structural, heuristic.",
+          "changeFamily must be one of: endpoint, sdk, package, signature, schema, auth, configuration, unknown.",
+          "Use only evidence IDs, paths, spans, symbols, and externalEntity values exactly present in graphEvidence. Copy one supplied graphEvidence item without changing any field.",
+          "Do not infer spans, invent evidence, add properties, or include source text. If evidence is insufficient, use unsupported_or_ambiguous and only cite supplied evidence.",
+        ].join(" "),
       },
       signal,
     );

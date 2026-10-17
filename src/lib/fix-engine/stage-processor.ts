@@ -247,7 +247,7 @@ function codingModel() {
       endpoint: FIX_CODING_MODEL_ENDPOINT,
       apiKey: FIX_CODING_MODEL_API_KEY,
       schemaVersion: "fix-engine-v1",
-      promptContractVersion: "fix-coding-contract-v1",
+      promptContractVersion: "fix-coding-contract-v2",
     }),
   };
 }
@@ -274,7 +274,7 @@ async function invokeCodingModel(
     p_provider: configured.provider,
     p_model: configured.modelName,
     p_schema_version: "fix-engine-v1",
-    p_prompt_contract_version: "fix-coding-contract-v1",
+    p_prompt_contract_version: "fix-coding-contract-v2",
     p_input_fingerprint: input.inputFingerprint,
   });
   if (beginError || typeof started?.attemptId !== "string")

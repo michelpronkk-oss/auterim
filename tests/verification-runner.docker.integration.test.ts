@@ -75,7 +75,7 @@ describe.skipIf(!enabled)("M15.78R trusted npm cache and remote Docker verificat
   it(
     "builds a signed exact-commit npm cache and verifies a patch through the isolated runner",
     async () => {
-      expect(supabaseUrl).toBe("http://127.0.0.1:61970");
+      expect(supabaseUrl).toBe(process.env.AUTERIM_M1578_EXPECTED_URL ?? "http://127.0.0.1:61970");
       expect(serviceKey?.length).toBeGreaterThan(20);
       const root = await mkdtemp(path.join(os.tmpdir(), "m1578r-remote-acceptance-"));
       cleanups.push(() => rm(root, { recursive: true, force: true }));
