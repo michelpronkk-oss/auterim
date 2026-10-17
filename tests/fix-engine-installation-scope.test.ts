@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { inspectGitHubInstallationScope } from "../src/lib/fix-engine/github-write-token";
 import {
   hasOnlyExpectedActiveProductRepositoryMapping,
+  diagnosePreflightEntitlement,
   M1578RInternalTestAcceptanceInputSchema,
 } from "../src/trigger/m1578r-internal-test-acceptance";
 
@@ -212,5 +213,88 @@ describe("M15.78R internal source operator payload", () => {
         action: "create_source",
       }).success,
     ).toBe(false);
+    expect(
+      M1578RInternalTestAcceptanceInputSchema.safeParse({
+        action: "diagnose_entitlement",
+      }).success,
+    ).toBe(true);
+    expect(
+      M1578RInternalTestAcceptanceInputSchema.safeParse({
+        action: "diagnose_entitlement",
+        workspaceId: "00000000-0000-0000-0000-000000000000",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("reports the canonical trial, subscription, period, plan, and quota denial reasons", () => {
+    const serverNow = "2026-10-17T12:00:00.000Z";
+    const snapshot = (subscription: Record<string, unknown> | null) => ({
+      serverNow,
+      subscription,
+    });
+
+    expect(
+      diagnosePreflightEntitlement({ snapshot: snapshot(null), preflightRuns: 0 }),
+    ).toMatchObject({
+      status: "ineligible",
+      failureReasons: ["subscription_missing"],
+    });
+    expect(
+      diagnosePreflightEntitlement({
+        snapshot: snapshot({
+          plan: "pro",
+          status: "trialing",
+          trialStartedAt: "2026-10-01T00:00:00.000Z",
+          trialEndsAt: "2026-10-06T00:00:00.000Z",
+        }),
+        preflightRuns: 0,
+      }),
+    ).toMatchObject({ status: "ineligible", failureReasons: ["trial_expired"] });
+    expect(
+      diagnosePreflightEntitlement({
+        snapshot: snapshot({ plan: "pro", status: "past_due" }),
+        preflightRuns: 0,
+      }),
+    ).toMatchObject({ status: "ineligible", failureReasons: ["subscription_past_due"] });
+    expect(
+      diagnosePreflightEntitlement({
+        snapshot: snapshot({
+          plan: "pro",
+          status: "active",
+          currentPeriodEnd: "2026-10-16T00:00:00.000Z",
+        }),
+        preflightRuns: 0,
+      }),
+    ).toMatchObject({ status: "ineligible", failureReasons: ["current_period_expired"] });
+    expect(
+      diagnosePreflightEntitlement({
+        snapshot: snapshot({
+          plan: "core",
+          status: "active",
+          currentPeriodEnd: "2026-11-16T00:00:00.000Z",
+        }),
+        preflightRuns: 0,
+      }),
+    ).toMatchObject({ status: "ineligible", failureReasons: ["plan_not_preflight_eligible"] });
+    expect(
+      diagnosePreflightEntitlement({
+        snapshot: snapshot({
+          plan: "pro",
+          status: "active",
+          currentPeriodEnd: "2026-11-16T00:00:00.000Z",
+        }),
+        preflightRuns: 501,
+      }),
+    ).toMatchObject({ status: "ineligible", failureReasons: ["preflight_usage_limit_exceeded"] });
+    expect(
+      diagnosePreflightEntitlement({
+        snapshot: snapshot({
+          plan: "pro",
+          status: "active",
+          currentPeriodEnd: "2026-11-16T00:00:00.000Z",
+        }),
+        preflightRuns: 500,
+      }),
+    ).toMatchObject({ status: "eligible", failureReasons: [] });
   });
 });
