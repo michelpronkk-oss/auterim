@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { buildCanonicalFixIdentity } from "@/lib/fix-engine/identity";
 import { evaluateFixEligibility, type FixEligibilityInput } from "@/lib/fix-engine/eligibility";
 import { validateProposedDiagnosis, validateProposedFixPlan } from "@/lib/fix-engine/diagnosis";
-import { validatePatchProposal } from "@/lib/fix-engine/patch";
+import { hydratePatchProposal, validatePatchProposal } from "@/lib/fix-engine/patch";
 import { assessFixRisk, type FixRiskInput } from "@/lib/fix-engine/risk";
 import { buildBoundedModelContext } from "@/lib/fix-engine/model";
 import { resolveVerificationProfile } from "@/lib/fix-engine/verification-profile";
@@ -15,7 +15,12 @@ import {
   InMemoryDraftPRProvider,
 } from "@/lib/fix-engine/github-write";
 import { buildProtectionMemoryEvent } from "@/lib/fix-engine/protection-memory";
-import { isSafeRepoPath, type FixDiagnosis, type FixPlan } from "@/lib/fix-engine/contracts";
+import {
+  isSafeRepoPath,
+  type FixDiagnosis,
+  type FixPlan,
+  type PatchModelProposal,
+} from "@/lib/fix-engine/contracts";
 import { scoreFixBenchmark } from "@/lib/fix-engine/benchmark";
 import { StructuredChatCompletionFixModel } from "@/lib/fix-engine/model";
 import { stageArtifactPersistenceFailureCategory } from "@/lib/fix-engine/stage-runtime";
@@ -138,6 +143,8 @@ function patchProposal(diff: string, overrides: Record<string, unknown> = {}) {
   };
 }
 
+const patchModelProposal: PatchModelProposal = { unifiedDiff: goodDiff };
+
 function risk(overrides: Partial<FixRiskInput> = {}): FixRiskInput {
   return {
     changedPaths: ["src/client.ts"],
@@ -165,6 +172,31 @@ describe("M15.78 Fix Engine V1 deterministic contracts", () => {
         expectedEvidenceFingerprint: "d".repeat(64),
       }).changedPaths,
     ).toEqual(["src/client.ts"]);
+  });
+  it("hydrates patch provenance from persisted server state and rejects model-supplied identity", () => {
+    const hydrated = hydratePatchProposal({
+      proposal: patchModelProposal,
+      expectedBaseSha: sha,
+      expectedPlanFingerprint: "c".repeat(64),
+      expectedEvidenceFingerprint: "d".repeat(64),
+      attemptIdentity: "c0000000-0000-4000-8000-000000000001",
+    });
+    expect(hydrated).toMatchObject({
+      unifiedDiff: goodDiff,
+      baseSha: sha,
+      planFingerprint: "c".repeat(64),
+      evidenceFingerprint: "d".repeat(64),
+      attemptIdentity: "c0000000-0000-4000-8000-000000000001",
+    });
+    expect(() =>
+      hydratePatchProposal({
+        proposal: patchProposal(goodDiff),
+        expectedBaseSha: sha,
+        expectedPlanFingerprint: "c".repeat(64),
+        expectedEvidenceFingerprint: "d".repeat(64),
+        attemptIdentity: "c0000000-0000-4000-8000-000000000001",
+      }),
+    ).toThrow();
   });
   it("02 SDK symbol migration plan uses a grounded file and hydrates policy-owned fields", () => {
     const result = validateProposedFixPlan({
@@ -1161,6 +1193,51 @@ describe("M15.78 Fix Engine V1 deterministic contracts", () => {
     expect(serializedSchema).toContain('"additionalProperties":false');
     expect(schema.properties).not.toHaveProperty("preflightApplicability");
     expect(schema.properties).not.toHaveProperty("humanReviewRequired");
+  });
+  it("gives Patch JSON mode and the strict model-owned diff contract", async () => {
+    let body: Record<string, unknown> | undefined;
+    const model = new StructuredChatCompletionFixModel({
+      provider: "azure-openai",
+      model: "gpt-6.1-sol",
+      endpoint: "https://models.example.test/openai/v1/chat/completions",
+      apiKey: "test-only-secret-value",
+      schemaVersion: "fix-engine-v1",
+      promptContractVersion: "fix-coding-contract-v4",
+      fetcher: async (_input, init) => {
+        body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({
+            model: "gpt-6.1-sol",
+            choices: [{ message: { content: JSON.stringify(patchModelProposal) } }],
+            usage: { prompt_tokens: 100, completion_tokens: 40 },
+          }),
+          { status: 200 },
+        );
+      },
+    });
+    await model.proposePatch(
+      {
+        semanticRoute: "deprecation",
+        graphEvidence: [],
+        files: [{ path: "src/client.ts", content: "const x=1" }],
+        commitSha: sha,
+        repositoryTextIsUntrusted: true,
+        executableCommandsAllowed: false,
+        contextFingerprint: "a".repeat(64),
+      },
+      diagnosisProposal,
+      plan,
+    );
+    expect(body).toHaveProperty("response_format", { type: "json_object" });
+    const messages = body?.messages as Array<{ role: string; content: string }>;
+    const systemMessage = messages.find((message) => message.role === "system")?.content ?? "";
+    expect(systemMessage.toLowerCase()).toContain("json");
+    const schemaText = systemMessage.split("JSON Schema: ")[1];
+    expect(schemaText).toBeTruthy();
+    const schema = JSON.parse(schemaText!) as { properties: Record<string, unknown> };
+    expect(Object.keys(schema.properties)).toEqual(["unifiedDiff"]);
+    expect(JSON.stringify(schema)).toContain("131072");
+    expect(JSON.stringify(schema)).toContain('"additionalProperties":false');
   });
   it("uses Azure API-key authentication and reports only a safe HTTP rejection category", async () => {
     let capturedHeaders: Headers | undefined;

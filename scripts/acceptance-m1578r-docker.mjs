@@ -6,8 +6,8 @@ import { randomUUID } from "node:crypto";
 const root = path.resolve(process.cwd());
 const stack = path.join(root, "node_modules/.cache/auterim-m1578r-diagnosis-local");
 const expectedRemote = "https://github.com/michelpronkk-oss/auterim.git";
-const expectedBranch = "codex/m1578r-plan-contract-recovery";
-const expectedBaseSha = "b9cb229cf5513772d171bfab892fb727682c23d4";
+const expectedBranch = "codex/m1578r-patch-contract-recovery";
+const expectedBaseSha = "34c88a0e742a575e85bcb9bd6429fc79f562e2ce";
 const expectedApiUrl = "http://127.0.0.1:62970";
 const container = "supabase_db_auterim-m1578r-diagnosis-local";
 const verificationImage =
@@ -182,6 +182,36 @@ const planRecoveryResult = run("docker", [
 assert(
   planRecoveryResult === "t|t|t|t|t|t|t|t",
   "m1578r_plan_recovery_rls_or_service_boundary_failed",
+);
+
+const patchRecoveryChecks = `
+select
+  (select relrowsecurity from pg_class where oid='public.fix_patch_recovery_authorizations'::regclass),
+  not exists (select 1 from pg_policies where schemaname='public' and tablename='fix_patch_recovery_authorizations'),
+  not has_table_privilege('authenticated','public.fix_patch_recovery_authorizations','SELECT'),
+  has_table_privilege('service_role','public.fix_patch_recovery_authorizations','SELECT'),
+  not has_table_privilege('service_role','public.fix_patch_recovery_authorizations','INSERT'),
+  has_function_privilege('service_role','public.authorize_internal_fix_patch_contract_recovery(uuid,text,text)','EXECUTE'),
+  not has_function_privilege('authenticated','public.authorize_internal_fix_patch_contract_recovery(uuid,text,text)','EXECUTE'),
+  exists (select 1 from pg_trigger where tgname='fix_patch_recovery_authorizations_immutable' and not tgisinternal);
+`;
+const patchRecoveryResult = run("docker", [
+  "exec",
+  container,
+  "psql",
+  "-U",
+  "postgres",
+  "-d",
+  "postgres",
+  "-At",
+  "-F",
+  "|",
+  "-c",
+  patchRecoveryChecks,
+]).trim();
+assert(
+  patchRecoveryResult === "t|t|t|t|t|t|t|t",
+  "m1578r_patch_recovery_rls_or_service_boundary_failed",
 );
 
 const statusOutput = runSupabase([
