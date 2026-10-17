@@ -1,0 +1,434 @@
+import { schemaTask } from "@trigger.dev/sdk";
+import { z } from "zod";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getEnvironment, isIntegrationConfigured } from "@/lib/env/schema";
+import { persistInternalTestSourceChange } from "@/lib/monitoring/internal-test-source";
+import { inspectGitHubInstallationScope } from "@/lib/fix-engine/github-write-token";
+
+const TARGET = {
+  workspaceId: "e140d48e-9dc0-4552-a9a4-a81fe3872422",
+  productId: "de1f2a12-de3c-4644-8892-b6c2d458a300",
+  repositoryId: "b2abf377-2dbc-4b9c-b546-b0604f3ee4fe",
+  repositoryExternalId: 1409364414,
+  owner: "michelpronkk-oss",
+  repository: "auterim-m15-github-qa",
+  accountLogin: "michelpronkk-oss",
+  dependencyId: "3cfb1bb7-1d76-4692-932b-24e94b66f346",
+  workspaceDependencyId: "867eb92b-2ed2-4917-ac68-44a22773e369",
+} as const;
+
+const SOURCE_ACCEPTANCE_KEY = "m1578r-internal-qa-fix-engine-v1";
+const SOURCE_BASELINE =
+  "Internal QA provider bulletin: endpoint https://api.openai.com/v1/auterim-m1578r-old is currently supported.";
+const SOURCE_CHANGED =
+  "Internal QA provider bulletin: endpoint https://api.openai.com/v1/auterim-m1578r-old is deprecated; use https://api.openai.com/v1/auterim-m1578r-new instead.";
+const REQUIRED_FIXTURE_PATHS = [
+  "package.json",
+  "package-lock.json",
+  "jest.config.js",
+  "src/endpoint.js",
+  "src/types.ts",
+  "test/endpoint.test.js",
+  "tsconfig.json",
+] as const;
+
+export function hasOnlyExpectedActiveProductRepositoryMapping(
+  mappings: Array<{ repository_id: string; status: string }>,
+) {
+  return (
+    mappings.length === 1 &&
+    mappings[0]?.repository_id === TARGET.repositoryId &&
+    mappings[0]?.status === "active"
+  );
+}
+
+export const M1578RInternalTestAcceptanceInputSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("verify") }).strict(),
+  z
+    .object({
+      action: z.literal("create_source"),
+      fixtureCommitSha: z.string().regex(/^[a-f0-9]{40,64}$/i),
+    })
+    .strict(),
+]);
+
+type Readiness = {
+  status: "ready" | "blocked";
+  category?: string;
+  checks: {
+    protectedProduct: boolean;
+    exactQaRepositoryMapping: boolean;
+    exactRepositoryIdentity: boolean;
+    activeOpenAiDependency: boolean;
+    connectedGitHubInstallation: boolean;
+    appIdentityMatches: boolean;
+    installationIdentityMatches: boolean;
+    expectedGitHubAccount: boolean;
+    installationActive: boolean;
+    selectedRepositoriesOnly: boolean;
+    requiredWritePermissionsGranted: boolean;
+    noUnexpectedWritePermissions: boolean;
+    qaRepositoryIsOnlyVisibleRepository: boolean;
+    fixtureFilesPresentOnDefaultBranch: boolean;
+    supportedNpmLockfilePresent: boolean;
+    fixtureCommitMatchesDefaultHead: boolean | null;
+    productionVerificationStorageReadable: boolean;
+    classifierConfigured: boolean;
+    intelligenceConfigured: boolean;
+    codingModelConfigured: boolean;
+    verificationRunnerConfigured: boolean;
+    dependencyCachePublicKeyConfigured: boolean;
+    draftPrWritesDisabled: boolean;
+  };
+  repositoryIdentity: "michelpronkk-oss/auterim-m15-github-qa";
+  defaultBranch: string | null;
+  defaultBranchSha: string | null;
+  visibleRepositoryCount: number | null;
+};
+
+function safeFailureCategory(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  return /^github_[a-z0-9_]{1,100}$/.test(message) ? message : "operator_preflight_failed";
+}
+
+async function inspectReadiness(expectedFixtureCommitSha?: string): Promise<Readiness> {
+  const checks: Readiness["checks"] = {
+    protectedProduct: false,
+    exactQaRepositoryMapping: false,
+    exactRepositoryIdentity: false,
+    activeOpenAiDependency: false,
+    connectedGitHubInstallation: false,
+    appIdentityMatches: false,
+    installationIdentityMatches: false,
+    expectedGitHubAccount: false,
+    installationActive: false,
+    selectedRepositoriesOnly: false,
+    requiredWritePermissionsGranted: false,
+    noUnexpectedWritePermissions: false,
+    qaRepositoryIsOnlyVisibleRepository: false,
+    fixtureFilesPresentOnDefaultBranch: false,
+    supportedNpmLockfilePresent: false,
+    fixtureCommitMatchesDefaultHead: null,
+    productionVerificationStorageReadable: false,
+    classifierConfigured: false,
+    intelligenceConfigured: false,
+    codingModelConfigured: false,
+    verificationRunnerConfigured: false,
+    dependencyCachePublicKeyConfigured: false,
+    draftPrWritesDisabled: false,
+  };
+
+  let environment: ReturnType<typeof getEnvironment>;
+  try {
+    environment = getEnvironment();
+  } catch {
+    return {
+      status: "blocked",
+      category: "environment_unavailable",
+      checks,
+      repositoryIdentity: "michelpronkk-oss/auterim-m15-github-qa",
+      defaultBranch: null,
+      defaultBranchSha: null,
+      visibleRepositoryCount: null,
+    };
+  }
+
+  checks.classifierConfigured = isIntegrationConfigured("classifier", environment);
+  checks.intelligenceConfigured = isIntegrationConfigured("intelligence", environment);
+  checks.codingModelConfigured = Boolean(
+    environment.FIX_CODING_MODEL_PROVIDER &&
+    environment.FIX_CODING_MODEL_NAME &&
+    environment.FIX_CODING_MODEL_API_KEY,
+  );
+  checks.verificationRunnerConfigured = Boolean(
+    environment.FIX_VERIFICATION_RUNNER_URL && environment.FIX_VERIFICATION_RUNNER_AUTH_SECRET,
+  );
+  checks.dependencyCachePublicKeyConfigured = Boolean(environment.FIX_DEPENDENCY_CACHE_PUBLIC_KEY);
+  checks.draftPrWritesDisabled = environment.FIX_GITHUB_DRAFT_PR_WRITES === "0";
+
+  const client = createSupabaseServerClient();
+  const { data: storageBucket, error: storageError } = await client.storage
+    .getBucket("fix-engine-verification-artifacts")
+    .catch(() => ({ data: null, error: new Error("storage_read_failed") }));
+  checks.productionVerificationStorageReadable =
+    !storageError &&
+    storageBucket?.id === "fix-engine-verification-artifacts" &&
+    storageBucket.public === false;
+
+  const [
+    productResult,
+    mappingResult,
+    repositoryResult,
+    dependencyResult,
+    dependencyCatalogResult,
+  ] = await Promise.all([
+    client
+      .from("workspace_products")
+      .select("id,status")
+      .eq("workspace_id", TARGET.workspaceId)
+      .eq("id", TARGET.productId)
+      .maybeSingle(),
+    client
+      .from("workspace_product_repositories")
+      .select("id,repository_id,status")
+      .eq("workspace_id", TARGET.workspaceId)
+      .eq("protected_product_id", TARGET.productId),
+    client
+      .from("repositories")
+      .select(
+        "id,workspace_id,connection_id,external_id,owner,name,default_branch,status,selected_for_protection",
+      )
+      .eq("workspace_id", TARGET.workspaceId)
+      .eq("id", TARGET.repositoryId)
+      .maybeSingle(),
+    client
+      .from("workspace_dependencies")
+      .select("id,workspace_id,protected_product_id,dependency_id,monitoring_enabled")
+      .eq("workspace_id", TARGET.workspaceId)
+      .eq("protected_product_id", TARGET.productId)
+      .eq("dependency_id", TARGET.dependencyId)
+      .eq("id", TARGET.workspaceDependencyId)
+      .eq("monitoring_enabled", true)
+      .maybeSingle(),
+    client
+      .from("dependency_catalog")
+      .select("id,slug,enabled")
+      .eq("id", TARGET.dependencyId)
+      .maybeSingle(),
+  ]);
+
+  if (
+    productResult.error ||
+    mappingResult.error ||
+    repositoryResult.error ||
+    dependencyResult.error ||
+    dependencyCatalogResult.error
+  ) {
+    return {
+      status: "blocked",
+      category: "canonical_scope_read_failed",
+      checks,
+      repositoryIdentity: "michelpronkk-oss/auterim-m15-github-qa",
+      defaultBranch: null,
+      defaultBranchSha: null,
+      visibleRepositoryCount: null,
+    };
+  }
+
+  const product = productResult.data;
+  const mappings = mappingResult.data ?? [];
+  const repository = repositoryResult.data;
+  const dependency = dependencyResult.data;
+  const provider = dependencyCatalogResult.data;
+  checks.protectedProduct = product?.status === "protected";
+  checks.exactQaRepositoryMapping = hasOnlyExpectedActiveProductRepositoryMapping(mappings);
+  checks.exactRepositoryIdentity =
+    repository?.id === TARGET.repositoryId &&
+    repository.workspace_id === TARGET.workspaceId &&
+    repository.owner.toLowerCase() === TARGET.owner &&
+    repository.name.toLowerCase() === TARGET.repository &&
+    repository.status === "available" &&
+    repository.selected_for_protection === true &&
+    Number(repository.external_id) === TARGET.repositoryExternalId &&
+    typeof repository.default_branch === "string" &&
+    /^[A-Za-z0-9_.-]{1,100}$/.test(repository.default_branch);
+  checks.activeOpenAiDependency =
+    dependency?.id === TARGET.workspaceDependencyId &&
+    dependency.workspace_id === TARGET.workspaceId &&
+    dependency.protected_product_id === TARGET.productId &&
+    dependency.dependency_id === TARGET.dependencyId &&
+    dependency.monitoring_enabled === true &&
+    dependencyResult.data !== null &&
+    provider?.id === TARGET.dependencyId &&
+    provider.slug === "openai" &&
+    provider.enabled === true;
+
+  if (
+    !checks.protectedProduct ||
+    !checks.exactQaRepositoryMapping ||
+    !checks.exactRepositoryIdentity ||
+    !checks.activeOpenAiDependency
+  ) {
+    return {
+      status: "blocked",
+      category: "canonical_product_repository_scope_mismatch",
+      checks,
+      repositoryIdentity: "michelpronkk-oss/auterim-m15-github-qa",
+      defaultBranch: repository?.default_branch ?? null,
+      defaultBranchSha: null,
+      visibleRepositoryCount: null,
+    };
+  }
+
+  const { data: connection, error: connectionError } = await client
+    .from("repository_connections")
+    .select("id,workspace_id,installation_id,provider,status")
+    .eq("workspace_id", TARGET.workspaceId)
+    .eq("id", repository?.connection_id ?? "00000000-0000-0000-0000-000000000000")
+    .maybeSingle();
+  if (connectionError || !connection) {
+    return {
+      status: "blocked",
+      category: "canonical_connection_unavailable",
+      checks,
+      repositoryIdentity: "michelpronkk-oss/auterim-m15-github-qa",
+      defaultBranch: repository?.default_branch ?? null,
+      defaultBranchSha: null,
+      visibleRepositoryCount: null,
+    };
+  }
+  const installationId = Number(connection.installation_id);
+  checks.connectedGitHubInstallation =
+    connection.workspace_id === TARGET.workspaceId &&
+    connection.provider === "github" &&
+    connection.status === "connected" &&
+    Number.isSafeInteger(installationId) &&
+    installationId > 0;
+  if (!checks.connectedGitHubInstallation) {
+    return {
+      status: "blocked",
+      category: "canonical_github_installation_mismatch",
+      checks,
+      repositoryIdentity: "michelpronkk-oss/auterim-m15-github-qa",
+      defaultBranch: repository?.default_branch ?? null,
+      defaultBranchSha: null,
+      visibleRepositoryCount: null,
+    };
+  }
+
+  let github: Awaited<ReturnType<typeof inspectGitHubInstallationScope>>;
+  try {
+    if (!environment.GITHUB_APP_ID || !environment.GITHUB_APP_PRIVATE_KEY)
+      throw new Error("github_app_configuration_unavailable");
+    if (!checks.exactRepositoryIdentity || !repository?.default_branch)
+      throw new Error("github_canonical_repository_unavailable");
+    github = await inspectGitHubInstallationScope({
+      appId: environment.GITHUB_APP_ID,
+      privateKey: environment.GITHUB_APP_PRIVATE_KEY,
+      installationId,
+      expectedAccountLogin: TARGET.accountLogin,
+      repositoryId: TARGET.repositoryExternalId,
+      owner: TARGET.owner,
+      repository: TARGET.repository,
+      defaultBranch: repository.default_branch,
+      requiredPaths: [...REQUIRED_FIXTURE_PATHS],
+    });
+  } catch (error) {
+    return {
+      status: "blocked",
+      category: safeFailureCategory(error),
+      checks,
+      repositoryIdentity: "michelpronkk-oss/auterim-m15-github-qa",
+      defaultBranch: repository?.default_branch ?? null,
+      defaultBranchSha: null,
+      visibleRepositoryCount: null,
+    };
+  }
+
+  checks.appIdentityMatches = github.appIdentityMatches;
+  checks.installationIdentityMatches = github.installationIdentityMatches;
+  checks.expectedGitHubAccount =
+    github.accountLogin?.toLowerCase() === TARGET.accountLogin.toLowerCase();
+  checks.installationActive = github.installationActive;
+  checks.selectedRepositoriesOnly = github.selectedRepositoriesOnly;
+  checks.requiredWritePermissionsGranted = github.requiredWritePermissionsGranted;
+  checks.noUnexpectedWritePermissions = github.noUnexpectedWritePermissions;
+  checks.qaRepositoryIsOnlyVisibleRepository =
+    github.visibleRepositoryCount === 1 && github.exactRepositoryVisible;
+  checks.fixtureFilesPresentOnDefaultBranch = github.requiredPathsPresent === true;
+  checks.supportedNpmLockfilePresent = github.npmLockfileFamily === "npm";
+  checks.fixtureCommitMatchesDefaultHead = expectedFixtureCommitSha
+    ? github.defaultBranchSha === expectedFixtureCommitSha.toLowerCase()
+    : null;
+
+  const required = [
+    checks.protectedProduct,
+    checks.exactQaRepositoryMapping,
+    checks.exactRepositoryIdentity,
+    checks.activeOpenAiDependency,
+    checks.connectedGitHubInstallation,
+    checks.appIdentityMatches,
+    checks.installationIdentityMatches,
+    checks.expectedGitHubAccount,
+    checks.installationActive,
+    checks.selectedRepositoriesOnly,
+    checks.requiredWritePermissionsGranted,
+    checks.noUnexpectedWritePermissions,
+    checks.qaRepositoryIsOnlyVisibleRepository,
+    checks.fixtureFilesPresentOnDefaultBranch,
+    checks.supportedNpmLockfilePresent,
+    checks.productionVerificationStorageReadable,
+    checks.classifierConfigured,
+    checks.intelligenceConfigured,
+    checks.codingModelConfigured,
+    checks.verificationRunnerConfigured,
+    checks.dependencyCachePublicKeyConfigured,
+    checks.draftPrWritesDisabled,
+  ];
+  if (expectedFixtureCommitSha) required.push(checks.fixtureCommitMatchesDefaultHead === true);
+
+  return {
+    status: required.every(Boolean) ? "ready" : "blocked",
+    ...(required.every(Boolean) ? {} : { category: "acceptance_preflight_not_ready" }),
+    checks,
+    repositoryIdentity: "michelpronkk-oss/auterim-m15-github-qa",
+    defaultBranch: github.defaultBranch,
+    defaultBranchSha: github.defaultBranchSha,
+    visibleRepositoryCount: github.visibleRepositoryCount,
+  };
+}
+
+/**
+ * Operator-only, fixed-scope M15.78R entry point. The verify action is read-only;
+ * create_source invokes the existing idempotent internal-test persistence flow.
+ * No IDs, source text, provider result, or downstream evidence are caller-controlled.
+ */
+export const m1578rInternalTestAcceptanceTask = schemaTask({
+  id: "m1578r-internal-test-acceptance",
+  schema: M1578RInternalTestAcceptanceInputSchema,
+  retry: { maxAttempts: 1 },
+  maxDuration: 180,
+  queue: { concurrencyLimit: 1 },
+  run: async (input) => {
+    const readiness = await inspectReadiness(
+      input.action === "create_source" ? input.fixtureCommitSha : undefined,
+    );
+    if (readiness.status !== "ready" || input.action === "verify") return readiness;
+
+    try {
+      const created = await persistInternalTestSourceChange({
+        workspaceId: TARGET.workspaceId,
+        productId: TARGET.productId,
+        dependencyId: TARGET.dependencyId,
+        acceptanceKey: SOURCE_ACCEPTANCE_KEY,
+        baseline: SOURCE_BASELINE,
+        changed: SOURCE_CHANGED,
+      });
+      const { data: provenance, error } = await createSupabaseServerClient()
+        .from("source_changes")
+        .select("workspace_id,source_mode,processing_mode")
+        .eq("id", created.sourceChangeId)
+        .maybeSingle();
+      const provenanceMatches =
+        !error &&
+        provenance?.workspace_id === TARGET.workspaceId &&
+        provenance.source_mode === "internal_test" &&
+        provenance.processing_mode === "evidence_only";
+      return {
+        ...readiness,
+        status: provenanceMatches ? "source_created" : "blocked",
+        ...(provenanceMatches ? {} : { category: "internal_source_provenance_unverified" }),
+        sourceId: created.sourceId,
+        sourceChangeId: created.sourceChangeId,
+        replayed: created.replayed,
+        provenanceMatches,
+      };
+    } catch (error) {
+      return {
+        ...readiness,
+        status: "blocked",
+        category: safeFailureCategory(error),
+      };
+    }
+  },
+});
