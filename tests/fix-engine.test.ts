@@ -1021,6 +1021,7 @@ describe("M15.78 Fix Engine V1 deterministic contracts", () => {
   });
   it("uses Azure API-key authentication and reports only a safe HTTP rejection category", async () => {
     let capturedHeaders: Headers | undefined;
+    let capturedBody: Record<string, unknown> | undefined;
     const model = new StructuredChatCompletionFixModel({
       provider: "azure-openai",
       model: "gpt-6.1-sol",
@@ -1030,6 +1031,7 @@ describe("M15.78 Fix Engine V1 deterministic contracts", () => {
       promptContractVersion: "fix-prompts-v1",
       fetcher: async (_input, init) => {
         capturedHeaders = new Headers(init?.headers);
+        capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return new Response(JSON.stringify({ error: { message: "sensitive provider body" } }), {
           status: 401,
         });
@@ -1049,6 +1051,9 @@ describe("M15.78 Fix Engine V1 deterministic contracts", () => {
     ).rejects.toThrow("fix_model_provider_rejected_401");
     expect(capturedHeaders?.get("api-key")).toBe("test-only-secret-value");
     expect(capturedHeaders?.has("authorization")).toBe(false);
+    expect(capturedBody).toMatchObject({ max_completion_tokens: 3_000 });
+    expect(capturedBody).not.toHaveProperty("max_tokens");
+    expect(capturedBody).not.toHaveProperty("temperature");
   });
   it("benchmark scorer separates correctness, test/build rates, minimality, risk edits and cost", () => {
     const report = scoreFixBenchmark({
