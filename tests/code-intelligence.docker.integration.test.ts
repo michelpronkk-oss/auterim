@@ -416,9 +416,11 @@ async function createCanonicalRouteIntent(
 describe.skipIf(!enabled)("M15.76 isolated local Supabase acceptance", () => {
   beforeAll(() => {
     const expectedLocalUrl =
-      process.env.AUTERIM_M1578_DOCKER_ACCEPTANCE === "1"
-        ? "http://127.0.0.1:54970"
-        : /^http:\/\/127\.0\.0\.1:57\d{3}$/;
+      process.env.AUTERIM_M1578R_DOCKER_ACCEPTANCE === "1"
+        ? process.env.AUTERIM_M1578_EXPECTED_URL
+        : process.env.AUTERIM_M1578_DOCKER_ACCEPTANCE === "1"
+          ? "http://127.0.0.1:54970"
+          : /^http:\/\/127\.0\.0\.1:57\d{3}$/;
     expect(url).toEqual(expectedLocalUrl);
     expect(serviceKey.length).toBeGreaterThan(20);
     expect(anonKey.length).toBeGreaterThan(20);

@@ -1,6 +1,7 @@
 import { schedules } from "@trigger.dev/sdk";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { SupabasePrivatePatchArtifactStore } from "@/lib/fix-engine/artifact-store";
+import { removePrivateVerificationArtifacts } from "@/lib/fix-engine/verification-artifacts";
 
 export const purgeFixEngineArtifactsTask = schedules.task({
   id: "purge-fix-engine-artifacts",
@@ -21,14 +22,53 @@ export const purgeFixEngineArtifactsTask = schedules.task({
       )
     )
       throw new Error("fix_artifact_retention_failed");
-    if (response.paths.length === 0) return { deletedArtifacts: 0 };
-    await new SupabasePrivatePatchArtifactStore().remove({ paths: response.paths as string[] });
-    const { data: completed, error: completeError } = await client.rpc(
-      "complete_fix_patch_artifact_purge",
-      { p_paths: response.paths },
+    let deletedPatches = 0;
+    if (response.paths.length > 0) {
+      await new SupabasePrivatePatchArtifactStore().remove({ paths: response.paths as string[] });
+      const { data: completed, error: completeError } = await client.rpc(
+        "complete_fix_patch_artifact_purge",
+        { p_paths: response.paths },
+      );
+      if (completeError || completed !== response.paths.length)
+        throw new Error("fix_artifact_retention_failed");
+      deletedPatches = completed;
+    }
+
+    const { data: snapshotData, error: snapshotError } = await client.rpc(
+      "claim_expired_fix_verification_snapshots",
+      { p_limit: 100 },
     );
-    if (completeError || completed !== response.paths.length)
-      throw new Error("fix_artifact_retention_failed");
-    return { deletedArtifacts: completed };
+    const snapshots = snapshotData as { artifacts?: unknown; count?: unknown } | null;
+    if (
+      snapshotError ||
+      !snapshots ||
+      !Array.isArray(snapshots.artifacts) ||
+      snapshots.artifacts.length > 100 ||
+      snapshots.count !== snapshots.artifacts.length ||
+      snapshots.artifacts.some((artifact) => {
+        if (!artifact || typeof artifact !== "object") return true;
+        const row = artifact as { workspaceId?: unknown; fixRunId?: unknown; path?: unknown };
+        return (
+          typeof row.workspaceId !== "string" ||
+          !/^[0-9a-f-]{36}$/i.test(row.workspaceId) ||
+          typeof row.fixRunId !== "string" ||
+          !/^[0-9a-f-]{36}$/i.test(row.fixRunId) ||
+          typeof row.path !== "string" ||
+          !new RegExp(`^snapshots/${row.fixRunId}/[a-f0-9]{64}\\.tar\\.gz$`, "i").test(row.path)
+        );
+      })
+    )
+      throw new Error("fix_snapshot_retention_claim_failed");
+    const paths = snapshots.artifacts.map((artifact) => (artifact as { path: string }).path);
+    if (paths.length > 0) {
+      await removePrivateVerificationArtifacts(paths);
+      const { data: completed, error: completeError } = await client.rpc(
+        "complete_fix_verification_snapshot_purge",
+        { p_paths: paths },
+      );
+      if (completeError || completed !== paths.length)
+        throw new Error("fix_snapshot_retention_complete_failed");
+    }
+    return { deletedArtifacts: deletedPatches + paths.length, deletedSnapshots: paths.length };
   },
 });

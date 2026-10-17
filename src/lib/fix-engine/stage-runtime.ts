@@ -3,6 +3,10 @@ import { z } from "zod";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { FixStageSchema, type FixStage } from "@/lib/fix-engine/contracts";
 import { SupabasePrivatePatchArtifactStore } from "@/lib/fix-engine/artifact-store";
+import {
+  isVerificationRunnerRetryableFailure,
+  VerificationRunnerFailure,
+} from "@/lib/fix-engine/verification-retry";
 
 const uuid = z.string().uuid();
 const stageRunSchema = z
@@ -292,10 +296,12 @@ export async function runPersistedFixStage(input: {
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
     const retryable =
-      message.includes("provider_unavailable") ||
-      message.includes("timeout") ||
-      message.includes("ambiguous") ||
-      message.includes("transport_ambiguous");
+      isVerificationRunnerRetryableFailure(error) ||
+      (!(error instanceof VerificationRunnerFailure) &&
+        (message.includes("provider_unavailable") ||
+          message.includes("timeout") ||
+          message.includes("ambiguous") ||
+          message.includes("transport_ambiguous")));
     const safeCategory = /^[a-z0-9_]{1,100}$/.test(message) ? message : "fix_stage_failed";
     await client.rpc("complete_fix_stage", {
       p_stage_id: claim.stageId,

@@ -1,0 +1,9 @@
+{
+  "name": "@auterim/m1578-verification-runner",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "zod": "4.6.5"
+  }
+}

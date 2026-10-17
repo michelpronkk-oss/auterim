@@ -145,6 +145,15 @@ export const environmentSchema = z
       emptyToUndefined,
       z.string().trim().min(1).max(8192).optional(),
     ),
+    FIX_VERIFICATION_RUNNER_URL: optionalUrl,
+    FIX_VERIFICATION_RUNNER_AUTH_SECRET: z.preprocess(
+      emptyToUndefined,
+      z.string().min(32).max(4096).optional(),
+    ),
+    FIX_VERIFICATION_RUNNER_PROTOCOL: z.preprocess(
+      emptyToUndefined,
+      z.literal("m1578-verification-runner-v1").default("m1578-verification-runner-v1"),
+    ),
     FIX_GITHUB_DRAFT_PR_WRITES: z.preprocess(emptyToUndefined, z.enum(["0", "1"]).default("0")),
     AUTERIM_INTELLIGENCE_PROVIDER: z.preprocess(
       emptyToUndefined,
@@ -185,6 +194,30 @@ export const environmentSchema = z
         code: "custom",
         message: "Configure all Fix Engine coding-model fields together.",
         path: ["FIX_CODING_MODEL_PROVIDER"],
+      });
+    }
+
+    if (
+      Boolean(environment.FIX_VERIFICATION_RUNNER_URL) !==
+      Boolean(environment.FIX_VERIFICATION_RUNNER_AUTH_SECRET)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "Configure FIX_VERIFICATION_RUNNER_URL and FIX_VERIFICATION_RUNNER_AUTH_SECRET together.",
+        path: [
+          environment.FIX_VERIFICATION_RUNNER_URL
+            ? "FIX_VERIFICATION_RUNNER_AUTH_SECRET"
+            : "FIX_VERIFICATION_RUNNER_URL",
+        ],
+      });
+    }
+
+    if (environment.FIX_VERIFICATION_RUNNER_URL && !environment.FIX_DEPENDENCY_CACHE_PUBLIC_KEY) {
+      context.addIssue({
+        code: "custom",
+        message: "Remote verification requires FIX_DEPENDENCY_CACHE_PUBLIC_KEY.",
+        path: ["FIX_DEPENDENCY_CACHE_PUBLIC_KEY"],
       });
     }
 

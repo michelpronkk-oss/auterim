@@ -77,8 +77,10 @@ async function removeSensitiveFiles(root: string, current = root): Promise<void>
     const relative = path.relative(root, target).replaceAll("\\", "/");
     if (
       /(^|\/)\.env(?:\..*)?$/i.test(relative) ||
+      /(^|\/)\.npmrc$/i.test(relative) ||
       /(^|\/)(?:secrets?|credentials?)(?:\.[^/]*)?$/i.test(relative) ||
-      /\.(?:pem|key|p12|pfx)$/i.test(relative)
+      /(^|\/)(?:id_rsa|id_ed25519|known_hosts|authorized_keys)$/i.test(relative) ||
+      /\.(?:pem|key|p12|pfx|kdbx|keystore)$/i.test(relative)
     ) {
       await rm(target, { force: true });
     }
@@ -129,6 +131,8 @@ export async function applyValidatedPatchInIsolatedCheckout(input: {
 export async function withExactBaseGitHubSnapshot<T>(input: {
   expectedBaseSha: string;
   materialize: (destination: string, commitSha: string) => Promise<{ skippedLinks: number }>;
+  /** Capture the sanitized exact-base snapshot before the candidate patch is applied. */
+  captureBaseSnapshot?: (checkoutPath: string) => Promise<void>;
   unifiedDiff: string;
   run: (checkoutPath: string) => Promise<T>;
 }) {
@@ -177,6 +181,7 @@ export async function withExactBaseGitHubSnapshot<T>(input: {
       ],
       { windowsHide: true, timeout: 15_000, env: gitEnv },
     );
+    await input.captureBaseSnapshot?.(checkoutPath);
     await applyValidatedPatchInIsolatedCheckout({
       checkoutPath,
       expectedBaseSha: input.expectedBaseSha,

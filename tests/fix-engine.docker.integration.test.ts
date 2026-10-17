@@ -8,7 +8,7 @@ const anonKey = process.env.AUTERIM_M1578_ANON_KEY;
 
 describe.skipIf(!enabled)("M15.78 isolated Docker/Supabase acceptance", () => {
   it("binds to the isolated loopback Supabase stack only", () => {
-    expect(url).toBe("http://127.0.0.1:54970");
+    expect(url).toBe(process.env.AUTERIM_M1578_EXPECTED_URL ?? "http://127.0.0.1:54970");
     expect(serviceKey?.length).toBeGreaterThan(20);
     expect(anonKey?.length).toBeGreaterThan(20);
   });

@@ -1,9 +1,33 @@
-import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { generateKeyPairSync, randomBytes, sign, type KeyObject } from "node:crypto";
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createClient } from "@supabase/supabase-js";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { createM1578RPrivateArtifactHarness } from "./helpers/m1578r-private-artifact-harness";
+
+const artifactStorageRef = vi.hoisted(() => ({
+  current: null as null | { from: (bucket: string) => unknown },
+}));
+
+vi.mock("@/lib/supabase/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/supabase/server")>();
+  return {
+    ...actual,
+    createSupabaseServerClient: () => {
+      const client = actual.createSupabaseServerClient();
+      const storage = artifactStorageRef.current;
+      if (!storage) return client;
+      return new Proxy(client, {
+        get(target, property, receiver) {
+          if (property === "storage") return storage;
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    },
+  };
+});
 import {
   createDependencyCacheIdentity,
   dependencyCacheManifestForSigning,
@@ -17,6 +41,20 @@ import type { FixCodingModel, FixModelContext, ModelEnvelope } from "@/lib/fix-e
 import { createPersistedFixRun, runPersistedFixStage } from "@/lib/fix-engine/stage-runtime";
 import type { FixStage } from "@/lib/fix-engine/contracts";
 import type { GitHubAppRepositoryProvider } from "@/lib/preflight/github-provider";
+import { dependencyCacheIdentityKey } from "@/lib/fix-engine/dependency-cache";
+import { packSafeDirectory } from "../verification-runner/archive";
+import {
+  canonicalJson,
+  sha256 as runnerSha256,
+  type DependencyCacheManifestV2,
+} from "../verification-runner/contracts";
+import {
+  createSignedDependencyCacheReference,
+  putSignedDependencyCacheArtifacts,
+} from "@/lib/fix-engine/verification-artifacts";
+import { RemoteVerificationExecutor } from "@/lib/fix-engine/verification-executor";
+import { RemoteVerificationRunnerClient } from "@/lib/fix-engine/verification-runner-client";
+import { createVerificationRunnerServer } from "../verification-runner/server";
 
 const enabled = process.env.AUTERIM_M1578_DOCKER_ACCEPTANCE === "1";
 const url = process.env.AUTERIM_M1578_EXPECTED_URL;
@@ -25,6 +63,22 @@ const workspaceId = "e140d48e-9dc0-4552-a9a4-a81fe3872422";
 const productId = "de1f2a12-de3c-4644-8892-b6c2d458a300";
 const repositoryId = "3b4f4fe6-cbbd-4bbd-a340-71f7c268e2c4";
 const sha256 = (value: string) => stableFingerprint(value);
+const remoteAcceptance = process.env.AUTERIM_M1578R_DOCKER_ACCEPTANCE === "1";
+const runnerServers: Array<ReturnType<typeof createVerificationRunnerServer>> = [];
+const runnerRoots: string[] = [];
+let artifactHarness: Awaited<ReturnType<typeof createM1578RPrivateArtifactHarness>> | null = null;
+
+beforeAll(async () => {
+  artifactHarness = await createM1578RPrivateArtifactHarness();
+  artifactStorageRef.current = artifactHarness.storage;
+});
+
+afterAll(async () => {
+  await Promise.all(runnerServers.map((runner) => runner.close()));
+  await Promise.all(runnerRoots.map((root) => rm(root, { recursive: true, force: true })));
+  artifactStorageRef.current = null;
+  await artifactHarness?.close();
+});
 
 function envelope<T>(stage: string, modelName: string, value: T): ModelEnvelope<T> {
   return {
@@ -94,11 +148,73 @@ async function makeSignedFixtureCache(input: {
   return { root, nodeModulesPath: nodeModules };
 }
 
+async function makeSignedRemoteFixtureCache(input: {
+  identity: NonNullable<ReturnType<typeof createDependencyCacheIdentity>>;
+  privateKey: KeyObject;
+}) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "auterim-m1578r-cache-"));
+  const nodeModules = path.join(root, "node_modules");
+  const vitestDirectory = path.join(nodeModules, "vitest");
+  const tscDirectory = path.join(nodeModules, "typescript", "bin");
+  await mkdir(vitestDirectory, { recursive: true });
+  await mkdir(tscDirectory, { recursive: true });
+  await writeFile(
+    path.join(vitestDirectory, "vitest.mjs"),
+    "if (process.argv[2] !== 'run') process.exit(1); process.exit(0);\n",
+  );
+  await writeFile(
+    path.join(tscDirectory, "tsc"),
+    "if (process.argv[2] !== '--noEmit') process.exit(1); process.exit(0);\n",
+  );
+  const setReadOnly = async (target: string): Promise<void> => {
+    const entries = await readdir(target, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(target, entry.name);
+      if (entry.isDirectory()) await setReadOnly(fullPath);
+      await chmod(fullPath, entry.isDirectory() ? 0o555 : 0o444);
+    }
+    await chmod(target, 0o555);
+  };
+  await setReadOnly(nodeModules);
+  const tree = await inspectDependencyCacheTree(nodeModules);
+  const archivePath = path.join(root, "dependencies.tar.gz");
+  const archiveInfo = await packSafeDirectory(nodeModules, archivePath, {
+    maxFiles: 50_000,
+    maxBytes: 512 * 1024 * 1024,
+  });
+  expect(archiveInfo.byteCount).toBe(tree.byteCount);
+  const archive = await readFile(archivePath);
+  const manifestPayload = {
+    schemaVersion: 2 as const,
+    buildStatus: "complete" as const,
+    identity: { ...input.identity, packageManager: "npm" as const },
+    identityKey: dependencyCacheIdentityKey({ ...input.identity, packageManager: "npm" }),
+    // The V2 signed runner manifest uses the versioned canonical JSON
+    // fingerprint format shared with the Linux cache finalizer.
+    treeSha256: runnerSha256(canonicalJson(tree.files)),
+    archiveSha256: runnerSha256(archive),
+    artifactFingerprint: runnerSha256(archive),
+    signatureAlgorithm: "ed25519" as const,
+    createdAt: new Date().toISOString(),
+    fileCount: tree.files.length,
+    byteCount: tree.byteCount,
+    archiveByteCount: archive.byteLength,
+  };
+  const manifest: DependencyCacheManifestV2 = {
+    ...manifestPayload,
+    manifestFingerprint: runnerSha256(canonicalJson(manifestPayload)),
+  };
+  const serialized = canonicalJson(manifest);
+  const signature = sign(null, Buffer.from(serialized), input.privateKey);
+  return { root, manifest, signature, archive };
+}
+
 describe.skipIf(!enabled)(
   "M15.78 canonical persisted stage processor on isolated Docker Supabase",
   () => {
+    // The remote executor can poll for 240 seconds; keep the enclosing Docker test bounded above it.
     it("runs create_fix_run_from_graph through diagnose, plan, patch, real Docker verify and risk", async () => {
-      expect(url).toBe("http://127.0.0.1:54970");
+      expect(url).toBe(process.env.AUTERIM_M1578_EXPECTED_URL ?? "http://127.0.0.1:54970");
       expect(serviceKey?.length).toBeGreaterThan(20);
       const client = createClient(url!, serviceKey!, {
         auth: { autoRefreshToken: false, persistSession: false },
@@ -228,10 +344,65 @@ describe.skipIf(!enabled)(
           name: "m1578-verification-fixture",
           devDependencies: { vitest: "1.0.0", typescript: "1.0.0" },
         }) + "\n";
-      const packageLock = "deterministic-fixture-lock-v1\n";
+      const packageLock =
+        JSON.stringify({
+          name: "m1578-verification-fixture",
+          version: "1.0.0",
+          lockfileVersion: 3,
+          requires: true,
+          packages: {
+            "": {
+              name: "m1578-verification-fixture",
+              version: "1.0.0",
+              devDependencies: { vitest: "1.0.0", typescript: "1.0.0" },
+            },
+          },
+        }) + "\n";
       const sourceText = 'export const before = "source";\n';
       const cacheKeys = generateKeyPairSync("ed25519");
       let cacheRootPath: string | null = null;
+      let verificationExecutor: RemoteVerificationExecutor | undefined;
+      let resolveRemoteDependencyCache:
+        | ((
+            identity: NonNullable<ReturnType<typeof createDependencyCacheIdentity>>,
+          ) => ReturnType<typeof createSignedDependencyCacheReference>)
+        | undefined;
+      if (remoteAcceptance) {
+        const runnerRoot = await mkdtemp(path.join(os.tmpdir(), "auterim-m1578r-runner-"));
+        runnerRoots.push(runnerRoot);
+        const authSecret = randomBytes(32).toString("hex");
+        const publicKey = cacheKeys.publicKey.export({ type: "spki", format: "pem" }).toString();
+        const runner = createVerificationRunnerServer({
+          authSecret,
+          artifactOrigin: artifactHarness!.origin,
+          cachePublicKey: publicKey,
+          jobStorePath: path.join(runnerRoot, "jobs"),
+          workRoot: path.join(runnerRoot, "work"),
+        });
+        const address = await runner.listen(0, "127.0.0.1");
+        runnerServers.push(runner);
+        verificationExecutor = new RemoteVerificationExecutor(
+          new RemoteVerificationRunnerClient({
+            url: `http://127.0.0.1:${address.port}`,
+            authSecret,
+            maxWaitMs: 240_000,
+          }),
+        );
+        resolveRemoteDependencyCache = async (identity) => {
+          const cache = await makeSignedRemoteFixtureCache({
+            identity,
+            privateKey: cacheKeys.privateKey,
+          });
+          cacheRootPath = cache.root;
+          await putSignedDependencyCacheArtifacts({
+            identity,
+            manifest: cache.manifest,
+            signature: cache.signature,
+            archive: cache.archive,
+          });
+          return createSignedDependencyCacheReference({ identity, publicKey });
+        };
+      }
       const fixtureModel: FixCodingModel = {
         provider: "fixture",
         modelName: "m1578-deterministic-model-v1",
@@ -319,6 +490,8 @@ describe.skipIf(!enabled)(
       const processor = createFixEngineStageProcessor({
         model: fixtureModel,
         repositoryProvider,
+        ...(verificationExecutor ? { verificationExecutor } : {}),
+        ...(resolveRemoteDependencyCache ? { resolveRemoteDependencyCache } : {}),
         resolveDependencyCache: async (identity) => {
           if (!identity) return { status: "unavailable", reason: "cache_not_configured" };
           const cache = await makeSignedFixtureCache({ identity, ...cacheKeys });
@@ -386,6 +559,26 @@ describe.skipIf(!enabled)(
         status: "passed",
         profile_id: "javascript-typescript-v1",
       });
+      if (remoteAcceptance) {
+        const { data: retainedSnapshot, error: retainedSnapshotError } = await client
+          .from("fix_verification_snapshots")
+          .select(
+            "workspace_id,fix_run_id,snapshot_sha256,artifact_path,status,terminal_at,purged_at",
+          )
+          .eq("workspace_id", workspaceId)
+          .eq("fix_run_id", created.fixRunId)
+          .single();
+        expect(retainedSnapshotError).toBeNull();
+        expect(retainedSnapshot).toMatchObject({
+          workspace_id: workspaceId,
+          fix_run_id: created.fixRunId,
+          status: "terminal",
+          purged_at: null,
+        });
+        expect(retainedSnapshot?.artifact_path).toBe(
+          `snapshots/${created.fixRunId}/${retainedSnapshot?.snapshot_sha256}.tar.gz`,
+        );
+      }
       expect(
         (verification?.checks as Array<{ status: string }>).every(
           (check) => check.status === "passed",
@@ -414,6 +607,6 @@ describe.skipIf(!enabled)(
       expect(replay).toMatchObject({ status: "completed", replayed: true });
       expect(replayCalls).toBe(0);
       if (cacheRootPath) await rm(cacheRootPath, { recursive: true, force: true });
-    });
+    }, 270_000);
   },
 );
