@@ -9,6 +9,7 @@ const TARGET = {
   workspaceId: "e140d48e-9dc0-4552-a9a4-a81fe3872422",
   productId: "de1f2a12-de3c-4644-8892-b6c2d458a300",
   repositoryId: "b2abf377-2dbc-4b9c-b546-b0604f3ee4fe",
+  preservedAuterimRepositoryId: "3b4f4fe6-cbbd-4bbd-a340-71f7c268e2c4",
   repositoryExternalId: 1409364414,
   owner: "michelpronkk-oss",
   repository: "auterim-m15-github-qa",
@@ -32,13 +33,21 @@ const REQUIRED_FIXTURE_PATHS = [
   "tsconfig.json",
 ] as const;
 
-export function hasOnlyExpectedActiveProductRepositoryMapping(
+export function hasExpectedActiveProductRepositoryMappings(
   mappings: Array<{ repository_id: string; status: string }>,
 ) {
+  if (mappings.some((mapping) => !["active", "inactive"].includes(mapping.status))) return false;
+  const activeRepositoryIds = mappings
+    .filter((mapping) => mapping.status === "active")
+    .map((mapping) => mapping.repository_id);
+  const expectedRepositoryIds = new Set<string>([
+    TARGET.repositoryId,
+    TARGET.preservedAuterimRepositoryId,
+  ]);
   return (
-    mappings.length === 1 &&
-    mappings[0]?.repository_id === TARGET.repositoryId &&
-    mappings[0]?.status === "active"
+    activeRepositoryIds.length === expectedRepositoryIds.size &&
+    new Set(activeRepositoryIds).size === expectedRepositoryIds.size &&
+    activeRepositoryIds.every((repositoryId) => expectedRepositoryIds.has(repositoryId))
   );
 }
 
@@ -318,7 +327,7 @@ async function inspectReadiness(expectedFixtureCommitSha?: string): Promise<Read
   const dependency = dependencyResult.data;
   const provider = dependencyCatalogResult.data;
   checks.protectedProduct = product?.status === "protected";
-  checks.exactQaRepositoryMapping = hasOnlyExpectedActiveProductRepositoryMapping(mappings);
+  checks.exactQaRepositoryMapping = hasExpectedActiveProductRepositoryMappings(mappings);
   checks.exactRepositoryIdentity =
     repository?.id === TARGET.repositoryId &&
     repository.workspace_id === TARGET.workspaceId &&

@@ -2,7 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { inspectGitHubInstallationScope } from "../src/lib/fix-engine/github-write-token";
 import {
-  hasOnlyExpectedActiveProductRepositoryMapping,
+  hasExpectedActiveProductRepositoryMappings,
   diagnosePreflightEntitlement,
   M1578RInternalTestAcceptanceInputSchema,
 } from "../src/trigger/m1578r-internal-test-acceptance";
@@ -172,21 +172,37 @@ describe("M15.78R bounded GitHub installation inspection", () => {
 });
 
 describe("M15.78R internal source operator payload", () => {
-  it("requires the QA repository to be the only Product mapping row", () => {
+  it("requires the QA and preserved Auterim repositories as the only active Product mappings", () => {
     expect(
-      hasOnlyExpectedActiveProductRepositoryMapping([
+      hasExpectedActiveProductRepositoryMappings([
         { repository_id: "b2abf377-2dbc-4b9c-b546-b0604f3ee4fe", status: "active" },
+        { repository_id: "3b4f4fe6-cbbd-4bbd-a340-71f7c268e2c4", status: "active" },
       ]),
     ).toBe(true);
     expect(
-      hasOnlyExpectedActiveProductRepositoryMapping([
+      hasExpectedActiveProductRepositoryMappings([
         { repository_id: "b2abf377-2dbc-4b9c-b546-b0604f3ee4fe", status: "active" },
-        { repository_id: "another-repository-id", status: "inactive" },
+        { repository_id: "3b4f4fe6-cbbd-4bbd-a340-71f7c268e2c4", status: "active" },
+        { repository_id: "historical-repository-id", status: "inactive" },
+      ]),
+    ).toBe(true);
+    expect(
+      hasExpectedActiveProductRepositoryMappings([
+        { repository_id: "b2abf377-2dbc-4b9c-b546-b0604f3ee4fe", status: "active" },
       ]),
     ).toBe(false);
     expect(
-      hasOnlyExpectedActiveProductRepositoryMapping([
+      hasExpectedActiveProductRepositoryMappings([
+        { repository_id: "b2abf377-2dbc-4b9c-b546-b0604f3ee4fe", status: "active" },
+        { repository_id: "3b4f4fe6-cbbd-4bbd-a340-71f7c268e2c4", status: "active" },
         { repository_id: "another-repository-id", status: "active" },
+      ]),
+    ).toBe(false);
+    expect(
+      hasExpectedActiveProductRepositoryMappings([
+        { repository_id: "b2abf377-2dbc-4b9c-b546-b0604f3ee4fe", status: "active" },
+        { repository_id: "3b4f4fe6-cbbd-4bbd-a340-71f7c268e2c4", status: "active" },
+        { repository_id: "historical-repository-id", status: "revoked" },
       ]),
     ).toBe(false);
   });
