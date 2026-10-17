@@ -212,6 +212,7 @@ async function makeSignedRemoteFixtureCache(input: {
 describe.skipIf(!enabled)(
   "M15.78 canonical persisted stage processor on isolated Docker Supabase",
   () => {
+    // The remote executor can poll for 240 seconds; keep the enclosing Docker test bounded above it.
     it("runs create_fix_run_from_graph through diagnose, plan, patch, real Docker verify and risk", async () => {
       expect(url).toBe(process.env.AUTERIM_M1578_EXPECTED_URL ?? "http://127.0.0.1:54970");
       expect(serviceKey?.length).toBeGreaterThan(20);
@@ -606,6 +607,6 @@ describe.skipIf(!enabled)(
       expect(replay).toMatchObject({ status: "completed", replayed: true });
       expect(replayCalls).toBe(0);
       if (cacheRootPath) await rm(cacheRootPath, { recursive: true, force: true });
-    });
+    }, 270_000);
   },
 );

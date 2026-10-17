@@ -184,6 +184,37 @@ function resultFor(request: MaterializedVerificationJob): VerificationJobResult 
   return { ...resultBase, resultFingerprint: sha256(canonicalJson(resultBase)) };
 }
 
+async function persistJobState(jobStorePath: string, jobId: string, state: unknown) {
+  await mkdir(jobStorePath, { recursive: true });
+  const mac = createHmac("sha256", AUTH_SECRET)
+    .update(`${jobId}\n${canonicalJson(state)}`)
+    .digest("hex");
+  await writeFile(
+    path.join(jobStorePath, `${jobId}.json`),
+    canonicalJson({ version: 1, state, mac }),
+  );
+}
+
+async function persistTestSpool(
+  spoolRoot: string,
+  request: VerificationJobRequest,
+): Promise<MaterializedVerificationJob> {
+  const job = toMaterializedVerificationJob(request);
+  const directory = path.join(spoolRoot, job.jobId);
+  await mkdir(directory, { recursive: true });
+  for (const artifact of [job.snapshot, job.patch, job.cacheArchive]) {
+    const content =
+      artifact.fileName === "snapshot.tar.gz"
+        ? SNAPSHOT_BYTES
+        : artifact.fileName === "patch.diff"
+          ? PATCH_BYTES
+          : CACHE_BYTES;
+    await writeFile(path.join(directory, artifact.fileName), content, { flag: "wx", mode: 0o600 });
+  }
+  await persistMaterializedJobManifest(directory, job, AUTH_SECRET);
+  return job;
+}
+
 function hmac(method: string, pathname: string, issuedAt: string, nonce: string, body: Buffer) {
   const digest = sha256(body);
   return createHmac("sha256", AUTH_SECRET)
@@ -601,6 +632,100 @@ describe("M15.78R remote verification runner", () => {
     });
     await expect(client.execute(request)).rejects.toThrow("runner_result_invalid");
     expect(executions).toBe(0);
+  });
+
+  it("recovers a queued materialized job after restart without its expired signed URLs", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "m1578r-runner-queued-restart-test-"));
+    const jobStorePath = path.join(root, "jobs");
+    const request = makeRequest();
+    request.snapshot.url = request.snapshot.url.replace("token=local", "token=expired");
+    request.patch.url = request.patch.url.replace("token=local", "token=expired");
+    request.cacheArchive.url = request.cacheArchive.url.replace("token=local", "token=expired");
+    const job = await persistTestSpool(path.join(jobStorePath, "artifacts"), request);
+    await persistJobState(jobStorePath, request.jobId, {
+      status: "queued",
+      requestFingerprint: request.requestFingerprint,
+    });
+    let executions = 0;
+    const runner = createVerificationRunnerServer({
+      authSecret: AUTH_SECRET,
+      artifactOrigin: "http://127.0.0.1:54321",
+      cachePublicKey: CACHE_KEYS.publicKey.export({ type: "spki", format: "pem" }).toString(),
+      jobStorePath,
+      execute: async (admitted) => {
+        executions += 1;
+        expect(admitted.jobId).toBe(job.jobId);
+        return resultFor(admitted);
+      },
+    });
+    const address = await runner.listen(0, "127.0.0.1");
+    cleanups.push(async () => {
+      await runner.close();
+      await rm(root, { recursive: true, force: true });
+    });
+    const client = new RemoteVerificationRunnerClient({
+      url: `http://127.0.0.1:${address.port}`,
+      authSecret: AUTH_SECRET,
+      maxWaitMs: 5_000,
+    });
+    const first = await client.execute(request);
+    const replay = await client.execute(request);
+    expect(first.status).toBe("passed");
+    expect(replay.jobId).toBe(job.jobId);
+    expect(executions).toBe(1);
+  });
+
+  it("returns the same authenticated completed result after runner restart", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "m1578r-runner-completed-restart-test-"));
+    const jobStorePath = path.join(root, "jobs");
+    const request = makeRequest();
+    let executions = 0;
+    const cachePublicKey = CACHE_KEYS.publicKey.export({ type: "spki", format: "pem" }).toString();
+    const firstRunner = createVerificationRunnerServer({
+      authSecret: AUTH_SECRET,
+      artifactOrigin: "http://127.0.0.1:54321",
+      cachePublicKey,
+      jobStorePath,
+      materialize: async (admission, spoolRoot) => persistTestSpool(spoolRoot, admission),
+      execute: async (admitted) => {
+        executions += 1;
+        return resultFor(admitted);
+      },
+    });
+    const firstAddress = await firstRunner.listen(0, "127.0.0.1");
+    let activeRunner = firstRunner;
+    cleanups.push(async () => {
+      await activeRunner.close().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    });
+    const firstClient = new RemoteVerificationRunnerClient({
+      url: `http://127.0.0.1:${firstAddress.port}`,
+      authSecret: AUTH_SECRET,
+      maxWaitMs: 5_000,
+    });
+    const result = await firstClient.execute(request);
+    expect(executions).toBe(1);
+    await firstRunner.close();
+
+    const replayRunner = createVerificationRunnerServer({
+      authSecret: AUTH_SECRET,
+      artifactOrigin: "http://127.0.0.1:54321",
+      cachePublicKey,
+      jobStorePath,
+      execute: async (admitted) => {
+        executions += 1;
+        return resultFor(admitted);
+      },
+    });
+    const replayAddress = await replayRunner.listen(0, "127.0.0.1");
+    activeRunner = replayRunner;
+    const replay = await new RemoteVerificationRunnerClient({
+      url: `http://127.0.0.1:${replayAddress.port}`,
+      authSecret: AUTH_SECRET,
+      maxWaitMs: 5_000,
+    }).execute(request);
+    expect(replay).toEqual(result);
+    expect(executions).toBe(1);
   });
 
   it("removes only an incomplete admission directory after a runner crash", async () => {

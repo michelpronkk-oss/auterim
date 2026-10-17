@@ -1016,7 +1016,11 @@ export function createVerificationRunnerServer(config: VerificationRunnerConfig)
         return;
       }
       if (prior?.status === "queued" || prior?.status === "running") {
-        if (prior.status === "queued" && !queue.some((item) => item.jobId === parsed.jobId)) {
+        if (
+          prior.status === "queued" &&
+          !active.has(parsed.jobId) &&
+          !queue.some((item) => item.jobId === parsed.jobId)
+        ) {
           try {
             const materialized = await readMaterializedJobManifest(
               path.join(spoolRoot, parsed.jobId),
