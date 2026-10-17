@@ -234,8 +234,9 @@ export class StructuredChatCompletionFixModel implements FixCodingModel {
         },
         body: JSON.stringify({
           model: this.modelName,
-          temperature: 0,
-          max_tokens: stage === "patch" ? 8_000 : 3_000,
+          ...(this.config.provider === "azure-openai"
+            ? { max_completion_tokens: stage === "patch" ? 8_000 : 3_000 }
+            : { temperature: 0, max_tokens: stage === "patch" ? 8_000 : 3_000 }),
           response_format: { type: "json_object" },
           messages: [
             {

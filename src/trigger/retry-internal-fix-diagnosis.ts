@@ -19,7 +19,14 @@ export const retryInternalFixDiagnosisTask = schemaTask({
       "requeue_internal_fix_diagnosis_after_model_auth_repair",
       { p_fix_run_id: fixRunId },
     );
-    if (error || !data || data.fixRunId !== fixRunId || data.retryGeneration !== 1) {
+    if (
+      error ||
+      !data ||
+      data.fixRunId !== fixRunId ||
+      !Number.isInteger(data.retryGeneration) ||
+      data.retryGeneration < 1 ||
+      data.retryGeneration > 2
+    ) {
       return { status: "blocked", category: "internal_diagnosis_retry_not_eligible" } as const;
     }
     if (data.status === "already_used") {

@@ -28,8 +28,8 @@ const canonicalFixture = {
   productId: "de1f2a12-de3c-4644-8892-b6c2d458a300",
   dependencyId: "3cfb1bb7-1d76-4692-932b-24e94b66f346",
   workspaceDependencyId: "867eb92b-2ed2-4917-ac68-44a22773e369",
-  repositoryId: "3b4f4fe6-cbbd-4bbd-a340-71f7c268e2c4",
-  productRepositoryId: "a244fd9a-cc2b-49d2-aaa8-36147437837e",
+  repositoryId: "b2abf377-2dbc-4b9c-b546-b0604f3ee4fe",
+  productRepositoryId: "ed0fa73d-3dd2-46b4-a8bd-a603919e01a0",
 };
 
 // The Supabase test client has no generated Database type here; fixture assertions validate each returned shape.
@@ -117,7 +117,7 @@ async function createTarget(
         connection_id: connection.id,
         external_id: 4_000_000 + Math.floor(Math.random() * 1_000_000),
         owner: identity ? "michelpronkk-oss" : "fixture-owner",
-        name: identity ? "auterim" : `repo-${label}`,
+        name: identity ? "auterim-m15-github-qa" : `repo-${label}`,
         default_branch: "main",
         private: true,
         selected_for_protection: true,
