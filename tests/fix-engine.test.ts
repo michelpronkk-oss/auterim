@@ -1019,6 +1019,37 @@ describe("M15.78 Fix Engine V1 deterministic contracts", () => {
     expect(result.usage.inputTokens).toBe(10);
     expect(result.outputFingerprint).toMatch(/^[a-f0-9]{64}$/);
   });
+  it("uses Azure API-key authentication and reports only a safe HTTP rejection category", async () => {
+    let capturedHeaders: Headers | undefined;
+    const model = new StructuredChatCompletionFixModel({
+      provider: "azure-openai",
+      model: "gpt-6.1-sol",
+      endpoint: "https://models.example.test/openai/v1/chat/completions",
+      apiKey: "test-only-secret-value",
+      schemaVersion: "diagnosis-v1",
+      promptContractVersion: "fix-prompts-v1",
+      fetcher: async (_input, init) => {
+        capturedHeaders = new Headers(init?.headers);
+        return new Response(JSON.stringify({ error: { message: "sensitive provider body" } }), {
+          status: 401,
+        });
+      },
+    });
+
+    await expect(
+      model.diagnose({
+        semanticRoute: "deprecation",
+        graphEvidence: [],
+        files: [{ path: "src/client.ts", content: "const x=1" }],
+        commitSha: sha,
+        repositoryTextIsUntrusted: true,
+        executableCommandsAllowed: false,
+        contextFingerprint: "b".repeat(64),
+      }),
+    ).rejects.toThrow("fix_model_provider_rejected_401");
+    expect(capturedHeaders?.get("api-key")).toBe("test-only-secret-value");
+    expect(capturedHeaders?.has("authorization")).toBe(false);
+  });
   it("benchmark scorer separates correctness, test/build rates, minimality, risk edits and cost", () => {
     const report = scoreFixBenchmark({
       provider: "fixture",
