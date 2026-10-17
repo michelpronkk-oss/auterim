@@ -23,12 +23,12 @@ const SOURCE_BASELINE =
   "Internal QA provider bulletin: endpoint https://api.openai.com/v1/auterim-m1578r-old is currently supported.";
 const SOURCE_CHANGED =
   "Internal QA provider bulletin: endpoint https://api.openai.com/v1/auterim-m1578r-old is deprecated; use https://api.openai.com/v1/auterim-m1578r-new instead.";
-const REQUIRED_FIXTURE_PATHS = [
+export const M1578R_REQUIRED_FIXTURE_PATHS = [
   "package.json",
   "package-lock.json",
   "jest.config.js",
   "src/endpoint.js",
-  "src/types.ts",
+  "src/typecheck.ts",
   "test/endpoint.test.js",
   "tsconfig.json",
 ] as const;
@@ -417,7 +417,7 @@ async function inspectReadiness(expectedFixtureCommitSha?: string): Promise<Read
       owner: TARGET.owner,
       repository: TARGET.repository,
       defaultBranch: repository.default_branch,
-      requiredPaths: [...REQUIRED_FIXTURE_PATHS],
+      requiredPaths: [...M1578R_REQUIRED_FIXTURE_PATHS],
     });
   } catch (error) {
     return {
