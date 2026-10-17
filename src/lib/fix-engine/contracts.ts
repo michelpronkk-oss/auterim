@@ -154,6 +154,13 @@ export const PatchProposalSchema = z
     attemptIdentity: z.string().uuid(),
   })
   .strict();
+export const PatchModelProposalSchema = PatchProposalSchema.omit({
+  baseSha: true,
+  planFingerprint: true,
+  evidenceFingerprint: true,
+  attemptIdentity: true,
+});
+export type PatchModelProposal = z.infer<typeof PatchModelProposalSchema>;
 
 export const FixStageSchema = z.enum([
   "diagnose",

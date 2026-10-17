@@ -15,7 +15,7 @@ import {
   type ModelEnvelope,
 } from "@/lib/fix-engine/model";
 import type { FixStageProcessor } from "@/lib/fix-engine/stage-runtime";
-import { validatePatchProposal } from "@/lib/fix-engine/patch";
+import { hydratePatchProposal, validatePatchProposal } from "@/lib/fix-engine/patch";
 import { SupabasePrivatePatchArtifactStore } from "@/lib/fix-engine/artifact-store";
 import { withExactBaseGitHubSnapshot } from "@/lib/fix-engine/sandbox";
 import { resolveVerificationProfile } from "@/lib/fix-engine/verification-profile";
@@ -715,10 +715,13 @@ export function createFixEngineStageProcessor(
         dependencies.model,
       );
       const attemptId = deterministicAttemptUuid(run.id, stageId, attemptNumber);
-      const proposal =
-        typeof envelope.value === "object" && envelope.value !== null
-          ? { ...envelope.value, attemptIdentity: attemptId }
-          : envelope.value;
+      const proposal = hydratePatchProposal({
+        proposal: envelope.value,
+        expectedBaseSha: run.commit_sha,
+        expectedPlanFingerprint: planRow.plan_fingerprint,
+        expectedEvidenceFingerprint: run.evidence_fingerprint,
+        attemptIdentity: attemptId,
+      });
       const validated = validatePatchProposal({
         proposal,
         plan,

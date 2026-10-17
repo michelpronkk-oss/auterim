@@ -460,7 +460,7 @@ describe.skipIf(!enabled)(
             riskFactors: [],
           });
         },
-        proposePatch: async (context, _diagnosis, plan) =>
+        proposePatch: async () =>
           envelope("patch", "m1578-deterministic-model-v1", {
             unifiedDiff: [
               `diff --git a/${edge.evidence_path} b/${edge.evidence_path}`,
@@ -471,10 +471,6 @@ describe.skipIf(!enabled)(
               '+export const after = "candidate";',
               "",
             ].join("\n"),
-            baseSha: context.commitSha,
-            planFingerprint: stableFingerprint(plan),
-            evidenceFingerprint: run!.evidence_fingerprint,
-            attemptIdentity: "c0000000-0000-4000-8000-000000000001",
           }),
       };
       const repositoryProvider = {

@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import { PatchProposalSchema, isSafeRepoPath, type FixPlan } from "@/lib/fix-engine/contracts";
+import {
+  PatchModelProposalSchema,
+  PatchProposalSchema,
+  isSafeRepoPath,
+  type FixPlan,
+} from "@/lib/fix-engine/contracts";
 import { containsHighEntropyQuotedCredential } from "@/lib/fix-engine/model";
 
 export type ValidatedPatch = {
@@ -19,6 +24,23 @@ const secretPatterns = [
   /\bBearer\s+[A-Za-z0-9._~+/-]{16,}/i,
   /\b(?:api[_-]?key|secret|password|token)\s*[:=]\s*["'][^"']{12,}["']/i,
 ];
+
+export function hydratePatchProposal(input: {
+  proposal: unknown;
+  expectedBaseSha: string;
+  expectedPlanFingerprint: string;
+  expectedEvidenceFingerprint: string;
+  attemptIdentity: string;
+}) {
+  const parsed = PatchModelProposalSchema.parse(input.proposal);
+  return PatchProposalSchema.parse({
+    ...parsed,
+    baseSha: input.expectedBaseSha,
+    planFingerprint: input.expectedPlanFingerprint,
+    evidenceFingerprint: input.expectedEvidenceFingerprint,
+    attemptIdentity: input.attemptIdentity,
+  });
+}
 
 function parseDiffPaths(diff: string) {
   const paths: string[] = [];
