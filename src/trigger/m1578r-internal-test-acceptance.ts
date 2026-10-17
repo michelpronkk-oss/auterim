@@ -17,6 +17,7 @@ const TARGET = {
   accountLogin: "michelpronkk-oss",
   dependencyId: "3cfb1bb7-1d76-4692-932b-24e94b66f346",
   workspaceDependencyId: "867eb92b-2ed2-4917-ac68-44a22773e369",
+  fixRunId: "7de04a75-aefa-43a6-ba64-9fa4a70e0ec1",
 } as const;
 
 const SOURCE_ACCEPTANCE_KEY = "m1578r-internal-qa-fix-engine-v1";
@@ -54,6 +55,7 @@ export function hasExpectedActiveProductRepositoryMappings(
 
 export const M1578RInternalTestAcceptanceInputSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("verify") }).strict(),
+  z.object({ action: z.literal("read_fix_status") }).strict(),
   z.object({ action: z.literal("diagnose_entitlement") }).strict(),
   z
     .object({
@@ -504,6 +506,200 @@ async function inspectReadiness(expectedFixtureCommitSha?: string): Promise<Read
   };
 }
 
+export function sanitizeM1578RVerificationChecks(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
+    const row = asRecord(candidate);
+    if (!row) return [];
+    const commandClass = row?.commandClass;
+    const status = row?.status;
+    if (
+      typeof commandClass !== "string" ||
+      !/^[a-z0-9_-]{1,80}$/.test(commandClass) ||
+      (status !== "passed" && status !== "failed")
+    ) {
+      return [];
+    }
+    const diagnosticCategory =
+      typeof row.diagnosticCategory === "string" &&
+      /^[a-z0-9_]{1,100}$/.test(row.diagnosticCategory)
+        ? row.diagnosticCategory
+        : null;
+    return [
+      {
+        commandClass,
+        status,
+        durationMs:
+          Number.isSafeInteger(row.durationMs) && Number(row.durationMs) >= 0
+            ? Number(row.durationMs)
+            : null,
+        outputBytes:
+          Number.isSafeInteger(row.outputBytes) && Number(row.outputBytes) >= 0
+            ? Number(row.outputBytes)
+            : null,
+        diagnosticCategory,
+      },
+    ];
+  });
+}
+
+async function inspectM1578RFixStatus() {
+  const client = createSupabaseServerClient();
+  const [
+    runResult,
+    stageResult,
+    attemptResult,
+    diagnosisResult,
+    planResult,
+    patchResult,
+    verificationResult,
+    riskResult,
+    externalResult,
+    prResult,
+  ] = await Promise.all([
+    client
+      .from("fix_runs")
+      .select(
+        "id,workspace_id,product_id,repository_id,source_change_id,source_mode,processing_mode,provenance_mode,status,current_stage,risk_level,failure_category,commit_sha,review_disposition,review_reason,production_exposure_state",
+      )
+      .eq("id", TARGET.fixRunId)
+      .eq("workspace_id", TARGET.workspaceId)
+      .eq("product_id", TARGET.productId)
+      .eq("repository_id", TARGET.repositoryId)
+      .maybeSingle(),
+    client
+      .from("fix_stage_queue")
+      .select("id,stage,status,attempt_count,operator_retry_count,failure_category")
+      .eq("fix_run_id", TARGET.fixRunId)
+      .eq("workspace_id", TARGET.workspaceId)
+      .order("created_at"),
+    client
+      .from("fix_model_attempts")
+      .select(
+        "id,stage,attempt_number,provider,model,model_version,schema_version,prompt_contract_version,status,input_fingerprint,output_fingerprint,latency_ms,input_tokens,output_tokens,cost_microusd,failure_category",
+      )
+      .eq("fix_run_id", TARGET.fixRunId)
+      .eq("workspace_id", TARGET.workspaceId)
+      .order("created_at"),
+    client
+      .from("fix_diagnoses")
+      .select(
+        "id,provider,model,model_version,schema_version,prompt_contract_version,input_fingerprint,output_fingerprint,latency_ms,input_tokens,output_tokens,cost_microusd,created_at",
+      )
+      .eq("fix_run_id", TARGET.fixRunId)
+      .eq("workspace_id", TARGET.workspaceId)
+      .order("created_at"),
+    client
+      .from("fix_plans")
+      .select(
+        "id,plan_version,plan_fingerprint,provider,model,schema_version,prompt_contract_version,created_at",
+      )
+      .eq("fix_run_id", TARGET.fixRunId)
+      .eq("workspace_id", TARGET.workspaceId)
+      .order("plan_version"),
+    client
+      .from("fix_patches")
+      .select(
+        "id,plan_id,attempt_number,base_sha,patch_fingerprint,changed_paths,line_count,byte_count,status,created_at,expires_at",
+      )
+      .eq("fix_run_id", TARGET.fixRunId)
+      .eq("workspace_id", TARGET.workspaceId)
+      .order("attempt_number"),
+    client
+      .from("fix_verification_runs")
+      .select("id,profile_id,status,checks,duration_ms,patch_fingerprint,attempt_number,created_at")
+      .eq("fix_run_id", TARGET.fixRunId)
+      .eq("workspace_id", TARGET.workspaceId)
+      .order("attempt_number"),
+    client
+      .from("fix_risk_assessments")
+      .select(
+        "id,risk_version,risk_level,review_required,review_reason,input_fingerprint,created_at",
+      )
+      .eq("fix_run_id", TARGET.fixRunId)
+      .eq("workspace_id", TARGET.workspaceId)
+      .maybeSingle(),
+    client
+      .from("fix_external_operations")
+      .select("operation_kind,status,created_at")
+      .eq("fix_run_id", TARGET.fixRunId)
+      .eq("workspace_id", TARGET.workspaceId)
+      .order("created_at"),
+    client
+      .from("fix_pr_outcomes")
+      .select("status,merged,deployed,created_at")
+      .eq("fix_run_id", TARGET.fixRunId)
+      .eq("workspace_id", TARGET.workspaceId)
+      .order("created_at"),
+  ]);
+  if (
+    [
+      runResult,
+      stageResult,
+      attemptResult,
+      diagnosisResult,
+      planResult,
+      patchResult,
+      verificationResult,
+      riskResult,
+      externalResult,
+      prResult,
+    ].some((result) => result.error)
+  ) {
+    return { status: "unavailable", category: "fix_status_readback_unavailable" } as const;
+  }
+  const run = runResult.data;
+  if (!run) return { status: "not_found", category: "fix_status_readback_not_found" } as const;
+  const scopeMatches =
+    run.workspace_id === TARGET.workspaceId &&
+    run.product_id === TARGET.productId &&
+    run.repository_id === TARGET.repositoryId &&
+    run.source_mode === "internal_test" &&
+    run.processing_mode === "evidence_only" &&
+    run.provenance_mode === "evidence_only";
+  if (!scopeMatches) return { status: "blocked", category: "fix_status_scope_mismatch" } as const;
+  return {
+    status: "readback",
+    scopeMatches,
+    fixRun: {
+      id: run.id,
+      workspaceId: run.workspace_id,
+      productId: run.product_id,
+      repositoryId: run.repository_id,
+      sourceChangeId: run.source_change_id,
+      sourceMode: run.source_mode,
+      processingMode: run.processing_mode,
+      provenanceMode: run.provenance_mode,
+      status: run.status,
+      currentStage: run.current_stage,
+      riskLevel: run.risk_level,
+      failureCategory: run.failure_category,
+      commitSha: run.commit_sha,
+      reviewDisposition: run.review_disposition,
+      reviewReason: run.review_reason,
+      productionExposureState: run.production_exposure_state,
+    },
+    stages: stageResult.data ?? [],
+    modelAttempts: attemptResult.data ?? [],
+    diagnoses: diagnosisResult.data ?? [],
+    plans: planResult.data ?? [],
+    patches: patchResult.data ?? [],
+    verificationRuns: (verificationResult.data ?? []).map((verification) => ({
+      id: verification.id,
+      profileId: verification.profile_id,
+      status: verification.status,
+      checks: sanitizeM1578RVerificationChecks(verification.checks),
+      durationMs: verification.duration_ms,
+      patchFingerprint: verification.patch_fingerprint,
+      attemptNumber: verification.attempt_number,
+      createdAt: verification.created_at,
+    })),
+    riskAssessment: riskResult.data,
+    externalOperations: externalResult.data ?? [],
+    prOutcomes: prResult.data ?? [],
+  } as const;
+}
+
 /**
  * Operator-only, fixed-scope M15.78R entry point. The verify action is read-only;
  * create_source invokes the existing idempotent internal-test persistence flow.
@@ -516,6 +712,7 @@ export const m1578rInternalTestAcceptanceTask = schemaTask({
   maxDuration: 180,
   queue: { concurrencyLimit: 1 },
   run: async (input) => {
+    if (input.action === "read_fix_status") return inspectM1578RFixStatus();
     if (input.action === "diagnose_entitlement") {
       const client = createSupabaseServerClient();
       const { data: snapshot, error: snapshotError } = await client.rpc(
