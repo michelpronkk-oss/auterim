@@ -303,6 +303,18 @@ export async function runPersistedFixStage(input: {
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
+    if (error instanceof VerificationRunnerFailure && error.diagnostics.length > 0) {
+      // Deliberately exclude request identities, artifact URLs, response bodies and headers.
+      console.warn(
+        "fix_engine_verification_runner_failure",
+        JSON.stringify({
+          stage: input.stage,
+          category: error.category,
+          retryable: error.retryable,
+          diagnostics: error.diagnostics,
+        }),
+      );
+    }
     const retryable =
       isVerificationRunnerRetryableFailure(error) ||
       (!(error instanceof VerificationRunnerFailure) &&

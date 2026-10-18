@@ -1,9 +1,9 @@
 import { createHmac, generateKeyPairSync, sign } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   canonicalJson,
   sha256,
@@ -245,6 +245,7 @@ async function signedFetch(
 describe("M15.78R remote verification runner", () => {
   const cleanups: Array<() => Promise<void>> = [];
   afterEach(async () => {
+    vi.unstubAllGlobals();
     for (const cleanup of cleanups.splice(0)) await cleanup();
   });
 
@@ -549,6 +550,29 @@ describe("M15.78R remote verification runner", () => {
     expect(response.status).toBe(400);
   });
 
+  it("reports an identity-fingerprint rejection at admission without accepting the job", async () => {
+    const { base, root } = await startRunner(async (request) => resultFor(request));
+    const request = makeRequest({ requestFingerprint: "f".repeat(64) });
+    const client = new RemoteVerificationRunnerClient({
+      url: base,
+      authSecret: AUTH_SECRET,
+      maxWaitMs: 5_000,
+    });
+    await expect(client.execute(request)).rejects.toMatchObject({
+      category: "runner_result_invalid",
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 400,
+          responseCategory: "verification_request_fingerprint_mismatch",
+          reason: "http_error",
+        },
+      ],
+    });
+    expect(await readdir(path.join(root, "jobs"))).toEqual(["artifacts"]);
+    expect(await readdir(path.join(root, "jobs", "artifacts"))).toEqual([]);
+  });
+
   it("rejects artifact path substitution before enqueue", async () => {
     const { base } = await startRunner(async (request) => resultFor(request));
     const request = makeRequest();
@@ -562,11 +586,75 @@ describe("M15.78R remote verification runner", () => {
     );
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "verification_patch_artifact_path_invalid" });
+
+    const clientRequest = makeRequest({}, "eb02bb5c-f8f8-4f52-8c74-8d11e13ed37f");
+    clientRequest.patch.url = `http://127.0.0.1:54321/storage/v1/object/sign/fix-engine-artifacts/${clientRequest.identity.fixRunId}/../other.diff?token=local`;
+    await expect(
+      new RemoteVerificationRunnerClient({
+        url: base,
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 5_000,
+      }).execute(clientRequest),
+    ).rejects.toMatchObject({
+      category: "patch_identity_mismatch",
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 400,
+          responseCategory: "verification_patch_artifact_path_invalid",
+          reason: "http_error",
+        },
+      ],
+    });
   });
 
-  it("rejects an invalid signed cache before downloading artifacts", async () => {
+  it("preserves an artifact-download admission failure and writes no durable job record", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "m1578r-runner-admission-test-"));
+    const jobStorePath = path.join(root, "jobs");
+    const runner = createVerificationRunnerServer({
+      authSecret: AUTH_SECRET,
+      artifactOrigin: "http://127.0.0.1:54321",
+      cachePublicKey: CACHE_KEYS.publicKey.export({ type: "spki", format: "pem" }).toString(),
+      jobStorePath,
+      workRoot: path.join(root, "work"),
+      execute: async (request) => resultFor(request),
+    });
+    const address = await runner.listen(0, "127.0.0.1");
+    cleanups.push(async () => {
+      await runner.close();
+      await rm(root, { recursive: true, force: true });
+    });
+    const originalFetch = globalThis.fetch.bind(globalThis);
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const target = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (target.port === "54321") return new Response("denied", { status: 403 });
+      return originalFetch(input, init);
+    });
+    await expect(
+      new RemoteVerificationRunnerClient({
+        url: `http://127.0.0.1:${address.port}`,
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 5_000,
+      }).execute(makeRequest()),
+    ).rejects.toMatchObject({
+      category: "runner_unavailable",
+      retryable: true,
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 503,
+          responseCategory: "verification_artifact_unavailable",
+          reason: "http_error",
+        },
+      ],
+    });
+    expect(await readdir(jobStorePath)).toEqual(["artifacts"]);
+    expect(await readdir(path.join(jobStorePath, "artifacts"))).toEqual([]);
+  });
+
+  it("preserves sanitized admission status/category and proves cache rejection precedes job persistence", async () => {
     const keys = generateKeyPairSync("ed25519");
-    const { base } = await startRunner(undefined, {
+    const { base, root } = await startRunner(undefined, {
       cachePublicKey: keys.publicKey.export({ type: "spki", format: "pem" }).toString(),
     });
     const client = new RemoteVerificationRunnerClient({
@@ -574,7 +662,137 @@ describe("M15.78R remote verification runner", () => {
       authSecret: AUTH_SECRET,
       maxWaitMs: 5_000,
     });
-    await expect(client.execute(makeRequest())).rejects.toThrow("cache_signature_invalid");
+    await expect(client.execute(makeRequest())).rejects.toMatchObject({
+      category: "cache_signature_invalid",
+      retryable: false,
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 400,
+          responseCategory: "verification_cache_signature_invalid",
+          reason: "http_error",
+        },
+      ],
+    });
+    const jobs = path.join(root, "jobs");
+    const jobEntries = await readdir(jobs);
+    expect(jobEntries).toEqual(["artifacts"]);
+    const spoolEntries = await readdir(path.join(jobs, "artifacts"));
+    expect(spoolEntries).toEqual([]);
+  });
+
+  it("preserves an approved protocol response category in bounded diagnostics", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: "runner_protocol_unsupported" }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    const client = new RemoteVerificationRunnerClient({
+      url: "https://runner.invalid",
+      authSecret: AUTH_SECRET,
+      maxWaitMs: 1_000,
+    });
+    let caught: unknown;
+    try {
+      await client.execute(makeRequest());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_protocol_unsupported",
+      retryable: false,
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 400,
+          responseCategory: "runner_protocol_unsupported",
+          reason: "http_error",
+        },
+      ],
+    });
+  });
+
+  it("maps an unknown admission response without persisting arbitrary response categories", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: "provider_returned_untrusted_detail" }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    const client = new RemoteVerificationRunnerClient({
+      url: "https://runner.invalid",
+      authSecret: AUTH_SECRET,
+      maxWaitMs: 1_000,
+    });
+    let caught: unknown;
+    try {
+      await client.execute(makeRequest());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_result_invalid",
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 400,
+          responseCategory: "unrecognized",
+          reason: "http_error",
+        },
+      ],
+    });
+    expect(JSON.stringify(caught)).not.toContain("provider_returned_untrusted_detail");
+  });
+
+  it("reports only the safe field name for an accepted-job identity mismatch", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              jobId: "untrusted-job-id",
+              requestFingerprint: "untrusted-request-fingerprint",
+            }),
+            { status: 202, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    );
+    const client = new RemoteVerificationRunnerClient({
+      url: "https://runner.invalid",
+      authSecret: AUTH_SECRET,
+      maxWaitMs: 1_000,
+    });
+    let caught: unknown;
+    try {
+      await client.execute(makeRequest());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_result_invalid",
+      retryable: false,
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 202,
+          responseCategory: null,
+          reason: "accepted_identity_mismatch",
+          identityField: "jobId",
+        },
+      ],
+    });
+    expect(JSON.stringify(caught)).not.toContain("untrusted-job-id");
+    expect(JSON.stringify(caught)).not.toContain("untrusted-request-fingerprint");
   });
 
   it("rejects a signed result bound to a different commit", async () => {
@@ -593,7 +811,53 @@ describe("M15.78R remote verification runner", () => {
         authSecret: AUTH_SECRET,
         maxWaitMs: 5_000,
       }).execute(makeRequest()),
-    ).rejects.toThrow("runner_result_invalid");
+    ).rejects.toMatchObject({
+      category: "runner_result_invalid",
+      diagnostics: [
+        {
+          phase: "result_validation",
+          httpStatus: 200,
+          responseCategory: null,
+          reason: "result_identity_mismatch",
+          identityField: "baseCommitSha",
+        },
+      ],
+    });
+  });
+
+  it("reports result-signature failure without exposing signature material", async () => {
+    const { base } = await startRunner(async (request) => resultFor(request));
+    const originalFetch = globalThis.fetch.bind(globalThis);
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await originalFetch(input, init);
+      if (response.status !== 200) return response;
+      const body = await response.arrayBuffer();
+      const headers = new Headers(response.headers);
+      headers.set("x-auterim-result-signature", "0".repeat(64));
+      return new Response(body, { status: 200, headers });
+    });
+    let caught: unknown;
+    try {
+      await new RemoteVerificationRunnerClient({
+        url: base,
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 5_000,
+      }).execute(makeRequest());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_result_invalid",
+      diagnostics: [
+        {
+          phase: "result_signature",
+          httpStatus: 200,
+          responseCategory: null,
+          reason: "result_signature_mismatch",
+        },
+      ],
+    });
+    expect(JSON.stringify(caught)).not.toContain("0".repeat(64));
   });
 
   it("recovers an interrupted immutable job record after runner restart", async () => {
