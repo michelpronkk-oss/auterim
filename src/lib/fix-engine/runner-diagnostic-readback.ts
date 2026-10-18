@@ -22,6 +22,15 @@ const runnerDiagnosticEventSchema = z
       ),
     retryable: z.boolean(),
     diagnostics: z.array(VerificationRunnerFailureDiagnosticSchema).max(4),
+    job_id: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .nullable(),
+    request_fingerprint: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .nullable(),
+    admission_state: z.enum(["not_sent", "unconfirmed", "rejected", "accepted"]).nullable(),
     created_at: z.string().datetime({ offset: true }),
   })
   .strict()
@@ -30,7 +39,13 @@ const runnerDiagnosticEventSchema = z
       RETRYABLE_VERIFICATION_RUNNER_CATEGORIES as readonly string[]
     ).includes(event.failure_category);
     return event.retryable === expectedRetryable;
-  });
+  })
+  .refine((event) => {
+    if (event.job_id === null || event.request_fingerprint === null)
+      return event.job_id === null && event.request_fingerprint === null;
+    return event.admission_state !== null;
+  })
+  .refine((event) => event.admission_state !== "accepted" || event.job_id !== null);
 
 /** Returns null for malformed or unbounded rows; never forwards unknown DB fields. */
 export function sanitizeM1578RRunnerDiagnosticEvents(value: unknown) {
@@ -44,6 +59,9 @@ export function sanitizeM1578RRunnerDiagnosticEvents(value: unknown) {
     failureCategory: event.failure_category,
     retryable: event.retryable,
     diagnostics: event.diagnostics,
+    jobId: event.job_id,
+    requestFingerprint: event.request_fingerprint,
+    admissionState: event.admission_state,
     createdAt: event.created_at,
   }));
 }

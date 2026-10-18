@@ -121,6 +121,27 @@ async function completeClaimedStage(
   };
 }
 
+async function failClaimedVerificationStage(
+  client: ReturnType<typeof createSupabaseServerClient>,
+  stageId: string,
+  claimToken: string,
+  failureCategory: "verification_failed" | "verification_unsupported",
+) {
+  const { data, error } = await client.rpc("complete_fix_stage", {
+    p_stage_id: stageId,
+    p_claim_token: claimToken,
+    p_result: "failed",
+    p_failure_category: failureCategory,
+  });
+  if (error || !data || typeof data.status !== "string")
+    throw new Error("fix_stage_transition_failed");
+  return {
+    status: data.status,
+    nextStage: null,
+    failureCategory,
+  };
+}
+
 export function stageArtifactPersistenceFailureCategory(error: {
   message?: unknown;
   code?: unknown;
@@ -307,13 +328,29 @@ export async function runPersistedFixStage(input: {
       attemptNumber: claim.attemptNumber,
     });
     if (output.recordKind) {
-      const { error } = await client.rpc("record_fix_stage_artifact", {
-        p_fix_run_id: run.id,
-        p_stage_id: claim.stageId,
-        p_claim_token: claim.claimToken,
-        p_kind: output.recordKind,
-        p_payload: output.record,
-      });
+      const hasSignedRunnerEvidence =
+        output.recordKind === "verification" &&
+        typeof output.record.runnerEvidence === "object" &&
+        output.record.runnerEvidence !== null;
+      const { error } = await client.rpc(
+        hasSignedRunnerEvidence
+          ? "record_fix_verification_runner_result"
+          : "record_fix_stage_artifact",
+        hasSignedRunnerEvidence
+          ? {
+              p_fix_run_id: run.id,
+              p_stage_id: claim.stageId,
+              p_claim_token: claim.claimToken,
+              p_payload: output.record,
+            }
+          : {
+              p_fix_run_id: run.id,
+              p_stage_id: claim.stageId,
+              p_claim_token: claim.claimToken,
+              p_kind: output.recordKind,
+              p_payload: output.record,
+            },
+      );
       if (error) {
         if (output.recordKind === "patch" && typeof output.record.artifactPath === "string") {
           const persisted = await client
@@ -334,7 +371,22 @@ export async function runPersistedFixStage(input: {
         throw new Error(stageArtifactPersistenceFailureCategory(error));
       }
     }
-    const completed = await completeClaimedStage(client, claim.stageId, claim.claimToken);
+    const completed =
+      output.recordKind === "verification" && output.record.status === "failed"
+        ? await failClaimedVerificationStage(
+            client,
+            claim.stageId,
+            claim.claimToken,
+            "verification_failed",
+          )
+        : output.recordKind === "verification" && output.record.status === "unsupported"
+          ? await failClaimedVerificationStage(
+              client,
+              claim.stageId,
+              claim.claimToken,
+              "verification_unsupported",
+            )
+          : await completeClaimedStage(client, claim.stageId, claim.claimToken);
     return {
       ...completed,
       replayed: false,
@@ -353,18 +405,33 @@ export async function runPersistedFixStage(input: {
     let diagnosticData: unknown = null;
     let diagnosticPersistenceErrorCode: string | null = null;
     if (error instanceof VerificationRunnerFailure) {
-      // This RPC atomically appends the allowlisted diagnostic and applies the
-      // existing stage transition. It intentionally receives no URLs, headers,
-      // bodies, request identities, signatures, or source content.
+      // This RPC atomically appends allowlisted diagnostics and applies the
+      // existing stage transition. Correlation is limited to generated job and
+      // request fingerprints plus the admission state; no URL, header, body,
+      // signature, credential, or source content is accepted.
       try {
-        const diagnosticWrite = await client.rpc("complete_fix_stage_with_runner_diagnostics", {
-          p_stage_id: claim.stageId,
-          p_claim_token: claim.claimToken,
-          p_result: retryable ? "retry" : "failed",
-          p_failure_category: error.category,
-          p_retryable: error.retryable,
-          p_diagnostics: error.diagnostics,
-        });
+        const diagnosticWrite = error.correlation
+          ? await client.rpc("complete_fix_stage_with_runner_diagnostics_v2", {
+              p_stage_id: claim.stageId,
+              p_claim_token: claim.claimToken,
+              p_result: retryable ? "retry" : "failed",
+              p_failure_category: error.category,
+              p_retryable: error.retryable,
+              p_diagnostics: error.diagnostics,
+              p_correlation: {
+                jobId: error.correlation.jobId,
+                requestFingerprint: error.correlation.requestFingerprint,
+                admissionState: error.correlation.admissionState,
+              },
+            })
+          : await client.rpc("complete_fix_stage_with_runner_diagnostics", {
+              p_stage_id: claim.stageId,
+              p_claim_token: claim.claimToken,
+              p_result: retryable ? "retry" : "failed",
+              p_failure_category: error.category,
+              p_retryable: error.retryable,
+              p_diagnostics: error.diagnostics,
+            });
         diagnosticsPersisted = !diagnosticWrite.error && Boolean(diagnosticWrite.data);
         diagnosticData = diagnosticWrite.data;
         if (diagnosticWrite.error)
@@ -391,6 +458,13 @@ export async function runPersistedFixStage(input: {
             category: error.category,
             retryable: error.retryable,
             diagnostics: error.diagnostics,
+            ...(error.correlation
+              ? {
+                  jobId: error.correlation.jobId,
+                  requestFingerprint: error.correlation.requestFingerprint,
+                  admissionState: error.correlation.admissionState,
+                }
+              : {}),
           }),
         );
       }

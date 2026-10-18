@@ -21,8 +21,10 @@ import type { DependencyCacheManifestV2 } from "../../../verification-runner/con
 import {
   retryableRunnerFailure,
   terminalRunnerFailure,
+  withVerificationRunnerCorrelation,
   VERIFICATION_RUNNER_RESPONSE_CATEGORIES,
   VerificationRunnerFailure,
+  type VerificationRunnerAdmissionState,
   type VerificationRunnerFailureDiagnostic,
   type VerificationRunnerResponseCategory,
 } from "@/lib/fix-engine/verification-retry";
@@ -357,9 +359,56 @@ export class RemoteVerificationRunnerClient {
   }
 
   async execute(request: VerificationJobRequest) {
-    const validated = VerificationJobRequestSchema.parse(request);
+    const correlation = {
+      jobId: safeFingerprint((request as { jobId?: unknown } | null)?.jobId),
+      requestFingerprint: safeFingerprint(
+        (request as { requestFingerprint?: unknown } | null)?.requestFingerprint,
+      ),
+      admissionState: "not_sent" as VerificationRunnerAdmissionState,
+    };
+    let validated: VerificationJobRequest;
+    try {
+      validated = VerificationJobRequestSchema.parse(request);
+    } catch {
+      throw withVerificationRunnerCorrelation(
+        terminalRunnerFailure(
+          "runner_request_invalid",
+          diagnostic("admission", null, null, "request_schema_invalid"),
+        ),
+        correlation,
+      );
+    }
     if (validated.expiresAt <= Date.now() || validated.expiresAt > validated.issuedAt + 10 * 60_000)
-      throw new Error("verification_runner_capability_expired");
+      throw withVerificationRunnerCorrelation(
+        terminalRunnerFailure(
+          "runner_request_invalid",
+          diagnostic("admission", null, null, "request_capability_expired"),
+        ),
+        {
+          ...correlation,
+          jobId: validated.jobId,
+          requestFingerprint: validated.requestFingerprint,
+        },
+      );
+    correlation.jobId = validated.jobId;
+    correlation.requestFingerprint = validated.requestFingerprint;
+    try {
+      return await this.executeValidated(validated, correlation);
+    } catch (error) {
+      if (error instanceof VerificationRunnerFailure)
+        throw withVerificationRunnerCorrelation(error, correlation);
+      throw error;
+    }
+  }
+
+  private async executeValidated(
+    validated: VerificationJobRequest,
+    correlation: {
+      jobId: string | null;
+      requestFingerprint: string | null;
+      admissionState: VerificationRunnerAdmissionState;
+    },
+  ) {
     const postPath = "/v1/verification-jobs";
     const body = Buffer.from(canonicalJson(validated), "utf8");
     let response: Response | null = null;
@@ -385,6 +434,8 @@ export class RemoteVerificationRunnerClient {
       responseBytes = parsed.bytes;
     } catch (error) {
       // The POST may have reached the runner. Reconcile by immutable job ID before failing.
+      markTransportAdmissionUnconfirmed(correlation);
+      markResponseAdmissionUnconfirmed(response, correlation);
       observedDiagnostics.push(
         diagnostic(
           response ? "response_decode" : "admission",
@@ -408,7 +459,8 @@ export class RemoteVerificationRunnerClient {
       if (
         accepted.jobId !== validated.jobId ||
         accepted.requestFingerprint !== validated.requestFingerprint
-      )
+      ) {
+        correlation.admissionState = "unconfirmed";
         throw terminalRunnerFailure("runner_result_invalid", [
           diagnostic(
             "admission",
@@ -418,8 +470,16 @@ export class RemoteVerificationRunnerClient {
             accepted.jobId !== validated.jobId ? "jobId" : "requestFingerprint",
           ),
         ]);
+      }
+      correlation.admissionState = "accepted";
+    } else if (response && response.status >= 400 && response.status < 500) {
+      if (correlation.admissionState !== "accepted") correlation.admissionState = "rejected";
+    } else if (response && response.status >= 500) {
+      if (correlation.admissionState !== "accepted") correlation.admissionState = "unconfirmed";
     }
     while (true) {
+      if (response?.status === 200 && correlation.admissionState !== "accepted")
+        correlation.admissionState = "unconfirmed";
       if (response && response.status !== 202 && response.status !== 200) {
         throw combineDiagnostics(
           failureForResponse(value, response.status, responsePhase),
@@ -442,6 +502,7 @@ export class RemoteVerificationRunnerClient {
         try {
           result = validateResult(value, validated, response.status);
           assertSignedResult(response, responseBytes, result, this.config.authSecret);
+          correlation.admissionState = "accepted";
         } catch (error) {
           if (error instanceof VerificationRunnerFailure)
             throw combineDiagnostics(error, observedDiagnostics);
@@ -474,6 +535,9 @@ export class RemoteVerificationRunnerClient {
           // the durable job ID makes this safe if the original POST was only delayed.
           safelyResubmitted = true;
           responsePhase = "resubmission";
+          response = null;
+          value = null;
+          responseBytes = null;
           try {
             response = await fetch(new URL(postPath, this.baseUrl), {
               method: "POST",
@@ -496,7 +560,9 @@ export class RemoteVerificationRunnerClient {
               if (
                 acceptedBody.jobId !== validated.jobId ||
                 acceptedBody.requestFingerprint !== validated.requestFingerprint
-              )
+              ) {
+                if (correlation.admissionState !== "accepted")
+                  correlation.admissionState = "unconfirmed";
                 throw terminalRunnerFailure("runner_result_invalid", [
                   diagnostic(
                     "resubmission",
@@ -506,11 +572,21 @@ export class RemoteVerificationRunnerClient {
                     acceptedBody.jobId !== validated.jobId ? "jobId" : "requestFingerprint",
                   ),
                 ]);
+              }
+              correlation.admissionState = "accepted";
+            } else if (response.status >= 400 && response.status < 500) {
+              if (correlation.admissionState !== "accepted")
+                correlation.admissionState = "rejected";
+            } else if (response.status >= 500) {
+              if (correlation.admissionState !== "accepted")
+                correlation.admissionState = "unconfirmed";
             }
           } catch (error) {
             if (error instanceof VerificationRunnerFailure) {
               throw combineDiagnostics(error, observedDiagnostics);
             }
+            markTransportAdmissionUnconfirmed(correlation);
+            markResponseAdmissionUnconfirmed(response, correlation);
             observedDiagnostics.push(
               diagnostic(
                 response ? "response_decode" : "resubmission",
@@ -531,7 +607,9 @@ export class RemoteVerificationRunnerClient {
           if (
             bodyValue.jobId !== validated.jobId ||
             bodyValue.requestFingerprint !== validated.requestFingerprint
-          )
+          ) {
+            if (correlation.admissionState !== "accepted")
+              correlation.admissionState = "unconfirmed";
             throw terminalRunnerFailure("runner_result_invalid", [
               diagnostic(
                 "poll",
@@ -541,11 +619,19 @@ export class RemoteVerificationRunnerClient {
                 bodyValue.jobId !== validated.jobId ? "jobId" : "requestFingerprint",
               ),
             ]);
+          }
+          correlation.admissionState = "accepted";
+        } else if (response.status >= 400 && response.status < 500) {
+          if (correlation.admissionState !== "accepted") correlation.admissionState = "rejected";
+        } else if (response.status >= 500) {
+          if (correlation.admissionState !== "accepted") correlation.admissionState = "unconfirmed";
         }
         shouldPoll = response === null || response.status === 202;
       } catch (error) {
         if (error instanceof VerificationRunnerFailure)
           throw combineDiagnostics(error, observedDiagnostics);
+        markTransportAdmissionUnconfirmed(correlation);
+        markResponseAdmissionUnconfirmed(response, correlation);
         observedDiagnostics.push(
           diagnostic(
             response ? "response_decode" : "poll",
@@ -564,6 +650,32 @@ export class RemoteVerificationRunnerClient {
       }
     }
   }
+}
+
+function safeFingerprint(value: unknown): string | null {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : null;
+}
+
+function markResponseAdmissionUnconfirmed(
+  response: Response | null,
+  correlation: { admissionState: VerificationRunnerAdmissionState },
+) {
+  if (!response) return;
+  if (response.status >= 400 && response.status < 500) {
+    if (correlation.admissionState !== "accepted") correlation.admissionState = "rejected";
+  } else if (response.status >= 200 && response.status < 400) {
+    // Do not call a response accepted until the immutable request identity (for
+    // 202) or signed terminal result (for 200) has been validated.
+    if (correlation.admissionState !== "accepted") correlation.admissionState = "unconfirmed";
+  } else if (response.status >= 500) {
+    if (correlation.admissionState !== "accepted") correlation.admissionState = "unconfirmed";
+  }
+}
+
+function markTransportAdmissionUnconfirmed(correlation: {
+  admissionState: VerificationRunnerAdmissionState;
+}) {
+  if (correlation.admissionState !== "accepted") correlation.admissionState = "unconfirmed";
 }
 
 function isTimeout(error: unknown) {

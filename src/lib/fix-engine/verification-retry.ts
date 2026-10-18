@@ -10,6 +10,7 @@ export const RETRYABLE_VERIFICATION_RUNNER_CATEGORIES = [
 ] as const;
 
 export const TERMINAL_VERIFICATION_RUNNER_CATEGORIES = [
+  "runner_request_invalid",
   "runner_auth_failed",
   "runner_protocol_unsupported",
   "runner_result_invalid",
@@ -26,6 +27,21 @@ export type RetryableVerificationRunnerCategory =
   (typeof RETRYABLE_VERIFICATION_RUNNER_CATEGORIES)[number];
 export type TerminalVerificationRunnerCategory =
   (typeof TERMINAL_VERIFICATION_RUNNER_CATEGORIES)[number];
+
+export const VERIFICATION_RUNNER_ADMISSION_STATES = [
+  "not_sent",
+  "unconfirmed",
+  "rejected",
+  "accepted",
+] as const;
+export type VerificationRunnerAdmissionState =
+  (typeof VERIFICATION_RUNNER_ADMISSION_STATES)[number];
+
+export type VerificationRunnerCorrelation = {
+  jobId: string | null;
+  requestFingerprint: string | null;
+  admissionState: VerificationRunnerAdmissionState;
+};
 
 export const VERIFICATION_RUNNER_RESPONSE_CATEGORIES = [
   "runner_request_invalid",
@@ -91,6 +107,8 @@ const VERIFICATION_RUNNER_DIAGNOSTIC_PHASES = [
 ] as const;
 const VERIFICATION_RUNNER_DIAGNOSTIC_REASONS = [
   "http_error",
+  "request_schema_invalid",
+  "request_capability_expired",
   "accepted_identity_mismatch",
   "response_body_invalid",
   "response_body_too_large",
@@ -148,10 +166,23 @@ export class VerificationRunnerFailure extends Error {
     readonly category: RetryableVerificationRunnerCategory | TerminalVerificationRunnerCategory,
     readonly retryable: boolean,
     readonly diagnostics: readonly VerificationRunnerFailureDiagnostic[] = [],
+    readonly correlation: VerificationRunnerCorrelation | null = null,
   ) {
     super(category);
     this.name = "VerificationRunnerFailure";
   }
+}
+
+export function withVerificationRunnerCorrelation(
+  error: VerificationRunnerFailure,
+  correlation: VerificationRunnerCorrelation,
+) {
+  return new VerificationRunnerFailure(
+    error.category,
+    error.retryable,
+    error.diagnostics,
+    correlation,
+  );
 }
 
 export function retryableRunnerFailure(

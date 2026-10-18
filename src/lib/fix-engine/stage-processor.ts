@@ -939,6 +939,10 @@ export function createFixEngineStageProcessor(
                 localDependencyCache?.status === "available" ? localDependencyCache : null,
               remote,
             });
+            if (verificationExecutor.kind === "remote" && !executed.remoteResult)
+              throw new Error("verification_runner_signed_result_missing");
+            if (executed.remoteResult && executed.remoteResult.status !== executed.status)
+              throw new Error("verification_runner_result_status_mismatch");
             if (remote && snapshotArtifact) {
               await markPrivateVerificationSnapshotTerminal({
                 fixRunId: run.id,
@@ -951,6 +955,7 @@ export function createFixEngineStageProcessor(
               profile,
               checks: executed.checks,
               durationMs: executed.durationMs,
+              remoteResult: executed.remoteResult,
             };
           } catch (error) {
             if (
@@ -978,6 +983,19 @@ export function createFixEngineStageProcessor(
           profileId: materialized.profile.id,
           status,
           checks: materialized.checks,
+          ...(materialized.remoteResult
+            ? {
+                runnerEvidence: {
+                  jobId: materialized.remoteResult.jobId,
+                  requestFingerprint: materialized.remoteResult.requestFingerprint,
+                  resultFingerprint: materialized.remoteResult.resultFingerprint,
+                  protocolVersion: materialized.remoteResult.protocolVersion,
+                  runnerVersion: materialized.remoteResult.runnerVersion,
+                  runtimeImage: materialized.remoteResult.runtimeImage,
+                  resultSignatureValidated: true,
+                },
+              }
+            : {}),
           diagnosticSummary:
             status === "unsupported"
               ? (materialized.profile.reason ?? "verification_unsupported")
