@@ -18,7 +18,14 @@ import {
 } from "../../../verification-runner/contracts";
 import type { PrivateArtifactReference } from "@/lib/fix-engine/verification-artifacts";
 import type { DependencyCacheManifestV2 } from "../../../verification-runner/contracts";
-import { retryableRunnerFailure, terminalRunnerFailure } from "@/lib/fix-engine/verification-retry";
+import {
+  retryableRunnerFailure,
+  terminalRunnerFailure,
+  VERIFICATION_RUNNER_RESPONSE_CATEGORIES,
+  VerificationRunnerFailure,
+  type VerificationRunnerFailureDiagnostic,
+  type VerificationRunnerResponseCategory,
+} from "@/lib/fix-engine/verification-retry";
 
 function requestSignatureInput(
   method: string,
@@ -98,6 +105,52 @@ export async function parseBoundedJsonResponse(
   }
 }
 
+function diagnostic(
+  phase: VerificationRunnerFailureDiagnostic["phase"],
+  httpStatus: number | null,
+  value: unknown,
+  reason: VerificationRunnerFailureDiagnostic["reason"],
+  identityField?: VerificationRunnerFailureDiagnostic["identityField"],
+): VerificationRunnerFailureDiagnostic {
+  const category = responseFailure(value);
+  const approvedCategories = new Set<string>(VERIFICATION_RUNNER_RESPONSE_CATEGORIES);
+  const responseCategory: VerificationRunnerFailureDiagnostic["responseCategory"] = category
+    ? approvedCategories.has(category)
+      ? (category as VerificationRunnerResponseCategory)
+      : "unrecognized"
+    : null;
+  return {
+    phase,
+    httpStatus:
+      Number.isInteger(httpStatus) && httpStatus !== null && httpStatus >= 100 && httpStatus <= 599
+        ? httpStatus
+        : null,
+    responseCategory,
+    reason,
+    ...(identityField ? { identityField } : {}),
+  };
+}
+
+function combineDiagnostics(
+  error: VerificationRunnerFailure,
+  prior: readonly VerificationRunnerFailureDiagnostic[],
+) {
+  if (!prior.length) return error;
+  return new VerificationRunnerFailure(
+    error.category,
+    error.retryable,
+    [...prior, ...error.diagnostics].slice(-4),
+  );
+}
+
+function responseDecodeReason(error: unknown): VerificationRunnerFailureDiagnostic["reason"] {
+  if (error instanceof Error && error.message === "verification_runner_response_too_large")
+    return "response_body_too_large";
+  if (error instanceof Error && error.message === "verification_runner_response_invalid")
+    return "response_body_invalid";
+  return "response_body_unavailable";
+}
+
 function assertSignedResult(
   response: Response,
   bytes: Buffer,
@@ -105,68 +158,129 @@ function assertSignedResult(
   secret: string,
 ) {
   const providedText = response.headers.get("x-auterim-result-signature") ?? "";
-  if (!/^[a-f0-9]{64}$/.test(providedText)) throw terminalRunnerFailure("runner_result_invalid");
+  if (!/^[a-f0-9]{64}$/.test(providedText))
+    throw terminalRunnerFailure("runner_result_invalid", [
+      diagnostic("result_signature", response.status, null, "result_signature_missing"),
+    ]);
   const expected = createHmac("sha256", secret)
     .update(verificationResultSignatureInput(result.jobId, sha256(bytes)), "utf8")
     .digest();
   const provided = Buffer.from(providedText, "hex");
   if (provided.length !== expected.length || !timingSafeEqual(provided, expected))
-    throw terminalRunnerFailure("runner_result_invalid");
+    throw terminalRunnerFailure("runner_result_invalid", [
+      diagnostic("result_signature", response.status, null, "result_signature_mismatch"),
+    ]);
 }
 
-function validateResult(value: unknown, expected: VerificationJobRequest): VerificationJobResult {
-  const result = VerificationJobResultSchema.parse(value);
+function validateResult(
+  value: unknown,
+  expected: VerificationJobRequest,
+  httpStatus: number,
+): VerificationJobResult {
+  const parsed = VerificationJobResultSchema.safeParse(value);
+  if (!parsed.success)
+    throw terminalRunnerFailure("runner_result_invalid", [
+      diagnostic("result_validation", httpStatus, value, "result_schema_invalid"),
+    ]);
+  const result = parsed.data;
   const { resultFingerprint, ...base } = result;
-  if (
-    result.jobId !== expected.jobId ||
-    result.requestFingerprint !== expected.requestFingerprint ||
-    result.workspaceId !== expected.identity.workspaceId ||
-    result.productId !== expected.identity.productId ||
-    result.repositoryId !== expected.identity.repositoryId ||
-    result.repositoryIdentity.toLowerCase() !==
-      expected.identity.repositoryIdentity.toLowerCase() ||
-    result.baseCommitSha.toLowerCase() !== expected.identity.baseCommitSha.toLowerCase() ||
-    result.patchId !== expected.identity.patchId ||
-    result.snapshotFingerprint !== expected.identity.snapshotFingerprint ||
-    result.patchFingerprint !== expected.identity.patchFingerprint ||
-    result.cacheIdentityKey !== expected.identity.cacheIdentityKey ||
-    result.cacheTreeSha256 !== expected.identity.cacheTreeSha256 ||
-    result.runtimeImage !== expected.identity.image ||
-    result.profileId !== expected.identity.profileId ||
-    result.profileVersion !== expected.identity.profileVersion ||
-    sha256(canonicalJson(base)) !== resultFingerprint
-  )
-    throw terminalRunnerFailure("runner_result_invalid");
+  const identityChecks: Array<{
+    field: NonNullable<VerificationRunnerFailureDiagnostic["identityField"]>;
+    matches: boolean;
+  }> = [
+    { field: "jobId", matches: result.jobId === expected.jobId },
+    {
+      field: "requestFingerprint",
+      matches: result.requestFingerprint === expected.requestFingerprint,
+    },
+    { field: "workspaceId", matches: result.workspaceId === expected.identity.workspaceId },
+    { field: "productId", matches: result.productId === expected.identity.productId },
+    { field: "repositoryId", matches: result.repositoryId === expected.identity.repositoryId },
+    {
+      field: "repositoryIdentity",
+      matches:
+        result.repositoryIdentity.toLowerCase() ===
+        expected.identity.repositoryIdentity.toLowerCase(),
+    },
+    {
+      field: "baseCommitSha",
+      matches: result.baseCommitSha.toLowerCase() === expected.identity.baseCommitSha.toLowerCase(),
+    },
+    { field: "patchId", matches: result.patchId === expected.identity.patchId },
+    {
+      field: "snapshotFingerprint",
+      matches: result.snapshotFingerprint === expected.identity.snapshotFingerprint,
+    },
+    {
+      field: "patchFingerprint",
+      matches: result.patchFingerprint === expected.identity.patchFingerprint,
+    },
+    {
+      field: "cacheIdentityKey",
+      matches: result.cacheIdentityKey === expected.identity.cacheIdentityKey,
+    },
+    {
+      field: "cacheTreeSha256",
+      matches: result.cacheTreeSha256 === expected.identity.cacheTreeSha256,
+    },
+    { field: "runtimeImage", matches: result.runtimeImage === expected.identity.image },
+    { field: "profileId", matches: result.profileId === expected.identity.profileId },
+    {
+      field: "profileVersion",
+      matches: result.profileVersion === expected.identity.profileVersion,
+    },
+  ];
+  const mismatch = identityChecks.find((check) => !check.matches);
+  if (mismatch)
+    throw terminalRunnerFailure("runner_result_invalid", [
+      diagnostic(
+        "result_validation",
+        httpStatus,
+        value,
+        "result_identity_mismatch",
+        mismatch.field,
+      ),
+    ]);
+  if (sha256(canonicalJson(base)) !== resultFingerprint)
+    throw terminalRunnerFailure("runner_result_invalid", [
+      diagnostic("result_validation", httpStatus, null, "result_fingerprint_mismatch"),
+    ]);
   return result;
 }
 
-function failureForResponse(value: unknown, status: number) {
+function failureForResponse(
+  value: unknown,
+  status: number,
+  phase: VerificationRunnerFailureDiagnostic["phase"],
+) {
   const category = responseFailure(value);
+  const details = [diagnostic(phase, status, value, "http_error")];
   if (status === 401 || category === "runner_authentication_failed")
-    return terminalRunnerFailure("runner_auth_failed");
+    return terminalRunnerFailure("runner_auth_failed", details);
   if (category === "runner_protocol_unsupported")
-    return terminalRunnerFailure("runner_protocol_unsupported");
+    return terminalRunnerFailure("runner_protocol_unsupported", details);
   if (status === 503 && category === "verification_runner_queue_full")
-    return retryableRunnerFailure("runner_queue_full");
+    return retryableRunnerFailure("runner_queue_full", details);
   if (
     status === 503 &&
     ["verification_runner_state_unavailable", "verification_runner_state_corrupt"].includes(
       category ?? "",
     )
   )
-    return retryableRunnerFailure("runner_state_temporarily_unavailable");
-  if (status >= 500) return retryableRunnerFailure("runner_unavailable");
-  if (category?.includes("snapshot")) return terminalRunnerFailure("snapshot_identity_mismatch");
-  if (category?.includes("patch")) return terminalRunnerFailure("patch_identity_mismatch");
+    return retryableRunnerFailure("runner_state_temporarily_unavailable", details);
+  if (status >= 500) return retryableRunnerFailure("runner_unavailable", details);
+  if (category?.includes("snapshot"))
+    return terminalRunnerFailure("snapshot_identity_mismatch", details);
+  if (category?.includes("patch")) return terminalRunnerFailure("patch_identity_mismatch", details);
   if (category?.includes("cache_signature"))
-    return terminalRunnerFailure("cache_signature_invalid");
-  if (category?.includes("cache_tree")) return terminalRunnerFailure("cache_tree_invalid");
-  if (category?.includes("cache")) return terminalRunnerFailure("cache_identity_mismatch");
+    return terminalRunnerFailure("cache_signature_invalid", details);
+  if (category?.includes("cache_tree")) return terminalRunnerFailure("cache_tree_invalid", details);
+  if (category?.includes("cache")) return terminalRunnerFailure("cache_identity_mismatch", details);
   if (category === "verification_command_unsupported")
-    return terminalRunnerFailure("verification_unsupported");
+    return terminalRunnerFailure("verification_unsupported", details);
   if (category === "verification_command_failed")
-    return terminalRunnerFailure("verification_failed");
-  return terminalRunnerFailure("runner_result_invalid");
+    return terminalRunnerFailure("verification_failed", details);
+  return terminalRunnerFailure("runner_result_invalid", details);
 }
 
 export function createVerificationJobRequest(input: {
@@ -253,6 +367,8 @@ export class RemoteVerificationRunnerClient {
     let responseBytes: Buffer | null = null;
     let lastTransportFailure:
       "runner_transport_ambiguous" | "runner_timeout_when_execution_may_continue" | null = null;
+    let responsePhase: VerificationRunnerFailureDiagnostic["phase"] = "admission";
+    const observedDiagnostics: VerificationRunnerFailureDiagnostic[] = [];
     try {
       response = await fetch(new URL(postPath, this.baseUrl), {
         method: "POST",
@@ -269,6 +385,14 @@ export class RemoteVerificationRunnerClient {
       responseBytes = parsed.bytes;
     } catch (error) {
       // The POST may have reached the runner. Reconcile by immutable job ID before failing.
+      observedDiagnostics.push(
+        diagnostic(
+          response ? "response_decode" : "admission",
+          response?.status ?? null,
+          null,
+          response ? responseDecodeReason(error) : "transport_ambiguous",
+        ),
+      );
       response = null;
       lastTransportFailure = isTimeout(error)
         ? "runner_timeout_when_execution_may_continue"
@@ -285,25 +409,55 @@ export class RemoteVerificationRunnerClient {
         accepted.jobId !== validated.jobId ||
         accepted.requestFingerprint !== validated.requestFingerprint
       )
-        throw terminalRunnerFailure("runner_result_invalid");
+        throw terminalRunnerFailure("runner_result_invalid", [
+          diagnostic(
+            "admission",
+            response.status,
+            null,
+            "accepted_identity_mismatch",
+            accepted.jobId !== validated.jobId ? "jobId" : "requestFingerprint",
+          ),
+        ]);
     }
     while (true) {
       if (response && response.status !== 202 && response.status !== 200) {
-        throw failureForResponse(value, response.status);
+        throw combineDiagnostics(
+          failureForResponse(value, response.status, responsePhase),
+          observedDiagnostics,
+        );
       }
       if (response?.status === 200) {
         const failed = responseFailure(value);
-        if (failed) throw failureForResponse(value, response.status);
-        if (!responseBytes) throw terminalRunnerFailure("runner_result_invalid");
-        const result = validateResult(value, validated);
-        assertSignedResult(response, responseBytes, result, this.config.authSecret);
+        if (failed)
+          throw combineDiagnostics(
+            failureForResponse(value, response.status, "result_validation"),
+            observedDiagnostics,
+          );
+        if (!responseBytes)
+          throw terminalRunnerFailure("runner_result_invalid", [
+            ...observedDiagnostics,
+            diagnostic("response_decode", response.status, null, "response_body_unavailable"),
+          ]);
+        let result: VerificationJobResult;
+        try {
+          result = validateResult(value, validated, response.status);
+          assertSignedResult(response, responseBytes, result, this.config.authSecret);
+        } catch (error) {
+          if (error instanceof VerificationRunnerFailure)
+            throw combineDiagnostics(error, observedDiagnostics);
+          throw error;
+        }
         return result;
       }
       if (!shouldPoll && response) throw new Error("verification_runner_response_invalid");
       if (Date.now() - started >= maxWait)
-        throw retryableRunnerFailure(lastTransportFailure ?? "runner_poll_timeout");
+        throw retryableRunnerFailure(lastTransportFailure ?? "runner_poll_timeout", [
+          ...observedDiagnostics,
+          diagnostic("poll", null, null, "transport_ambiguous"),
+        ]);
       await new Promise((resolve) => setTimeout(resolve, 1_000));
       const statusPath = `/v1/verification-jobs/${validated.jobId}`;
+      responsePhase = "poll";
       try {
         response = await fetch(new URL(statusPath, this.baseUrl), {
           method: "GET",
@@ -319,6 +473,7 @@ export class RemoteVerificationRunnerClient {
           // A lost POST can leave no job to poll. Resubmit the same immutable job once;
           // the durable job ID makes this safe if the original POST was only delayed.
           safelyResubmitted = true;
+          responsePhase = "resubmission";
           try {
             response = await fetch(new URL(postPath, this.baseUrl), {
               method: "POST",
@@ -342,10 +497,28 @@ export class RemoteVerificationRunnerClient {
                 acceptedBody.jobId !== validated.jobId ||
                 acceptedBody.requestFingerprint !== validated.requestFingerprint
               )
-                throw terminalRunnerFailure("runner_result_invalid");
+                throw terminalRunnerFailure("runner_result_invalid", [
+                  diagnostic(
+                    "resubmission",
+                    response.status,
+                    null,
+                    "accepted_identity_mismatch",
+                    acceptedBody.jobId !== validated.jobId ? "jobId" : "requestFingerprint",
+                  ),
+                ]);
             }
           } catch (error) {
-            if (error instanceof Error && error.message === "runner_result_invalid") throw error;
+            if (error instanceof VerificationRunnerFailure) {
+              throw combineDiagnostics(error, observedDiagnostics);
+            }
+            observedDiagnostics.push(
+              diagnostic(
+                response ? "response_decode" : "resubmission",
+                response?.status ?? null,
+                null,
+                response ? responseDecodeReason(error) : "transport_ambiguous",
+              ),
+            );
             response = null;
             value = null;
             responseBytes = null;
@@ -359,11 +532,28 @@ export class RemoteVerificationRunnerClient {
             bodyValue.jobId !== validated.jobId ||
             bodyValue.requestFingerprint !== validated.requestFingerprint
           )
-            throw terminalRunnerFailure("runner_result_invalid");
+            throw terminalRunnerFailure("runner_result_invalid", [
+              diagnostic(
+                "poll",
+                response.status,
+                null,
+                "accepted_identity_mismatch",
+                bodyValue.jobId !== validated.jobId ? "jobId" : "requestFingerprint",
+              ),
+            ]);
         }
         shouldPoll = response === null || response.status === 202;
       } catch (error) {
-        if (error instanceof Error && error.message === "runner_result_invalid") throw error;
+        if (error instanceof VerificationRunnerFailure)
+          throw combineDiagnostics(error, observedDiagnostics);
+        observedDiagnostics.push(
+          diagnostic(
+            response ? "response_decode" : "poll",
+            response?.status ?? null,
+            null,
+            response ? responseDecodeReason(error) : "transport_ambiguous",
+          ),
+        );
         response = null;
         value = null;
         responseBytes = null;

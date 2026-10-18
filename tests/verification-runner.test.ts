@@ -1,12 +1,15 @@
 import { createHmac, generateKeyPairSync, sign } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   canonicalJson,
   sha256,
+  VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF,
+  VERIFICATION_RUNNER_IDENTITY_ATTESTATION_PATH,
+  VERIFICATION_RUNNER_IDENTITY_MAX_AGE_MS,
   VERIFICATION_RUNNER_IMAGE,
   VERIFICATION_RUNNER_PROTOCOL_VERSION,
   type VerificationJobRequest,
@@ -26,7 +29,16 @@ import {
 import {
   assertNoSnapshotSecrets,
   createVerificationRunnerServer,
+  parseHostIdentityFile,
+  type VerificationRunnerConfig,
 } from "../verification-runner/server";
+import {
+  AWS_EU_WEST_1_RSA_CERTIFICATE_SHA256,
+  EXPECTED_VERIFIER_INSTANCE,
+  EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS,
+  verifyRsaSha256DocumentSignature,
+  verifyRunnerIdentityAttestation,
+} from "../src/lib/fix-engine/runner-identity-attestation";
 import { extractSafeTarGzip, packSafeDirectory } from "../verification-runner/archive";
 import { resolveVerificationProfile } from "../src/lib/fix-engine/verification-profile";
 import {
@@ -245,6 +257,7 @@ async function signedFetch(
 describe("M15.78R remote verification runner", () => {
   const cleanups: Array<() => Promise<void>> = [];
   afterEach(async () => {
+    vi.unstubAllGlobals();
     for (const cleanup of cleanups.splice(0)) await cleanup();
   });
 
@@ -354,6 +367,7 @@ describe("M15.78R remote verification runner", () => {
       maxJobRecords?: number;
       maxSpoolBytes?: number;
       cachePublicKey?: string;
+      attestIdentity?: VerificationRunnerConfig["attestIdentity"];
     } = {},
   ) {
     const root = await mkdtemp(path.join(os.tmpdir(), "m1578r-runner-test-"));
@@ -412,6 +426,313 @@ describe("M15.78R remote verification runner", () => {
     expect(first.status).toBe("passed");
     expect(replay.jobId).toBe(first.jobId);
     expect(executions).toBe(1);
+  });
+
+  it("authenticates a nonce-bound read-only runner identity attestation without admitting a job", async () => {
+    const fakeIdentity = {
+      instanceIdentityDocument: JSON.stringify({
+        accountId: EXPECTED_VERIFIER_INSTANCE.accountId,
+        region: EXPECTED_VERIFIER_INSTANCE.region,
+        instanceId: EXPECTED_VERIFIER_INSTANCE.instanceId,
+        imageId: "ami-0123456789abcdef0",
+      }),
+      instanceIdentitySignature: Buffer.alloc(128).toString("base64"),
+      identityFetchedAt: Date.now(),
+      containerImageId: EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS[0],
+      containerImageRef: VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF,
+    };
+    let attestCalls = 0;
+    let executeCalls = 0;
+    const { base, root } = await startRunner(
+      async () => {
+        executeCalls += 1;
+        throw new Error("verification_job_must_not_execute");
+      },
+      {
+        attestIdentity: async () => {
+          attestCalls += 1;
+          return fakeIdentity;
+        },
+      },
+    );
+    const challenge = "b".repeat(64);
+    const body = Buffer.from(JSON.stringify({ nonce: challenge }));
+    const response = await signedFetch(
+      base,
+      "POST",
+      VERIFICATION_RUNNER_IDENTITY_ATTESTATION_PATH,
+      body,
+    );
+    const value = (await response.json()) as Record<string, unknown>;
+    const signature = response.headers.get("x-auterim-identity-signature") ?? "";
+    const expected = createHmac("sha256", AUTH_SECRET)
+      .update(canonicalJson(value), "utf8")
+      .digest("hex");
+
+    expect(response.status).toBe(200);
+    expect(signature).toBe(expected);
+    expect(value).toMatchObject({ nonce: challenge, ...fakeIdentity });
+    expect(attestCalls).toBe(1);
+    expect(executeCalls).toBe(0);
+    const replay = await signedFetch(
+      base,
+      "POST",
+      VERIFICATION_RUNNER_IDENTITY_ATTESTATION_PATH,
+      body,
+    );
+    expect(replay.status).toBe(401);
+    expect(attestCalls).toBe(1);
+    const persisted = await readdir(path.join(root, "jobs"), { withFileTypes: true }).catch(
+      () => [],
+    );
+    expect(persisted.some((entry) => entry.isFile() && entry.name.endsWith(".json"))).toBe(false);
+    const spool = await readdir(path.join(root, "jobs", "artifacts")).catch(() => []);
+    expect(spool).toHaveLength(0);
+  });
+
+  it("fails closed for unauthenticated or malformed runner identity attestation requests", async () => {
+    let attestCalls = 0;
+    const { base } = await startRunner(undefined, {
+      attestIdentity: async () => {
+        attestCalls += 1;
+        throw new Error("should_not_be_called");
+      },
+    });
+    const pathName = VERIFICATION_RUNNER_IDENTITY_ATTESTATION_PATH;
+    const unauthenticated = await fetch(new URL(pathName, base), {
+      method: "POST",
+      body: JSON.stringify({ nonce: "c".repeat(64) }),
+    });
+    expect(unauthenticated.status).toBe(401);
+
+    const malformed = await signedFetch(
+      base,
+      "POST",
+      pathName,
+      Buffer.from(JSON.stringify({ nonce: "wrong" })),
+      "d".repeat(48),
+    );
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toEqual({ error: "runner_identity_attestation_invalid" });
+    expect(attestCalls).toBe(0);
+  });
+
+  it("accepts only a strict, fresh host-delivered identity file", () => {
+    const now = 1_800_000_000_000;
+    const identityRecord = {
+      document: JSON.stringify({
+        accountId: EXPECTED_VERIFIER_INSTANCE.accountId,
+        region: EXPECTED_VERIFIER_INSTANCE.region,
+        instanceId: EXPECTED_VERIFIER_INSTANCE.instanceId,
+        imageId: "ami-0123456789abcdef0",
+      }),
+      signature: Buffer.alloc(128, 7).toString("base64"),
+      fetchedAt: now,
+    };
+    expect(parseHostIdentityFile(JSON.stringify(identityRecord), now)).toMatchObject({
+      instanceIdentityDocument: identityRecord.document,
+      instanceIdentitySignature: identityRecord.signature,
+      identityFetchedAt: now,
+    });
+    expect(() =>
+      parseHostIdentityFile(
+        JSON.stringify({
+          ...identityRecord,
+          fetchedAt: now - VERIFICATION_RUNNER_IDENTITY_MAX_AGE_MS - 1,
+        }),
+        now,
+      ),
+    ).toThrow("runner_identity_metadata_unavailable");
+    for (const byteCount of [127, 129]) {
+      expect(() =>
+        parseHostIdentityFile(
+          JSON.stringify({
+            ...identityRecord,
+            signature: Buffer.alloc(byteCount).toString("base64"),
+          }),
+          now,
+        ),
+      ).toThrow("runner_identity_metadata_unavailable");
+    }
+    expect(() =>
+      parseHostIdentityFile(JSON.stringify({ ...identityRecord, fetchedAt: now + 5_001 }), now),
+    ).toThrow("runner_identity_metadata_unavailable");
+    expect(() =>
+      parseHostIdentityFile(JSON.stringify({ ...identityRecord, unexpected: true }), now),
+    ).toThrow("runner_identity_metadata_unavailable");
+    expect(() =>
+      parseHostIdentityFile(JSON.stringify({ ...identityRecord, signature: "not-base64" }), now),
+    ).toThrow("runner_identity_metadata_unavailable");
+    expect(() =>
+      parseHostIdentityFile(
+        JSON.stringify({
+          ...identityRecord,
+          signature: `${identityRecord.signature.slice(0, 64)}\n${identityRecord.signature.slice(64)}`,
+        }),
+        now,
+      ),
+    ).toThrow("runner_identity_metadata_unavailable");
+  });
+
+  it("verifies the AWS RSA identity signature and rejects nonce, host, and signature mismatches", () => {
+    const keys = generateKeyPairSync("rsa", { modulusLength: 1024 });
+    const identityDocument = JSON.stringify({
+      accountId: EXPECTED_VERIFIER_INSTANCE.accountId,
+      region: EXPECTED_VERIFIER_INSTANCE.region,
+      instanceId: EXPECTED_VERIFIER_INSTANCE.instanceId,
+      imageId: "ami-0123456789abcdef0",
+    });
+    const identitySignature = sign(
+      "sha256",
+      Buffer.from(identityDocument),
+      keys.privateKey,
+    ).toString("base64");
+    expect(
+      verifyRsaSha256DocumentSignature(identityDocument, identitySignature, keys.publicKey),
+    ).toBe(true);
+    const wrappedSignature = `${identitySignature.slice(0, 64)}\r\n \t${identitySignature.slice(64)}`;
+    expect(
+      verifyRsaSha256DocumentSignature(identityDocument, wrappedSignature, keys.publicKey),
+    ).toBe(true);
+    expect(
+      verifyRsaSha256DocumentSignature(`${identityDocument} `, identitySignature, keys.publicKey),
+    ).toBe(false);
+    for (const malformed of [
+      `${identitySignature}\u0000`,
+      `${identitySignature}\u00a0`,
+      `${identitySignature}\v`,
+      `${identitySignature}\f`,
+      Buffer.alloc(127).toString("base64"),
+      Buffer.alloc(129).toString("base64"),
+    ]) {
+      expect(verifyRsaSha256DocumentSignature(identityDocument, malformed, keys.publicKey)).toBe(
+        false,
+      );
+    }
+    const wrongCertificateKey = generateKeyPairSync("rsa", { modulusLength: 1024 });
+    expect(
+      verifyRsaSha256DocumentSignature(
+        identityDocument,
+        identitySignature,
+        wrongCertificateKey.publicKey,
+      ),
+    ).toBe(false);
+
+    const nonce = "e".repeat(64);
+    const body = {
+      nonce,
+      issuedAt: Date.now(),
+      identityFetchedAt: Date.now(),
+      instanceIdentityDocument: identityDocument,
+      instanceIdentitySignature: wrappedSignature,
+      containerImageId: EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS[0],
+      containerImageRef: VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF,
+    };
+    const responseSignature = createHmac("sha256", AUTH_SECRET)
+      .update(canonicalJson(body), "utf8")
+      .digest("hex");
+    expect(AWS_EU_WEST_1_RSA_CERTIFICATE_SHA256).toBe(
+      "7092993efe38800eedd69def9cf34b734ac828cce30ef94342388bc7a548827d",
+    );
+    expect(
+      verifyRunnerIdentityAttestation({
+        body,
+        responseSignature,
+        requestNonce: nonce,
+        authSecret: AUTH_SECRET,
+        signaturePublicKey: keys.publicKey,
+      }),
+    ).toEqual({
+      accountId: EXPECTED_VERIFIER_INSTANCE.accountId,
+      region: EXPECTED_VERIFIER_INSTANCE.region,
+      instanceId: EXPECTED_VERIFIER_INSTANCE.instanceId,
+      instanceImageId: "ami-0123456789abcdef0",
+      runnerContainerImageId: EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS[0],
+      runnerContainerImageRef: VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF,
+    });
+    const now = body.issuedAt;
+    const staleIdentity = {
+      ...body,
+      identityFetchedAt: now - VERIFICATION_RUNNER_IDENTITY_MAX_AGE_MS - 1,
+    };
+    const staleSignature = createHmac("sha256", AUTH_SECRET)
+      .update(canonicalJson(staleIdentity), "utf8")
+      .digest("hex");
+    expect(() =>
+      verifyRunnerIdentityAttestation({
+        body: staleIdentity,
+        responseSignature: staleSignature,
+        requestNonce: nonce,
+        authSecret: AUTH_SECRET,
+        now,
+        signaturePublicKey: keys.publicKey,
+      }),
+    ).toThrow("runner_identity_document_stale");
+    for (const unapprovedImageId of [
+      "sha256:c8bfd835ad08ed3516f0a5c2315d519317b4b71b18e4fe1c7735cad89bc3e90a",
+      `sha256:${"d".repeat(64)}`,
+    ]) {
+      const otherImage = { ...body, containerImageId: unapprovedImageId };
+      const otherImageSignature = createHmac("sha256", AUTH_SECRET)
+        .update(canonicalJson(otherImage), "utf8")
+        .digest("hex");
+      expect(() =>
+        verifyRunnerIdentityAttestation({
+          body: otherImage,
+          responseSignature: otherImageSignature,
+          requestNonce: nonce,
+          authSecret: AUTH_SECRET,
+          now,
+          signaturePublicKey: keys.publicKey,
+        }),
+      ).toThrow("runner_container_image_mismatch");
+    }
+    expect(() =>
+      verifyRunnerIdentityAttestation({
+        body,
+        responseSignature,
+        requestNonce: "f".repeat(64),
+        authSecret: AUTH_SECRET,
+        signaturePublicKey: keys.publicKey,
+      }),
+    ).toThrow("runner_identity_attestation_signature_invalid");
+    const wrongHost = {
+      ...body,
+      instanceIdentityDocument: JSON.stringify({
+        accountId: EXPECTED_VERIFIER_INSTANCE.accountId,
+        region: EXPECTED_VERIFIER_INSTANCE.region,
+        instanceId: "i-00000000000000000",
+        imageId: "ami-0123456789abcdef0",
+      }),
+    };
+    const wrongHostSignature = createHmac("sha256", AUTH_SECRET)
+      .update(canonicalJson(wrongHost), "utf8")
+      .digest("hex");
+    expect(() =>
+      verifyRunnerIdentityAttestation({
+        body: wrongHost,
+        responseSignature: wrongHostSignature,
+        requestNonce: nonce,
+        authSecret: AUTH_SECRET,
+        signaturePublicKey: keys.publicKey,
+      }),
+    ).toThrow("runner_identity_claim_mismatch");
+    const wrongDocumentSignature = {
+      ...body,
+      instanceIdentitySignature: Buffer.alloc(128, 1).toString("base64"),
+    };
+    const wrongSignatureHmac = createHmac("sha256", AUTH_SECRET)
+      .update(canonicalJson(wrongDocumentSignature), "utf8")
+      .digest("hex");
+    expect(() =>
+      verifyRunnerIdentityAttestation({
+        body: wrongDocumentSignature,
+        responseSignature: wrongSignatureHmac,
+        requestNonce: nonce,
+        authSecret: AUTH_SECRET,
+        signaturePublicKey: keys.publicKey,
+      }),
+    ).toThrow("runner_identity_signature_invalid");
   });
 
   it("executes admitted artifacts after their signed URLs expire and reconciles a long-running job once", async () => {
@@ -549,6 +870,29 @@ describe("M15.78R remote verification runner", () => {
     expect(response.status).toBe(400);
   });
 
+  it("reports an identity-fingerprint rejection at admission without accepting the job", async () => {
+    const { base, root } = await startRunner(async (request) => resultFor(request));
+    const request = makeRequest({ requestFingerprint: "f".repeat(64) });
+    const client = new RemoteVerificationRunnerClient({
+      url: base,
+      authSecret: AUTH_SECRET,
+      maxWaitMs: 5_000,
+    });
+    await expect(client.execute(request)).rejects.toMatchObject({
+      category: "runner_result_invalid",
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 400,
+          responseCategory: "verification_request_fingerprint_mismatch",
+          reason: "http_error",
+        },
+      ],
+    });
+    expect(await readdir(path.join(root, "jobs"))).toEqual(["artifacts"]);
+    expect(await readdir(path.join(root, "jobs", "artifacts"))).toEqual([]);
+  });
+
   it("rejects artifact path substitution before enqueue", async () => {
     const { base } = await startRunner(async (request) => resultFor(request));
     const request = makeRequest();
@@ -562,11 +906,75 @@ describe("M15.78R remote verification runner", () => {
     );
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "verification_patch_artifact_path_invalid" });
+
+    const clientRequest = makeRequest({}, "eb02bb5c-f8f8-4f52-8c74-8d11e13ed37f");
+    clientRequest.patch.url = `http://127.0.0.1:54321/storage/v1/object/sign/fix-engine-artifacts/${clientRequest.identity.fixRunId}/../other.diff?token=local`;
+    await expect(
+      new RemoteVerificationRunnerClient({
+        url: base,
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 5_000,
+      }).execute(clientRequest),
+    ).rejects.toMatchObject({
+      category: "patch_identity_mismatch",
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 400,
+          responseCategory: "verification_patch_artifact_path_invalid",
+          reason: "http_error",
+        },
+      ],
+    });
   });
 
-  it("rejects an invalid signed cache before downloading artifacts", async () => {
+  it("preserves an artifact-download admission failure and writes no durable job record", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "m1578r-runner-admission-test-"));
+    const jobStorePath = path.join(root, "jobs");
+    const runner = createVerificationRunnerServer({
+      authSecret: AUTH_SECRET,
+      artifactOrigin: "http://127.0.0.1:54321",
+      cachePublicKey: CACHE_KEYS.publicKey.export({ type: "spki", format: "pem" }).toString(),
+      jobStorePath,
+      workRoot: path.join(root, "work"),
+      execute: async (request) => resultFor(request),
+    });
+    const address = await runner.listen(0, "127.0.0.1");
+    cleanups.push(async () => {
+      await runner.close();
+      await rm(root, { recursive: true, force: true });
+    });
+    const originalFetch = globalThis.fetch.bind(globalThis);
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const target = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (target.port === "54321") return new Response("denied", { status: 403 });
+      return originalFetch(input, init);
+    });
+    await expect(
+      new RemoteVerificationRunnerClient({
+        url: `http://127.0.0.1:${address.port}`,
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 5_000,
+      }).execute(makeRequest()),
+    ).rejects.toMatchObject({
+      category: "runner_unavailable",
+      retryable: true,
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 503,
+          responseCategory: "verification_artifact_unavailable",
+          reason: "http_error",
+        },
+      ],
+    });
+    expect(await readdir(jobStorePath)).toEqual(["artifacts"]);
+    expect(await readdir(path.join(jobStorePath, "artifacts"))).toEqual([]);
+  });
+
+  it("preserves sanitized admission status/category and proves cache rejection precedes job persistence", async () => {
     const keys = generateKeyPairSync("ed25519");
-    const { base } = await startRunner(undefined, {
+    const { base, root } = await startRunner(undefined, {
       cachePublicKey: keys.publicKey.export({ type: "spki", format: "pem" }).toString(),
     });
     const client = new RemoteVerificationRunnerClient({
@@ -574,7 +982,137 @@ describe("M15.78R remote verification runner", () => {
       authSecret: AUTH_SECRET,
       maxWaitMs: 5_000,
     });
-    await expect(client.execute(makeRequest())).rejects.toThrow("cache_signature_invalid");
+    await expect(client.execute(makeRequest())).rejects.toMatchObject({
+      category: "cache_signature_invalid",
+      retryable: false,
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 400,
+          responseCategory: "verification_cache_signature_invalid",
+          reason: "http_error",
+        },
+      ],
+    });
+    const jobs = path.join(root, "jobs");
+    const jobEntries = await readdir(jobs);
+    expect(jobEntries).toEqual(["artifacts"]);
+    const spoolEntries = await readdir(path.join(jobs, "artifacts"));
+    expect(spoolEntries).toEqual([]);
+  });
+
+  it("preserves an approved protocol response category in bounded diagnostics", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: "runner_protocol_unsupported" }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    const client = new RemoteVerificationRunnerClient({
+      url: "https://runner.invalid",
+      authSecret: AUTH_SECRET,
+      maxWaitMs: 1_000,
+    });
+    let caught: unknown;
+    try {
+      await client.execute(makeRequest());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_protocol_unsupported",
+      retryable: false,
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 400,
+          responseCategory: "runner_protocol_unsupported",
+          reason: "http_error",
+        },
+      ],
+    });
+  });
+
+  it("maps an unknown admission response without persisting arbitrary response categories", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: "provider_returned_untrusted_detail" }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    const client = new RemoteVerificationRunnerClient({
+      url: "https://runner.invalid",
+      authSecret: AUTH_SECRET,
+      maxWaitMs: 1_000,
+    });
+    let caught: unknown;
+    try {
+      await client.execute(makeRequest());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_result_invalid",
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 400,
+          responseCategory: "unrecognized",
+          reason: "http_error",
+        },
+      ],
+    });
+    expect(JSON.stringify(caught)).not.toContain("provider_returned_untrusted_detail");
+  });
+
+  it("reports only the safe field name for an accepted-job identity mismatch", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              jobId: "untrusted-job-id",
+              requestFingerprint: "untrusted-request-fingerprint",
+            }),
+            { status: 202, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    );
+    const client = new RemoteVerificationRunnerClient({
+      url: "https://runner.invalid",
+      authSecret: AUTH_SECRET,
+      maxWaitMs: 1_000,
+    });
+    let caught: unknown;
+    try {
+      await client.execute(makeRequest());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_result_invalid",
+      retryable: false,
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 202,
+          responseCategory: null,
+          reason: "accepted_identity_mismatch",
+          identityField: "jobId",
+        },
+      ],
+    });
+    expect(JSON.stringify(caught)).not.toContain("untrusted-job-id");
+    expect(JSON.stringify(caught)).not.toContain("untrusted-request-fingerprint");
   });
 
   it("rejects a signed result bound to a different commit", async () => {
@@ -593,7 +1131,53 @@ describe("M15.78R remote verification runner", () => {
         authSecret: AUTH_SECRET,
         maxWaitMs: 5_000,
       }).execute(makeRequest()),
-    ).rejects.toThrow("runner_result_invalid");
+    ).rejects.toMatchObject({
+      category: "runner_result_invalid",
+      diagnostics: [
+        {
+          phase: "result_validation",
+          httpStatus: 200,
+          responseCategory: null,
+          reason: "result_identity_mismatch",
+          identityField: "baseCommitSha",
+        },
+      ],
+    });
+  });
+
+  it("reports result-signature failure without exposing signature material", async () => {
+    const { base } = await startRunner(async (request) => resultFor(request));
+    const originalFetch = globalThis.fetch.bind(globalThis);
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await originalFetch(input, init);
+      if (response.status !== 200) return response;
+      const body = await response.arrayBuffer();
+      const headers = new Headers(response.headers);
+      headers.set("x-auterim-result-signature", "0".repeat(64));
+      return new Response(body, { status: 200, headers });
+    });
+    let caught: unknown;
+    try {
+      await new RemoteVerificationRunnerClient({
+        url: base,
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 5_000,
+      }).execute(makeRequest());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_result_invalid",
+      diagnostics: [
+        {
+          phase: "result_signature",
+          httpStatus: 200,
+          responseCategory: null,
+          reason: "result_signature_mismatch",
+        },
+      ],
+    });
+    expect(JSON.stringify(caught)).not.toContain("0".repeat(64));
   });
 
   it("recovers an interrupted immutable job record after runner restart", async () => {
