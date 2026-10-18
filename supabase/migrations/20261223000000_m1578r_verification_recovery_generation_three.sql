@@ -478,14 +478,20 @@ begin
   return query
     select q.fix_run_id, q.stage, q.attempt_count, q.idempotency_key
     from public.fix_stage_queue q
-    where ((q.status = 'queued' and (
-      q.attempt_count < 3
-      or (q.stage = 'diagnose' and q.attempt_count = 3 and exists (
-        select 1 from public.fix_stage_recovery_authorizations a
-        where a.fix_run_id = q.fix_run_id and a.workspace_id = q.workspace_id and a.stage_id = q.id
-          and a.stage = 'diagnose' and a.recovery_generation = 1
-      ))
-    )) or (q.status = 'claimed' and q.lease_expires_at < now()))
+    where not (
+      q.id = 'bd3238d9-79a9-46ca-88d1-e67f346ecc0a'::uuid
+      and q.fix_run_id = '7de04a75-aefa-43a6-ba64-9fa4a70e0ec1'::uuid
+      and q.workspace_id = 'e140d48e-9dc0-4552-a9a4-a81fe3872422'::uuid
+      and q.stage = 'verify_patch'
+    )
+      and ((q.status = 'queued' and (
+        q.attempt_count < 3
+        or (q.stage = 'diagnose' and q.attempt_count = 3 and exists (
+          select 1 from public.fix_stage_recovery_authorizations a
+          where a.fix_run_id = q.fix_run_id and a.workspace_id = q.workspace_id and a.stage_id = q.id
+            and a.stage = 'diagnose' and a.recovery_generation = 1
+        ))
+      )) or (q.status = 'claimed' and q.lease_expires_at < now()))
     order by q.created_at, q.id limit p_limit;
 end;
 $$;

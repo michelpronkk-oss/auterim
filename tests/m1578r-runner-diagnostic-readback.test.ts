@@ -94,6 +94,13 @@ describe("M15.78R durable runner diagnostic contract", () => {
 
   it("persists diagnostics and the original stage transition through a service-only atomic RPC", () => {
     expect(migration).toContain("unique (stage_id, claim_token)");
+    expect(migration).not.toContain("jsonb_object_length");
+    expect(migration).toContain(
+      "(v_item - array['phase','httpStatus','responseCategory','reason','identityField']) <> '{}'::jsonb",
+    );
+    expect(migration).toContain(
+      "v_item ?& array['phase','httpStatus','responseCategory','reason']",
+    );
     expect(migration).toContain("jsonb_array_length(diagnostics) <= 4");
     expect(migration).toContain("octet_length(diagnostics::text) <= 4096");
     expect(migration).toContain(

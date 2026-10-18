@@ -97,7 +97,6 @@ begin
     if jsonb_typeof(v_item) <> 'object'
       or (v_item - array['phase','httpStatus','responseCategory','reason','identityField']) <> '{}'::jsonb
       or not (v_item ?& array['phase','httpStatus','responseCategory','reason'])
-      or jsonb_object_length(v_item) not between 4 and 5
       or jsonb_typeof(v_item->'phase') <> 'string'
       or v_item->>'phase' not in ('admission','poll','resubmission','result_validation','result_signature','response_decode')
       or jsonb_typeof(v_item->'httpStatus') not in ('null','number')

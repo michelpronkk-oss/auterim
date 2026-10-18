@@ -145,6 +145,17 @@ describe("M15.78R one-time Generation 3 recovery preparation", () => {
     expect(genericDispatcher).not.toContain(
       "fix_verification_recovery_generation_three_authorizations",
     );
+    expect(genericDispatcher).toContain("q.id = 'bd3238d9-79a9-46ca-88d1-e67f346ecc0a'::uuid");
+    expect(genericDispatcher).toContain(
+      "q.fix_run_id = '7de04a75-aefa-43a6-ba64-9fa4a70e0ec1'::uuid",
+    );
+    expect(genericDispatcher).toContain(
+      "q.workspace_id = 'e140d48e-9dc0-4552-a9a4-a81fe3872422'::uuid",
+    );
+    expect(genericDispatcher).toContain("and q.stage = 'verify_patch'");
+    expect(genericDispatcher).toMatch(
+      /where not \([\s\S]*?\)\s+and \(\(q\.status = 'queued'[\s\S]*?\) or \(q\.status = 'claimed'/,
+    );
     expect(genericDispatcher).toContain("q.attempt_count < 3");
     expect(runtime).toMatch(
       /value\.stage === "verify_patch"\s*&&\s*value\.attemptNumber === 4\s*&&\s*value\.recoveryGeneration === 3/,
