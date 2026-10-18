@@ -10,6 +10,7 @@ import {
 import { parseBoundedJsonResponse } from "@/lib/fix-engine/verification-runner-client";
 import {
   createIdentityAttestationRequestHeaders,
+  EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS,
   verifyRunnerIdentityAttestation,
 } from "@/lib/fix-engine/runner-identity-attestation";
 
@@ -93,6 +94,7 @@ export const attestVerificationRunnerIdentityTask = schemaTask({
       return {
         status: "verified",
         protocolVersion: environment.FIX_VERIFICATION_RUNNER_PROTOCOL,
+        expectedRunnerContainerImageIds: EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS,
         ...identity,
       } as const;
     } catch (error) {
@@ -106,6 +108,8 @@ export const attestVerificationRunnerIdentityTask = schemaTask({
           "runner_identity_document_invalid",
           "runner_identity_claim_mismatch",
           "runner_identity_signature_invalid",
+          "runner_identity_document_stale",
+          "runner_container_image_mismatch",
         ].includes(error.message)
           ? error.message
           : "runner_identity_attestation_invalid";

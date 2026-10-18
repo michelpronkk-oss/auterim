@@ -9,6 +9,7 @@ import {
   sha256,
   VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF,
   VERIFICATION_RUNNER_IDENTITY_ATTESTATION_PATH,
+  VERIFICATION_RUNNER_IDENTITY_MAX_AGE_MS,
   VERIFICATION_RUNNER_IMAGE,
   VERIFICATION_RUNNER_PROTOCOL_VERSION,
   type VerificationJobRequest,
@@ -28,11 +29,13 @@ import {
 import {
   assertNoSnapshotSecrets,
   createVerificationRunnerServer,
+  parseHostIdentityFile,
   type VerificationRunnerConfig,
 } from "../verification-runner/server";
 import {
   AWS_EU_WEST_1_RSA_CERTIFICATE_SHA256,
   EXPECTED_VERIFIER_INSTANCE,
+  EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS,
   verifyRsaSha256DocumentSignature,
   verifyRunnerIdentityAttestation,
 } from "../src/lib/fix-engine/runner-identity-attestation";
@@ -434,7 +437,8 @@ describe("M15.78R remote verification runner", () => {
         imageId: "ami-0123456789abcdef0",
       }),
       instanceIdentitySignature: "A".repeat(344),
-      containerImageId: `sha256:${"a".repeat(64)}`,
+      identityFetchedAt: Date.now(),
+      containerImageId: EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS[0],
       containerImageRef: VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF,
     };
     let attestCalls = 0;
@@ -505,6 +509,43 @@ describe("M15.78R remote verification runner", () => {
     expect(attestCalls).toBe(0);
   });
 
+  it("accepts only a strict, fresh host-delivered identity file", () => {
+    const now = 1_800_000_000_000;
+    const identityRecord = {
+      document: JSON.stringify({
+        accountId: EXPECTED_VERIFIER_INSTANCE.accountId,
+        region: EXPECTED_VERIFIER_INSTANCE.region,
+        instanceId: EXPECTED_VERIFIER_INSTANCE.instanceId,
+        imageId: "ami-0123456789abcdef0",
+      }),
+      signature: Buffer.alloc(256, 7).toString("base64"),
+      fetchedAt: now,
+    };
+    expect(parseHostIdentityFile(JSON.stringify(identityRecord), now)).toMatchObject({
+      instanceIdentityDocument: identityRecord.document,
+      instanceIdentitySignature: identityRecord.signature,
+      identityFetchedAt: now,
+    });
+    expect(() =>
+      parseHostIdentityFile(
+        JSON.stringify({
+          ...identityRecord,
+          fetchedAt: now - VERIFICATION_RUNNER_IDENTITY_MAX_AGE_MS - 1,
+        }),
+        now,
+      ),
+    ).toThrow("runner_identity_metadata_unavailable");
+    expect(() =>
+      parseHostIdentityFile(JSON.stringify({ ...identityRecord, fetchedAt: now + 5_001 }), now),
+    ).toThrow("runner_identity_metadata_unavailable");
+    expect(() =>
+      parseHostIdentityFile(JSON.stringify({ ...identityRecord, unexpected: true }), now),
+    ).toThrow("runner_identity_metadata_unavailable");
+    expect(() =>
+      parseHostIdentityFile(JSON.stringify({ ...identityRecord, signature: "not-base64" }), now),
+    ).toThrow("runner_identity_metadata_unavailable");
+  });
+
   it("verifies the AWS RSA identity signature and rejects nonce, host, and signature mismatches", () => {
     const keys = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const identityDocument = JSON.stringify({
@@ -529,9 +570,10 @@ describe("M15.78R remote verification runner", () => {
     const body = {
       nonce,
       issuedAt: Date.now(),
+      identityFetchedAt: Date.now(),
       instanceIdentityDocument: identityDocument,
       instanceIdentitySignature: identitySignature,
-      containerImageId: `sha256:${"b".repeat(64)}`,
+      containerImageId: EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS[0],
       containerImageRef: VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF,
     };
     const responseSignature = createHmac("sha256", AUTH_SECRET)
@@ -553,9 +595,41 @@ describe("M15.78R remote verification runner", () => {
       region: EXPECTED_VERIFIER_INSTANCE.region,
       instanceId: EXPECTED_VERIFIER_INSTANCE.instanceId,
       instanceImageId: "ami-0123456789abcdef0",
-      runnerContainerImageId: `sha256:${"b".repeat(64)}`,
+      runnerContainerImageId: EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS[0],
       runnerContainerImageRef: VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF,
     });
+    const now = body.issuedAt;
+    const staleIdentity = {
+      ...body,
+      identityFetchedAt: now - VERIFICATION_RUNNER_IDENTITY_MAX_AGE_MS - 1,
+    };
+    const staleSignature = createHmac("sha256", AUTH_SECRET)
+      .update(canonicalJson(staleIdentity), "utf8")
+      .digest("hex");
+    expect(() =>
+      verifyRunnerIdentityAttestation({
+        body: staleIdentity,
+        responseSignature: staleSignature,
+        requestNonce: nonce,
+        authSecret: AUTH_SECRET,
+        now,
+        signaturePublicKey: keys.publicKey,
+      }),
+    ).toThrow("runner_identity_document_stale");
+    const otherImage = { ...body, containerImageId: `sha256:${"d".repeat(64)}` };
+    const otherImageSignature = createHmac("sha256", AUTH_SECRET)
+      .update(canonicalJson(otherImage), "utf8")
+      .digest("hex");
+    expect(() =>
+      verifyRunnerIdentityAttestation({
+        body: otherImage,
+        responseSignature: otherImageSignature,
+        requestNonce: nonce,
+        authSecret: AUTH_SECRET,
+        now,
+        signaturePublicKey: keys.publicKey,
+      }),
+    ).toThrow("runner_container_image_mismatch");
     expect(() =>
       verifyRunnerIdentityAttestation({
         body,

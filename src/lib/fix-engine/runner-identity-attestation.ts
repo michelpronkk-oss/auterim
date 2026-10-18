@@ -12,6 +12,7 @@ import {
   sha256,
   VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF,
   VERIFICATION_RUNNER_IDENTITY_ATTESTATION_PATH,
+  VERIFICATION_RUNNER_IDENTITY_MAX_AGE_MS,
   VerificationRunnerIdentityAttestationBodySchema,
   type VerificationRunnerIdentityAttestationBody,
 } from "../../../verification-runner/contracts";
@@ -21,6 +22,12 @@ export const EXPECTED_VERIFIER_INSTANCE = {
   region: "eu-west-1",
   instanceId: "i-0592719b99a518001",
 } as const;
+
+/** Content/config digest and Docker's OCI-index ID for the same reviewed image archive. */
+export const EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS = [
+  "sha256:dc150aabdf5c7ad152fe637c307b68d489887be2b834f447ff92b69d1671a230",
+  "sha256:e923f5dc4ae35047cc76e10a0430a9cd0b6f122e3d34ea2c64c6bfb59a1e54c7",
+] as const;
 
 // AWS's eu-west-1 RSA certificate for the IMDS /instance-identity/signature endpoint.
 // Source: AWS EC2 User Guide, “AWS public certificates for instance identity document signatures”.
@@ -119,6 +126,18 @@ export function verifyRunnerIdentityAttestation(input: {
   const now = input.now ?? Date.now();
   if (!Number.isSafeInteger(body.issuedAt) || Math.abs(now - body.issuedAt) > 60_000)
     throw new Error("runner_identity_attestation_expired");
+  if (
+    !Number.isSafeInteger(body.identityFetchedAt) ||
+    body.identityFetchedAt > now + 5_000 ||
+    now - body.identityFetchedAt > VERIFICATION_RUNNER_IDENTITY_MAX_AGE_MS
+  )
+    throw new Error("runner_identity_document_stale");
+  if (
+    !EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS.includes(
+      body.containerImageId as (typeof EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS)[number],
+    )
+  )
+    throw new Error("runner_container_image_mismatch");
   if (
     certificateFingerprint !== AWS_EU_WEST_1_RSA_CERTIFICATE_SHA256 ||
     AWS_EU_WEST_1_RSA_PUBLIC_KEY.asymmetricKeyType !== "rsa"

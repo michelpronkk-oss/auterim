@@ -1,5 +1,6 @@
 import { createHmac, randomUUID, timingSafeEqual, verify as verifySignature } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { constants as fsConstants } from "node:fs";
 import {
   chmod,
   copyFile,
@@ -30,7 +31,12 @@ import {
   VERIFICATION_RUNNER_PROTOCOL_VERSION,
   VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF,
   VERIFICATION_RUNNER_IDENTITY_ATTESTATION_PATH,
+  VERIFICATION_RUNNER_IDENTITY_FILE,
+  VERIFICATION_RUNNER_IDENTITY_GROUP_GID,
+  VERIFICATION_RUNNER_IDENTITY_MAX_AGE_MS,
+  VERIFICATION_RUNNER_IDENTITY_MOUNT_PATH,
   VERIFICATION_RUNNER_IMAGE,
+  VerificationRunnerHostIdentityFileSchema,
   VerificationRunnerIdentityAttestationBodySchema,
   VerificationRunnerIdentityAttestationRequestSchema,
   type VerificationRunnerIdentityAttestationBody,
@@ -93,97 +99,102 @@ export type VerificationRunnerConfig = {
     spoolRoot: string,
     secret: string,
   ) => Promise<MaterializedVerificationJob>;
-  /** Test seam; Production reads IMDSv2 and the local Docker daemon through fixed endpoints. */
+  /** Test seam; Production reads the host-delivered signed identity and local Docker daemon. */
   attestIdentity?: () => Promise<{
     instanceIdentityDocument: string;
     instanceIdentitySignature: string;
+    identityFetchedAt: number;
     containerImageId: string;
     containerImageRef: string;
   }>;
 };
 
-const EC2_METADATA_ORIGIN = "http://169.254.169.254";
 const RUNNER_CONTAINER_NAME = "auterim-verification-runner";
-
-async function readLimitedResponseText(response: Response, maxBytes: number) {
-  if (!response.body) throw new Error("runner_identity_metadata_unavailable");
-  const declaredLength = response.headers.get("content-length");
-  if (declaredLength && /^\d+$/.test(declaredLength) && Number(declaredLength) > maxBytes) {
-    await response.body.cancel().catch(() => undefined);
-    throw new Error("runner_identity_metadata_unavailable");
-  }
-  const reader = response.body.getReader();
-  const chunks: Buffer[] = [];
-  let total = 0;
+export function parseHostIdentityFile(raw: string, now = Date.now()) {
   try {
-    while (true) {
-      const part = await reader.read();
-      if (part.done) break;
-      const chunk = Buffer.from(part.value);
-      total += chunk.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel().catch(() => undefined);
-        throw new Error("runner_identity_metadata_unavailable");
-      }
-      chunks.push(chunk);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  return Buffer.concat(chunks, total).toString("utf8");
-}
-
-async function readEc2IdentityAndContainerImage() {
-  try {
-    const tokenResponse = await fetch(`${EC2_METADATA_ORIGIN}/latest/api/token`, {
-      method: "PUT",
-      redirect: "error",
-      headers: { "X-aws-ec2-metadata-token-ttl-seconds": "60" },
-      signal: AbortSignal.timeout(2_000),
-    });
-    if (!tokenResponse.ok) throw new Error("runner_identity_metadata_unavailable");
-    const token = (await readLimitedResponseText(tokenResponse, 4_096)).trim();
-    if (!token || token.length > 4_096) throw new Error("runner_identity_metadata_unavailable");
-
-    const metadataHeaders = { "X-aws-ec2-metadata-token": token };
-    const [documentResponse, signatureResponse] = await Promise.all([
-      fetch(`${EC2_METADATA_ORIGIN}/latest/dynamic/instance-identity/document`, {
-        redirect: "error",
-        headers: metadataHeaders,
-        signal: AbortSignal.timeout(2_000),
-      }),
-      fetch(`${EC2_METADATA_ORIGIN}/latest/dynamic/instance-identity/signature`, {
-        redirect: "error",
-        headers: metadataHeaders,
-        signal: AbortSignal.timeout(2_000),
-      }),
-    ]);
-    if (!documentResponse.ok || !signatureResponse.ok)
-      throw new Error("runner_identity_metadata_unavailable");
-    const [instanceIdentityDocument, signatureText] = await Promise.all([
-      readLimitedResponseText(documentResponse, 8_192),
-      readLimitedResponseText(signatureResponse, 2_048),
-    ]);
-    const instanceIdentitySignature = signatureText.trim();
+    const value: unknown = JSON.parse(raw);
+    const parsed = VerificationRunnerHostIdentityFileSchema.safeParse(value);
+    if (!parsed.success) throw new Error("runner_identity_metadata_unavailable");
+    const instanceIdentityDocument = parsed.data.document;
+    const instanceIdentitySignature = parsed.data.signature;
     if (
-      !instanceIdentityDocument ||
       !/^[A-Za-z0-9+/]+={0,2}$/.test(instanceIdentitySignature) ||
       Buffer.from(instanceIdentitySignature, "base64").byteLength !== 256 ||
       Buffer.from(instanceIdentitySignature, "base64").toString("base64") !==
         instanceIdentitySignature
     )
       throw new Error("runner_identity_metadata_unavailable");
+    if (
+      parsed.data.fetchedAt > now + 5_000 ||
+      now - parsed.data.fetchedAt > VERIFICATION_RUNNER_IDENTITY_MAX_AGE_MS
+    )
+      throw new Error("runner_identity_metadata_unavailable");
+    return {
+      instanceIdentityDocument,
+      instanceIdentitySignature,
+      identityFetchedAt: parsed.data.fetchedAt,
+    };
+  } catch {
+    throw new Error("runner_identity_metadata_unavailable");
+  }
+}
+
+async function readHostIdentityFile() {
+  const directory = VERIFICATION_RUNNER_IDENTITY_MOUNT_PATH;
+  const filename = path.join(directory, VERIFICATION_RUNNER_IDENTITY_FILE);
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    const directoryStat = await lstat(directory);
+    if (
+      !directoryStat.isDirectory() ||
+      directoryStat.isSymbolicLink() ||
+      directoryStat.uid !== 0 ||
+      directoryStat.gid !== VERIFICATION_RUNNER_IDENTITY_GROUP_GID ||
+      (directoryStat.mode & 0o777) !== 0o750
+    )
+      throw new Error("runner_identity_metadata_unavailable");
+    const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+    handle = await open(filename, fsConstants.O_RDONLY | noFollow);
+    const fileStat = await handle.stat();
+    if (
+      !fileStat.isFile() ||
+      fileStat.uid !== 0 ||
+      fileStat.gid !== VERIFICATION_RUNNER_IDENTITY_GROUP_GID ||
+      (fileStat.mode & 0o777) !== 0o440 ||
+      fileStat.nlink !== 1 ||
+      fileStat.size < 1 ||
+      fileStat.size > 16_384
+    )
+      throw new Error("runner_identity_metadata_unavailable");
+    const raw = await handle.readFile();
+    if (raw.byteLength !== fileStat.size || raw.byteLength > 16_384)
+      throw new Error("runner_identity_metadata_unavailable");
+    return parseHostIdentityFile(raw.toString("utf8"));
+  } catch {
+    throw new Error("runner_identity_metadata_unavailable");
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function readEc2IdentityAndContainerImage() {
+  try {
+    const hostIdentity = await readHostIdentityFile();
 
     const containerHostId = hostname().toLowerCase();
     if (!/^[a-f0-9]{12,64}$/.test(containerHostId))
       throw new Error("runner_container_identity_unavailable");
     const inspected = await execFileAsync(
       "docker",
-      ["inspect", "--format={{.Id}}|{{.Image}}|{{.Config.Image}}", RUNNER_CONTAINER_NAME],
+      [
+        "inspect",
+        "--format={{.Id}}|{{.Image}}|{{.Config.Image}}|{{json .Mounts}}|{{json .HostConfig.GroupAdd}}",
+        RUNNER_CONTAINER_NAME,
+      ],
       {
         windowsHide: true,
         timeout: 3_000,
-        maxBuffer: 1_024,
+        maxBuffer: 8_192,
         env: {
           NODE_ENV: "production",
           PATH: process.env.PATH ?? "",
@@ -191,20 +202,45 @@ async function readEc2IdentityAndContainerImage() {
         },
       },
     );
-    const [containerId, containerImageId, containerImageRef] = inspected.stdout.trim().split("|");
+    const inspectedValues = inspected.stdout.trim().split("|");
+    if (inspectedValues.length !== 5) throw new Error("runner_container_identity_unavailable");
+    const [containerId, containerImageId, containerImageRef, mountsJson, groupsJson] =
+      inspectedValues;
+    let mounts: Array<{ Type?: string; Source?: string; Destination?: string; RW?: boolean }>;
+    let groups: unknown;
+    try {
+      mounts = JSON.parse(mountsJson ?? "null") as typeof mounts;
+      groups = JSON.parse(groupsJson ?? "null") as unknown;
+    } catch {
+      throw new Error("runner_container_identity_unavailable");
+    }
+    const identityMounts = Array.isArray(mounts)
+      ? mounts.filter(
+          (mount) =>
+            mount.Type === "bind" &&
+            mount.Source === VERIFICATION_RUNNER_IDENTITY_MOUNT_PATH &&
+            mount.Destination === VERIFICATION_RUNNER_IDENTITY_MOUNT_PATH &&
+            mount.RW === false,
+        )
+      : [];
     if (
       !containerId ||
       !containerImageId ||
       !containerImageRef ||
       !containerId.startsWith(containerHostId) ||
       !/^sha256:[a-f0-9]{64}$/.test(containerImageId) ||
-      containerImageRef !== VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF
+      containerImageRef !== VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF ||
+      !Array.isArray(mounts) ||
+      mounts.length !== 3 ||
+      identityMounts.length !== 1 ||
+      !Array.isArray(groups) ||
+      groups.filter((group) => group === String(VERIFICATION_RUNNER_IDENTITY_GROUP_GID)).length !==
+        1
     )
       throw new Error("runner_container_identity_unavailable");
 
     return {
-      instanceIdentityDocument,
-      instanceIdentitySignature,
+      ...hostIdentity,
       containerImageId,
       containerImageRef,
     };
