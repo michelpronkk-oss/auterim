@@ -34,6 +34,16 @@ export const processFixEngineStageTask = schemaTask({
         },
       );
     }
-    return { status: result.status, nextStage: result.nextStage };
+    return {
+      status: result.status,
+      nextStage: result.nextStage,
+      ...("failureCategory" in result ? { failureCategory: result.failureCategory } : {}),
+      ...("diagnosticPersistence" in result
+        ? { diagnosticPersistence: result.diagnosticPersistence }
+        : {}),
+      ...("diagnosticPersistenceErrorCode" in result
+        ? { diagnosticPersistenceErrorCode: result.diagnosticPersistenceErrorCode }
+        : {}),
+    };
   },
 });
