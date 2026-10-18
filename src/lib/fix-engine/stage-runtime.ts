@@ -193,12 +193,17 @@ export async function runPersistedFixStage(input: {
       claimToken: uuid,
       stage: FixStageSchema,
       attemptNumber: z.number().int().min(1).max(4),
-      recoveryGeneration: z.number().int().min(0).max(1).default(0),
+      recoveryGeneration: z.number().int().min(0).max(3).default(0),
     })
     .refine(
       (value) =>
         value.attemptNumber <= 3 ||
-        (value.stage === "diagnose" && value.attemptNumber === 4 && value.recoveryGeneration === 1),
+        (value.stage === "diagnose" &&
+          value.attemptNumber === 4 &&
+          value.recoveryGeneration === 1) ||
+        (value.stage === "verify_patch" &&
+          value.attemptNumber === 4 &&
+          value.recoveryGeneration === 3),
     )
     .parse(claimData);
   const { data: rawRun, error: runError } = await client
@@ -303,18 +308,6 @@ export async function runPersistedFixStage(input: {
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
-    if (error instanceof VerificationRunnerFailure && error.diagnostics.length > 0) {
-      // Deliberately exclude request identities, artifact URLs, response bodies and headers.
-      console.warn(
-        "fix_engine_verification_runner_failure",
-        JSON.stringify({
-          stage: input.stage,
-          category: error.category,
-          retryable: error.retryable,
-          diagnostics: error.diagnostics,
-        }),
-      );
-    }
     const retryable =
       isVerificationRunnerRetryableFailure(error) ||
       (!(error instanceof VerificationRunnerFailure) &&
@@ -323,6 +316,43 @@ export async function runPersistedFixStage(input: {
           message.includes("ambiguous") ||
           message.includes("transport_ambiguous")));
     const safeCategory = /^[a-z0-9_]{1,100}$/.test(message) ? message : "fix_stage_failed";
+    if (error instanceof VerificationRunnerFailure) {
+      // This RPC atomically appends the allowlisted diagnostic and applies the
+      // existing stage transition. It intentionally receives no URLs, headers,
+      // bodies, request identities, signatures, or source content.
+      let diagnosticsPersisted = false;
+      try {
+        const diagnosticWrite = await client.rpc("complete_fix_stage_with_runner_diagnostics", {
+          p_stage_id: claim.stageId,
+          p_claim_token: claim.claimToken,
+          p_result: retryable ? "retry" : "failed",
+          p_failure_category: error.category,
+          p_retryable: error.retryable,
+          p_diagnostics: error.diagnostics,
+        });
+        diagnosticsPersisted = !diagnosticWrite.error && Boolean(diagnosticWrite.data);
+      } catch {
+        // A transport failure must still follow the prior stage transition path.
+      }
+      if (!diagnosticsPersisted) {
+        // Preserve the previous terminal/retry behavior if the diagnostic ledger
+        // itself is unavailable. The fixed message contains no provider data.
+        console.warn("fix_engine_runner_diagnostic_persistence_failed", input.stage);
+      } else {
+        // Console logs remain a secondary aid; the bounded event is durable and
+        // available through the operator-only readback task.
+        console.warn(
+          "fix_engine_verification_runner_failure",
+          JSON.stringify({
+            stage: input.stage,
+            category: error.category,
+            retryable: error.retryable,
+            diagnostics: error.diagnostics,
+          }),
+        );
+        throw new Error(safeCategory);
+      }
+    }
     await client.rpc("complete_fix_stage", {
       p_stage_id: claim.stageId,
       p_claim_token: claim.claimToken,

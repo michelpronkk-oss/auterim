@@ -1,9 +1,15 @@
-import { createPublicKey } from "node:crypto";
+import { createPublicKey, randomBytes } from "node:crypto";
 import { schemaTask, tasks } from "@trigger.dev/sdk";
 import { z } from "zod";
 import { getEnvironment } from "@/lib/env/schema";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { createSignedDependencyCacheReference } from "@/lib/fix-engine/verification-artifacts";
+import { parseBoundedJsonResponse } from "@/lib/fix-engine/verification-runner-client";
+import {
+  createIdentityAttestationRequestHeaders,
+  EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS,
+  verifyRunnerIdentityAttestation,
+} from "@/lib/fix-engine/runner-identity-attestation";
 import {
   dependencyCacheIdentityKey,
   FIX_VERIFICATION_RUNTIME_PROFILE,
@@ -11,7 +17,10 @@ import {
 } from "@/lib/fix-engine/dependency-cache";
 import {
   dependencyCacheManifestFingerprint,
+  canonicalJson,
   sha256,
+  VERIFICATION_RUNNER_IDENTITY_ATTESTATION_PATH,
+  VerificationRunnerIdentityAttestationRequestSchema,
   VERIFICATION_RUNNER_PROTOCOL_VERSION,
 } from "../../verification-runner/contracts";
 
@@ -30,6 +39,45 @@ const EXPECTED_CACHE_IDENTITY_KEY =
   "86ab5d3a45b9e1a5218418e7856cb48b1c8fadf242c0b5ffb18ffb517463832c";
 const EXPECTED_CACHE_PUBLIC_KEY_FINGERPRINT =
   "071a6d11f634731fb4c1673278cd69cb70607725455dcdac46dff8eb78a7180f";
+const G3_AUTHORIZATION_REFERENCE =
+  "M15.78R user-authorized generation 3 after diagnostic readback preparation" as const;
+
+async function attestExpectedRunner(baseUrl: string, authSecret: string) {
+  try {
+    const url = new URL(baseUrl);
+    if (
+      url.protocol !== "https:" ||
+      url.origin !== "https://verify.auterim.com" ||
+      (url.pathname !== "/" && url.pathname !== "") ||
+      url.search !== "" ||
+      url.hash !== "" ||
+      url.username !== "" ||
+      url.password !== ""
+    )
+      return null;
+    const nonce = randomBytes(32).toString("hex");
+    const requestBody = VerificationRunnerIdentityAttestationRequestSchema.parse({ nonce });
+    const body = Buffer.from(canonicalJson(requestBody), "utf8");
+    const response = await fetch(new URL(VERIFICATION_RUNNER_IDENTITY_ATTESTATION_PATH, url), {
+      method: "POST",
+      redirect: "error",
+      cache: "no-store",
+      signal: AbortSignal.timeout(8_000),
+      headers: createIdentityAttestationRequestHeaders({ body, secret: authSecret, nonce }),
+      body,
+    });
+    const parsed = await parseBoundedJsonResponse(response);
+    if (!response.ok) return null;
+    return verifyRunnerIdentityAttestation({
+      body: parsed.value,
+      responseSignature: response.headers.get("x-auterim-identity-signature"),
+      requestNonce: nonce,
+      authSecret,
+    });
+  } catch {
+    return null;
+  }
+}
 
 async function verificationRunnerProtocolMatches(baseUrl: string) {
   try {
@@ -63,6 +111,23 @@ async function verificationRunnerProtocolMatches(baseUrl: string) {
   }
 }
 
+function isExpectedRunnerEndpoint(baseUrl: string) {
+  try {
+    const url = new URL(baseUrl);
+    return (
+      url.protocol === "https:" &&
+      url.origin === "https://verify.auterim.com" &&
+      (url.pathname === "/" || url.pathname === "") &&
+      url.search === "" &&
+      url.hash === "" &&
+      url.username === "" &&
+      url.password === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
 export const recoverInternalFixVerificationAfterCacheRepairTask = schemaTask({
   id: "recover-internal-fix-verification-after-cache-repair",
   schema: z.discriminatedUnion("action", [
@@ -74,6 +139,13 @@ export const recoverInternalFixVerificationAfterCacheRepairTask = schemaTask({
       .strict(),
     z.object({ action: z.literal("recover"), fixRunId: z.string().uuid() }).strict(),
     z.object({ action: z.literal("recover_generation_two"), fixRunId: z.string().uuid() }).strict(),
+    z
+      .object({
+        action: z.literal("recover_generation_three"),
+        fixRunId: z.string().uuid(),
+        authorizationReference: z.literal(G3_AUTHORIZATION_REFERENCE),
+      })
+      .strict(),
   ]),
   retry: { maxAttempts: 1 },
   maxDuration: 180,
@@ -98,7 +170,12 @@ export const recoverInternalFixVerificationAfterCacheRepairTask = schemaTask({
     }
 
     const { fixRunId } = input;
-    const recoveryGeneration = input.action === "recover_generation_two" ? 2 : 1;
+    const recoveryGeneration =
+      input.action === "recover_generation_three"
+        ? 3
+        : input.action === "recover_generation_two"
+          ? 2
+          : 1;
     if (
       fixRunId !== FIX_RUN_ID ||
       dependencyCacheIdentityKey(CACHE_IDENTITY) !== EXPECTED_CACHE_IDENTITY_KEY
@@ -110,7 +187,8 @@ export const recoverInternalFixVerificationAfterCacheRepairTask = schemaTask({
     if (!environment.FIX_DEPENDENCY_CACHE_PUBLIC_KEY) {
       return { status: "blocked", category: "verification_cache_key_unavailable" } as const;
     }
-    if (recoveryGeneration === 2) {
+    let runnerIdentity: ReturnType<typeof verifyRunnerIdentityAttestation> | null = null;
+    if (recoveryGeneration >= 2) {
       try {
         const actualFingerprint = sha256(
           Buffer.from(
@@ -132,9 +210,31 @@ export const recoverInternalFixVerificationAfterCacheRepairTask = schemaTask({
       if (
         environment.FIX_VERIFICATION_RUNNER_PROTOCOL !== VERIFICATION_RUNNER_PROTOCOL_VERSION ||
         !environment.FIX_VERIFICATION_RUNNER_URL ||
+        (recoveryGeneration === 3 &&
+          !isExpectedRunnerEndpoint(environment.FIX_VERIFICATION_RUNNER_URL)) ||
         !(await verificationRunnerProtocolMatches(environment.FIX_VERIFICATION_RUNNER_URL))
       ) {
         return { status: "blocked", category: "verification_runner_protocol_unverified" } as const;
+      }
+      if (recoveryGeneration === 3) {
+        if (!environment.FIX_VERIFICATION_RUNNER_AUTH_SECRET) {
+          return { status: "blocked", category: "verification_runner_auth_unavailable" } as const;
+        }
+        runnerIdentity = await attestExpectedRunner(
+          environment.FIX_VERIFICATION_RUNNER_URL,
+          environment.FIX_VERIFICATION_RUNNER_AUTH_SECRET,
+        );
+        if (
+          !runnerIdentity ||
+          !EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS.includes(
+            runnerIdentity.runnerContainerImageId as (typeof EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS)[number],
+          )
+        ) {
+          return {
+            status: "blocked",
+            category: "verification_runner_identity_unverified",
+          } as const;
+        }
       }
     }
 
@@ -178,9 +278,36 @@ export const recoverInternalFixVerificationAfterCacheRepairTask = schemaTask({
       p_cache_tree_sha256: cache.manifest.treeSha256,
     };
     const { data, error } =
-      recoveryGeneration === 2
-        ? await client.rpc("authorize_internal_fix_verification_recovery_generation_two", rpcArgs)
-        : await client.rpc("authorize_internal_fix_verification_recovery", rpcArgs);
+      recoveryGeneration === 3 && runnerIdentity
+        ? await client.rpc("authorize_internal_fix_verification_recovery_generation_three", {
+            ...rpcArgs,
+            p_authorization_reference: G3_AUTHORIZATION_REFERENCE,
+            p_runner_attestation_account: runnerIdentity.accountId,
+            p_runner_attestation_region: runnerIdentity.region,
+            p_runner_attestation_instance_id: runnerIdentity.instanceId,
+            p_runner_image_id: runnerIdentity.runnerContainerImageId,
+            p_runner_protocol: environment.FIX_VERIFICATION_RUNNER_PROTOCOL,
+          })
+        : recoveryGeneration === 2
+          ? await client.rpc("authorize_internal_fix_verification_recovery_generation_two", rpcArgs)
+          : await client.rpc("authorize_internal_fix_verification_recovery", rpcArgs);
+    if (
+      !error &&
+      data?.status === "already_consumed" &&
+      data.fixRunId === fixRunId &&
+      data.stageId === VERIFY_STAGE_ID &&
+      typeof data.recoveryId === "string" &&
+      data.recoveryGeneration === 3
+    ) {
+      return {
+        status: "recovery_already_consumed",
+        fixRunId,
+        recoveryId: data.recoveryId,
+        recoveryGeneration: 3,
+        stageId: VERIFY_STAGE_ID,
+        stageStatus: data.stageStatus,
+      } as const;
+    }
     if (
       error ||
       !data ||

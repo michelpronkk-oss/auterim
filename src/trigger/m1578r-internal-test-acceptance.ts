@@ -4,6 +4,7 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getEnvironment, isIntegrationConfigured } from "@/lib/env/schema";
 import { persistInternalTestSourceChange } from "@/lib/monitoring/internal-test-source";
 import { inspectGitHubInstallationScope } from "@/lib/fix-engine/github-write-token";
+import { sanitizeM1578RRunnerDiagnosticEvents } from "@/lib/fix-engine/runner-diagnostic-readback";
 
 const TARGET = {
   workspaceId: "e140d48e-9dc0-4552-a9a4-a81fe3872422",
@@ -553,6 +554,8 @@ async function inspectM1578RFixStatus() {
     planResult,
     patchResult,
     verificationResult,
+    runnerDiagnosticResult,
+    recoveryThreeResult,
     riskResult,
     externalResult,
     prResult,
@@ -612,6 +615,23 @@ async function inspectM1578RFixStatus() {
       .eq("workspace_id", TARGET.workspaceId)
       .order("attempt_number"),
     client
+      .from("fix_stage_runner_diagnostic_events")
+      .select("id,stage_id,attempt_number,failure_category,retryable,diagnostics,created_at")
+      .eq("fix_run_id", TARGET.fixRunId)
+      .eq("workspace_id", TARGET.workspaceId)
+      .eq("stage", "verify_patch")
+      .order("attempt_number")
+      .limit(4),
+    client
+      .from("fix_verification_recovery_generation_three_authorizations")
+      .select(
+        "id,stage_id,recovery_generation,prior_run_failure_category,prior_stage_failure_category,prior_attempt_count,prior_operator_retry_count,patch_id,patch_fingerprint,cache_identity_key,cache_manifest_fingerprint,cache_archive_sha256,cache_tree_sha256,runner_attestation_account,runner_attestation_region,runner_attestation_instance_id,runner_image_id,runner_protocol,diagnostics_contract_version,authorized_at",
+      )
+      .eq("fix_run_id", TARGET.fixRunId)
+      .eq("workspace_id", TARGET.workspaceId)
+      .eq("stage", "verify_patch")
+      .limit(1),
+    client
       .from("fix_risk_assessments")
       .select(
         "id,risk_version,risk_level,review_required,review_reason,input_fingerprint,created_at",
@@ -641,6 +661,8 @@ async function inspectM1578RFixStatus() {
       planResult,
       patchResult,
       verificationResult,
+      runnerDiagnosticResult,
+      recoveryThreeResult,
       riskResult,
       externalResult,
       prResult,
@@ -650,6 +672,12 @@ async function inspectM1578RFixStatus() {
   }
   const run = runResult.data;
   if (!run) return { status: "not_found", category: "fix_status_readback_not_found" } as const;
+  const runnerDiagnosticEvents = sanitizeM1578RRunnerDiagnosticEvents(
+    runnerDiagnosticResult.data ?? [],
+  );
+  if (runnerDiagnosticEvents === null) {
+    return { status: "unavailable", category: "runner_diagnostics_readback_invalid" } as const;
+  }
   const scopeMatches =
     run.workspace_id === TARGET.workspaceId &&
     run.product_id === TARGET.productId &&
@@ -693,6 +721,29 @@ async function inspectM1578RFixStatus() {
       patchFingerprint: verification.patch_fingerprint,
       attemptNumber: verification.attempt_number,
       createdAt: verification.created_at,
+    })),
+    runnerDiagnosticEvents,
+    generationThreeAuthorizations: (recoveryThreeResult.data ?? []).map((authorization) => ({
+      id: authorization.id,
+      stageId: authorization.stage_id,
+      generation: authorization.recovery_generation,
+      priorFailure: authorization.prior_run_failure_category,
+      priorStageFailure: authorization.prior_stage_failure_category,
+      priorAttemptCount: authorization.prior_attempt_count,
+      priorOperatorRetryCount: authorization.prior_operator_retry_count,
+      patchId: authorization.patch_id,
+      patchFingerprint: authorization.patch_fingerprint,
+      cacheIdentityKey: authorization.cache_identity_key,
+      cacheManifestFingerprint: authorization.cache_manifest_fingerprint,
+      cacheArchiveSha256: authorization.cache_archive_sha256,
+      cacheTreeSha256: authorization.cache_tree_sha256,
+      runnerAccount: authorization.runner_attestation_account,
+      runnerRegion: authorization.runner_attestation_region,
+      runnerInstanceId: authorization.runner_attestation_instance_id,
+      runnerImageId: authorization.runner_image_id,
+      runnerProtocol: authorization.runner_protocol,
+      diagnosticsContractVersion: authorization.diagnostics_contract_version,
+      authorizedAt: authorization.authorized_at,
     })),
     riskAssessment: riskResult.data,
     externalOperations: externalResult.data ?? [],

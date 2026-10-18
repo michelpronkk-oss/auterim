@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 export const RETRYABLE_VERIFICATION_RUNNER_CATEGORIES = [
   "runner_unavailable",
   "runner_queue_full",
@@ -79,45 +81,67 @@ export const VERIFICATION_RUNNER_RESPONSE_CATEGORIES = [
 export type VerificationRunnerResponseCategory =
   (typeof VERIFICATION_RUNNER_RESPONSE_CATEGORIES)[number];
 
-export type VerificationRunnerFailureDiagnostic = {
-  phase:
-    | "admission"
-    | "poll"
-    | "resubmission"
-    | "result_validation"
-    | "result_signature"
-    | "response_decode";
-  httpStatus: number | null;
-  responseCategory: VerificationRunnerResponseCategory | "unrecognized" | null;
-  reason:
-    | "http_error"
-    | "accepted_identity_mismatch"
-    | "response_body_invalid"
-    | "response_body_too_large"
-    | "response_body_unavailable"
-    | "result_schema_invalid"
-    | "result_identity_mismatch"
-    | "result_fingerprint_mismatch"
-    | "result_signature_missing"
-    | "result_signature_mismatch"
-    | "transport_ambiguous";
-  identityField?:
-    | "jobId"
-    | "requestFingerprint"
-    | "workspaceId"
-    | "productId"
-    | "repositoryId"
-    | "repositoryIdentity"
-    | "baseCommitSha"
-    | "patchId"
-    | "snapshotFingerprint"
-    | "patchFingerprint"
-    | "cacheIdentityKey"
-    | "cacheTreeSha256"
-    | "runtimeImage"
-    | "profileId"
-    | "profileVersion";
-};
+const VERIFICATION_RUNNER_DIAGNOSTIC_PHASES = [
+  "admission",
+  "poll",
+  "resubmission",
+  "result_validation",
+  "result_signature",
+  "response_decode",
+] as const;
+const VERIFICATION_RUNNER_DIAGNOSTIC_REASONS = [
+  "http_error",
+  "accepted_identity_mismatch",
+  "response_body_invalid",
+  "response_body_too_large",
+  "response_body_unavailable",
+  "result_schema_invalid",
+  "result_identity_mismatch",
+  "result_fingerprint_mismatch",
+  "result_signature_missing",
+  "result_signature_mismatch",
+  "transport_ambiguous",
+] as const;
+const VERIFICATION_RUNNER_DIAGNOSTIC_IDENTITY_FIELDS = [
+  "jobId",
+  "requestFingerprint",
+  "workspaceId",
+  "productId",
+  "repositoryId",
+  "repositoryIdentity",
+  "baseCommitSha",
+  "patchId",
+  "snapshotFingerprint",
+  "patchFingerprint",
+  "cacheIdentityKey",
+  "cacheTreeSha256",
+  "runtimeImage",
+  "profileId",
+  "profileVersion",
+] as const;
+
+const responseCategorySchema = z
+  .string()
+  .refine(
+    (value) =>
+      value === "unrecognized" ||
+      (VERIFICATION_RUNNER_RESPONSE_CATEGORIES as readonly string[]).includes(value),
+  );
+
+/** Strict, bounded diagnostic contract. It intentionally has no value-bearing fields. */
+export const VerificationRunnerFailureDiagnosticSchema = z
+  .object({
+    phase: z.enum(VERIFICATION_RUNNER_DIAGNOSTIC_PHASES),
+    httpStatus: z.number().int().min(100).max(599).nullable(),
+    responseCategory: responseCategorySchema.nullable(),
+    reason: z.enum(VERIFICATION_RUNNER_DIAGNOSTIC_REASONS),
+    identityField: z.enum(VERIFICATION_RUNNER_DIAGNOSTIC_IDENTITY_FIELDS).optional(),
+  })
+  .strict();
+
+export type VerificationRunnerFailureDiagnostic = z.infer<
+  typeof VerificationRunnerFailureDiagnosticSchema
+>;
 
 export class VerificationRunnerFailure extends Error {
   constructor(
@@ -151,7 +175,10 @@ function normalizeDiagnostics(
     VerificationRunnerFailureDiagnostic | readonly VerificationRunnerFailureDiagnostic[],
 ) {
   if (!diagnostics) return [];
-  return (Array.isArray(diagnostics) ? diagnostics : [diagnostics]).slice(-4);
+  return z
+    .array(VerificationRunnerFailureDiagnosticSchema)
+    .max(4)
+    .parse((Array.isArray(diagnostics) ? diagnostics : [diagnostics]).slice(-4));
 }
 
 export function isVerificationRunnerRetryableFailure(error: unknown): boolean {
