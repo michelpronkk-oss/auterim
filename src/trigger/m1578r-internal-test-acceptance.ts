@@ -26,7 +26,22 @@ const TARGET = {
 
 const SOURCE_ACCEPTANCE_KEY = "m1578r-internal-qa-fix-engine-v1";
 export const M1578R_FRESH_ACCEPTANCE_KEY = "m1578r-internal-qa-fix-engine-v2";
+export const M1578R_FRESH_V3_ACCEPTANCE_KEY = "m1578r-internal-qa-fix-engine-v3";
 export const M1578R_FRESH_FIXTURE_COMMIT_SHA = "94135df6f85bfb34ac83c046e5541e1ad8d73a86";
+type FreshAcceptanceGeneration = "v2" | "v3";
+const FRESH_ACCEPTANCE_CONFIG: Record<
+  FreshAcceptanceGeneration,
+  { acceptanceKey: string; fixtureCommitSha: string }
+> = {
+  v2: {
+    acceptanceKey: M1578R_FRESH_ACCEPTANCE_KEY,
+    fixtureCommitSha: M1578R_FRESH_FIXTURE_COMMIT_SHA,
+  },
+  v3: {
+    acceptanceKey: M1578R_FRESH_V3_ACCEPTANCE_KEY,
+    fixtureCommitSha: M1578R_FRESH_FIXTURE_COMMIT_SHA,
+  },
+};
 const SOURCE_BASELINE =
   "Internal QA provider bulletin: endpoint https://api.openai.com/v1/auterim-m1578r-old is currently supported.";
 const SOURCE_CHANGED =
@@ -163,6 +178,11 @@ export const M1578RInternalTestAcceptanceInputSchema = z.discriminatedUnion("act
   z.object({ action: z.literal("dispatch_fresh_intelligence") }).strict(),
   z.object({ action: z.literal("read_fresh_status") }).strict(),
   z.object({ action: z.literal("start_fresh_fix_run") }).strict(),
+  z.object({ action: z.literal("verify_fresh_v3") }).strict(),
+  z.object({ action: z.literal("create_fresh_v3_source") }).strict(),
+  z.object({ action: z.literal("dispatch_fresh_v3_intelligence") }).strict(),
+  z.object({ action: z.literal("read_fresh_v3_status") }).strict(),
+  z.object({ action: z.literal("start_fresh_v3_fix_run") }).strict(),
   z.object({ action: z.literal("diagnose_entitlement") }).strict(),
   z
     .object({
@@ -175,10 +195,11 @@ export const M1578RInternalTestAcceptanceInputSchema = z.discriminatedUnion("act
 export function freshAcceptanceDispatchKey(
   sourceChangeId: string,
   stage: "classify" | "intelligence" | "fix",
+  generation: FreshAcceptanceGeneration = "v2",
 ) {
   if (!z.string().uuid().safeParse(sourceChangeId).success)
     throw new Error("invalid_source_change_id");
-  return `m1578r-fresh-v2:${sourceChangeId}:${stage}`;
+  return `m1578r-fresh-${generation}:${sourceChangeId}:${stage}`;
 }
 
 type BillingSubscription = {
@@ -881,15 +902,16 @@ function freshStatusUnavailable(category: string) {
   return { status: "unavailable", category } as const;
 }
 
-/** Fixed-key readback. Every downstream query is derived from the new source row. */
-async function inspectFreshM1578RAcceptance() {
+/** Fixed-key readback. Every downstream query is derived from the versioned source row. */
+async function inspectFreshM1578RAcceptance(generation: FreshAcceptanceGeneration = "v2") {
+  const { acceptanceKey, fixtureCommitSha } = FRESH_ACCEPTANCE_CONFIG[generation];
   const client = createSupabaseServerClient();
   const { data: source, error: sourceError } = await client
     .from("source_catalog")
     .select(
       "id,workspace_id,scope_product_id,dependency_id,source_mode,processing_mode,internal_acceptance_key",
     )
-    .eq("internal_acceptance_key", M1578R_FRESH_ACCEPTANCE_KEY)
+    .eq("internal_acceptance_key", acceptanceKey)
     .maybeSingle();
   if (sourceError) return freshStatusUnavailable("fresh_source_read_failed");
   if (!source) return { status: "not_started", source: null } as const;
@@ -980,7 +1002,7 @@ async function inspectFreshM1578RAcceptance() {
         handoff.workspace_id !== TARGET.workspaceId ||
         handoff.product_id !== TARGET.productId ||
         handoff.repository_id !== TARGET.repositoryId ||
-        handoff.commit_sha !== M1578R_FRESH_FIXTURE_COMMIT_SHA,
+        handoff.commit_sha !== fixtureCommitSha,
     )
   )
     return { status: "blocked", category: "fresh_analysis_handoff_scope_mismatch" } as const;
@@ -1007,7 +1029,7 @@ async function inspectFreshM1578RAcceptance() {
     .eq("workspace_id", TARGET.workspaceId)
     .eq("product_id", TARGET.productId)
     .eq("repository_id", TARGET.repositoryId)
-    .eq("commit_sha", M1578R_FRESH_FIXTURE_COMMIT_SHA)
+    .eq("commit_sha", fixtureCommitSha)
     .order("created_at", { ascending: false })
     .limit(4);
   if (graphResult.error) return freshStatusUnavailable("fresh_graph_read_failed");
@@ -1019,7 +1041,7 @@ async function inspectFreshM1578RAcceptance() {
         graph.product_id !== TARGET.productId ||
         graph.repository_id !== TARGET.repositoryId ||
         graph.source_change_id !== change.id ||
-        graph.commit_sha !== M1578R_FRESH_FIXTURE_COMMIT_SHA,
+        graph.commit_sha !== fixtureCommitSha,
     )
   )
     return { status: "blocked", category: "fresh_graph_scope_mismatch" } as const;
@@ -1037,7 +1059,7 @@ async function inspectFreshM1578RAcceptance() {
         analysis.status !== "completed" ||
         analysis.workspace_id !== TARGET.workspaceId ||
         analysis.repository_id !== TARGET.repositoryId ||
-        analysis.commit_sha !== M1578R_FRESH_FIXTURE_COMMIT_SHA ||
+        analysis.commit_sha !== fixtureCommitSha ||
         !handoffByRouteAndAnalysis.has(`${graph.route_intent_id}:${graph.analysis_run_id}`)
       );
     })
@@ -1056,7 +1078,7 @@ async function inspectFreshM1578RAcceptance() {
           .eq("source_change_id", change.id)
           .eq("product_id", TARGET.productId)
           .eq("repository_id", TARGET.repositoryId)
-          .eq("commit_sha", M1578R_FRESH_FIXTURE_COMMIT_SHA)
+          .eq("commit_sha", fixtureCommitSha)
           .order("edge_fingerprint", { ascending: true })
           .limit(200)
       : Promise.resolve({ data: [], error: null }),
@@ -1070,7 +1092,7 @@ async function inspectFreshM1578RAcceptance() {
           .in("analysis_run_id", analysisIds)
           .eq("workspace_id", TARGET.workspaceId)
           .eq("repository_id", TARGET.repositoryId)
-          .eq("commit_sha", M1578R_FRESH_FIXTURE_COMMIT_SHA)
+          .eq("commit_sha", fixtureCommitSha)
           .eq("reference_type", "endpoint")
           .order("path", { ascending: true })
           .order("start_line", { ascending: true })
@@ -1097,7 +1119,7 @@ async function inspectFreshM1578RAcceptance() {
           graphs.find((graph) => graph.id === edge.graph_build_id)?.analysis_run_id ||
         edge.product_id !== TARGET.productId ||
         edge.repository_id !== TARGET.repositoryId ||
-        edge.commit_sha !== M1578R_FRESH_FIXTURE_COMMIT_SHA,
+        edge.commit_sha !== fixtureCommitSha,
     )
   )
     return { status: "blocked", category: "fresh_graph_edge_scope_mismatch" } as const;
@@ -1124,7 +1146,7 @@ async function inspectFreshM1578RAcceptance() {
     .eq("workspace_id", TARGET.workspaceId)
     .eq("product_id", TARGET.productId)
     .eq("repository_id", TARGET.repositoryId)
-    .eq("commit_sha", M1578R_FRESH_FIXTURE_COMMIT_SHA)
+    .eq("commit_sha", fixtureCommitSha)
     .order("created_at", { ascending: false })
     .limit(2);
   if (fixResult.error) return freshStatusUnavailable("fresh_fix_run_read_failed");
@@ -1140,7 +1162,7 @@ async function inspectFreshM1578RAcceptance() {
       !graphIds.includes(fixRun.graph_build_id) ||
       fixRun.analysis_run_id !==
         graphs.find((graph) => graph.id === fixRun.graph_build_id)?.analysis_run_id ||
-      fixRun.commit_sha !== M1578R_FRESH_FIXTURE_COMMIT_SHA)
+      fixRun.commit_sha !== fixtureCommitSha)
   )
     return { status: "blocked", category: "fresh_fix_run_scope_mismatch" } as const;
 
@@ -1245,7 +1267,7 @@ async function inspectFreshM1578RAcceptance() {
 
   return {
     status: "readback",
-    fixtureCommitSha: M1578R_FRESH_FIXTURE_COMMIT_SHA,
+    fixtureCommitSha,
     source: {
       id: source.id,
       sourceMode: source.source_mode,
@@ -1265,12 +1287,13 @@ async function inspectFreshM1578RAcceptance() {
   } as const;
 }
 
-async function startFreshM1578RFixRun() {
-  const status = await inspectFreshM1578RAcceptance();
+async function startFreshM1578RFixRun(generation: FreshAcceptanceGeneration = "v2") {
+  const { fixtureCommitSha } = FRESH_ACCEPTANCE_CONFIG[generation];
+  const status = await inspectFreshM1578RAcceptance(generation);
   if (status.status !== "readback" || !status.sourceChange?.id)
     return { status: "blocked", category: "fresh_acceptance_not_readable" } as const;
   const completedGraphs = status.graphBuilds.filter(
-    (graph) => graph.status === "completed" && graph.commit_sha === M1578R_FRESH_FIXTURE_COMMIT_SHA,
+    (graph) => graph.status === "completed" && graph.commit_sha === fixtureCommitSha,
   );
   if (completedGraphs.length !== 1)
     return { status: "blocked", category: "fresh_graph_not_unique_and_complete" } as const;
@@ -1307,7 +1330,7 @@ async function startFreshM1578RFixRun() {
     "start-fix-engine-from-graph",
     { graphBuildId: graph.id },
     {
-      idempotencyKey: freshAcceptanceDispatchKey(status.sourceChange.id, "fix"),
+      idempotencyKey: freshAcceptanceDispatchKey(status.sourceChange.id, "fix", generation),
       idempotencyKeyTTL: "30d",
     },
   );
@@ -1315,12 +1338,12 @@ async function startFreshM1578RFixRun() {
     status: "dispatched",
     graphBuildId: graph.id,
     startFixEngineRunId: started.id,
-    idempotentKey: freshAcceptanceDispatchKey(status.sourceChange.id, "fix"),
+    idempotentKey: freshAcceptanceDispatchKey(status.sourceChange.id, "fix", generation),
   } as const;
 }
 
-async function dispatchFreshM1578RIntelligence() {
-  const status = await inspectFreshM1578RAcceptance();
+async function dispatchFreshM1578RIntelligence(generation: FreshAcceptanceGeneration = "v2") {
+  const status = await inspectFreshM1578RAcceptance(generation);
   if (status.status !== "readback" || !status.sourceChange?.id)
     return { status: "blocked", category: "fresh_acceptance_not_readable" } as const;
   if (
@@ -1340,7 +1363,11 @@ async function dispatchFreshM1578RIntelligence() {
     "evaluate-source-change-intelligence",
     { sourceChangeId: status.sourceChange.id },
     {
-      idempotencyKey: freshAcceptanceDispatchKey(status.sourceChange.id, "intelligence"),
+      idempotencyKey: freshAcceptanceDispatchKey(
+        status.sourceChange.id,
+        "intelligence",
+        generation,
+      ),
       idempotencyKeyTTL: "30d",
     },
   );
@@ -1348,8 +1375,51 @@ async function dispatchFreshM1578RIntelligence() {
     status: "dispatched",
     sourceChangeId: status.sourceChange.id,
     intelligenceRunId: started.id,
-    idempotentKey: freshAcceptanceDispatchKey(status.sourceChange.id, "intelligence"),
+    idempotentKey: freshAcceptanceDispatchKey(status.sourceChange.id, "intelligence", generation),
   } as const;
+}
+
+async function createFreshM1578RSource(generation: FreshAcceptanceGeneration) {
+  const { acceptanceKey, fixtureCommitSha } = FRESH_ACCEPTANCE_CONFIG[generation];
+  const readiness = await inspectReadiness(fixtureCommitSha);
+  if (readiness.status !== "ready") return readiness;
+  try {
+    const created = await persistInternalTestSourceChange({
+      workspaceId: TARGET.workspaceId,
+      productId: TARGET.productId,
+      dependencyId: TARGET.dependencyId,
+      acceptanceKey,
+      baseline: SOURCE_BASELINE,
+      changed: SOURCE_CHANGED,
+    });
+    const persisted = await inspectFreshM1578RAcceptance(generation);
+    if (persisted.status !== "readback" || persisted.sourceChange?.id !== created.sourceChangeId)
+      return { status: "blocked", category: "fresh_source_persistence_unverified" } as const;
+    const classificationRun = await tasks.trigger<typeof semanticClassifyChangeTask>(
+      "classify-source-change",
+      { sourceChangeId: created.sourceChangeId },
+      {
+        idempotencyKey: freshAcceptanceDispatchKey(created.sourceChangeId, "classify", generation),
+        idempotencyKeyTTL: "30d",
+      },
+    );
+    return {
+      ...readiness,
+      status: "source_created_classifier_dispatched",
+      sourceId: created.sourceId,
+      sourceChangeId: created.sourceChangeId,
+      fixtureCommitSha,
+      acceptanceKey,
+      replayed: created.replayed,
+      classifierRunId: classificationRun.id,
+    } as const;
+  } catch (error) {
+    return {
+      ...readiness,
+      status: "blocked",
+      category: safeFailureCategory(error),
+    } as const;
+  }
 }
 
 /**
@@ -1369,6 +1439,12 @@ export const m1578rInternalTestAcceptanceTask = schemaTask({
     if (input.action === "verify_fresh") return inspectReadiness(M1578R_FRESH_FIXTURE_COMMIT_SHA);
     if (input.action === "dispatch_fresh_intelligence") return dispatchFreshM1578RIntelligence();
     if (input.action === "start_fresh_fix_run") return startFreshM1578RFixRun();
+    if (input.action === "read_fresh_v3_status") return inspectFreshM1578RAcceptance("v3");
+    if (input.action === "verify_fresh_v3")
+      return inspectReadiness(FRESH_ACCEPTANCE_CONFIG.v3.fixtureCommitSha);
+    if (input.action === "dispatch_fresh_v3_intelligence")
+      return dispatchFreshM1578RIntelligence("v3");
+    if (input.action === "start_fresh_v3_fix_run") return startFreshM1578RFixRun("v3");
     if (input.action === "diagnose_entitlement") {
       const client = createSupabaseServerClient();
       const { data: snapshot, error: snapshotError } = await client.rpc(
@@ -1405,50 +1481,8 @@ export const m1578rInternalTestAcceptanceTask = schemaTask({
       return diagnosePreflightEntitlement({ snapshot, preflightRuns: count });
     }
 
-    if (input.action === "create_fresh_source") {
-      const readiness = await inspectReadiness(M1578R_FRESH_FIXTURE_COMMIT_SHA);
-      if (readiness.status !== "ready") return readiness;
-      try {
-        const created = await persistInternalTestSourceChange({
-          workspaceId: TARGET.workspaceId,
-          productId: TARGET.productId,
-          dependencyId: TARGET.dependencyId,
-          acceptanceKey: M1578R_FRESH_ACCEPTANCE_KEY,
-          baseline: SOURCE_BASELINE,
-          changed: SOURCE_CHANGED,
-        });
-        const persisted = await inspectFreshM1578RAcceptance();
-        if (
-          persisted.status !== "readback" ||
-          persisted.sourceChange?.id !== created.sourceChangeId
-        )
-          return { status: "blocked", category: "fresh_source_persistence_unverified" } as const;
-        const classificationRun = await tasks.trigger<typeof semanticClassifyChangeTask>(
-          "classify-source-change",
-          { sourceChangeId: created.sourceChangeId },
-          {
-            idempotencyKey: freshAcceptanceDispatchKey(created.sourceChangeId, "classify"),
-            idempotencyKeyTTL: "30d",
-          },
-        );
-        return {
-          ...readiness,
-          status: "source_created_classifier_dispatched",
-          sourceId: created.sourceId,
-          sourceChangeId: created.sourceChangeId,
-          fixtureCommitSha: M1578R_FRESH_FIXTURE_COMMIT_SHA,
-          acceptanceKey: M1578R_FRESH_ACCEPTANCE_KEY,
-          replayed: created.replayed,
-          classifierRunId: classificationRun.id,
-        };
-      } catch (error) {
-        return {
-          ...readiness,
-          status: "blocked",
-          category: safeFailureCategory(error),
-        };
-      }
-    }
+    if (input.action === "create_fresh_source") return createFreshM1578RSource("v2");
+    if (input.action === "create_fresh_v3_source") return createFreshM1578RSource("v3");
 
     const readiness = await inspectReadiness(
       input.action === "create_source" ? input.fixtureCommitSha : undefined,

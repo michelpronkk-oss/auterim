@@ -40,7 +40,6 @@ import type { FixStageProcessor } from "@/lib/fix-engine/stage-runtime";
 import { stableFingerprint } from "@/lib/fix-engine/identity";
 import type { FixCodingModel, FixModelContext, ModelEnvelope } from "@/lib/fix-engine/model";
 import { createPersistedFixRun, runPersistedFixStage } from "@/lib/fix-engine/stage-runtime";
-import { withExactBaseGitHubSnapshot } from "@/lib/fix-engine/sandbox";
 import type { FixStage } from "@/lib/fix-engine/contracts";
 import type { GitHubAppRepositoryProvider } from "@/lib/preflight/github-provider";
 import { dependencyCacheIdentityKey } from "@/lib/fix-engine/dependency-cache";
@@ -57,7 +56,6 @@ import {
 import { RemoteVerificationExecutor } from "@/lib/fix-engine/verification-executor";
 import { RemoteVerificationRunnerClient } from "@/lib/fix-engine/verification-runner-client";
 import {
-  terminalRunnerFailure,
   retryableRunnerFailure,
   withVerificationRunnerCorrelation,
 } from "@/lib/fix-engine/verification-retry";
@@ -369,6 +367,7 @@ describe.skipIf(!enabled)(
       const sourceText = 'export const before = "source";\n';
       const cacheKeys = generateKeyPairSync("ed25519");
       let cacheRootPath: string | null = null;
+      let runnerJobStorePath: string | null = null;
       let verificationExecutor: RemoteVerificationExecutor | undefined;
       let resolveRemoteDependencyCache:
         | ((
@@ -380,12 +379,20 @@ describe.skipIf(!enabled)(
         runnerRoots.push(runnerRoot);
         const authSecret = randomBytes(32).toString("hex");
         const publicKey = cacheKeys.publicKey.export({ type: "spki", format: "pem" }).toString();
+        runnerJobStorePath = path.join(runnerRoot, "jobs");
         const runner = createVerificationRunnerServer({
           authSecret,
           artifactOrigin: artifactHarness!.origin,
           cachePublicKey: publicKey,
-          jobStorePath: path.join(runnerRoot, "jobs"),
+          jobStorePath: runnerJobStorePath,
           workRoot: path.join(runnerRoot, "work"),
+          ...(runnerDiagnosticAcceptance
+            ? {
+                materialize: async () => {
+                  throw new Error("verification_job_invalid");
+                },
+              }
+            : {}),
         });
         const address = await runner.listen(0, "127.0.0.1");
         runnerServers.push(runner);
@@ -801,62 +808,42 @@ describe.skipIf(!enabled)(
         if (stages.length >= 8) throw new Error("fix_stage_bound_exceeded");
         stages.push(stage);
         if (stage === "verify_patch" && remoteAcceptance) {
-          const injectedFailure = withVerificationRunnerCorrelation(
-            runnerDiagnosticAcceptance
-              ? terminalRunnerFailure("runner_result_invalid", {
-                  phase: "result_validation",
-                  httpStatus: 200,
-                  responseCategory: null,
-                  reason: "result_identity_mismatch",
-                  identityField: "patchFingerprint",
-                })
-              : retryableRunnerFailure("runner_unavailable", {
-                  phase: "admission",
-                  httpStatus: 503,
-                  responseCategory: "unrecognized",
-                  reason: "http_error",
-                }),
-            {
-              jobId: "a".repeat(64),
-              requestFingerprint: "b".repeat(64),
-              admissionState: runnerDiagnosticAcceptance ? "accepted" : "unconfirmed",
-            },
-          );
-          const runnerFailureResult = runPersistedFixStage({
-            fixRunId: created.fixRunId,
-            stage,
-            processor: () =>
-              runnerDiagnosticAcceptance
-                ? withExactBaseGitHubSnapshot({
-                    expectedBaseSha: "a".repeat(40),
-                    materialize: async (destination) => {
-                      await writeFile(path.join(destination, "endpoint.txt"), "old\n");
-                      return { skippedLinks: 0 };
-                    },
-                    unifiedDiff: [
-                      "diff --git a/endpoint.txt b/endpoint.txt",
-                      "--- a/endpoint.txt",
-                      "+++ b/endpoint.txt",
-                      "@@ -1 +1 @@",
-                      "-old",
-                      "+new",
-                      "",
-                    ].join("\n"),
-                    run: async () => {
-                      throw injectedFailure;
-                    },
-                  })
-                : (async () => {
-                    throw injectedFailure;
-                  })(),
-          });
           if (runnerDiagnosticAcceptance) {
+            // Exercise the actual client → authenticated HTTP admission → sandbox →
+            // stage RPC path. The local runner accepts and validates the request,
+            // then deterministically rejects during materialization before job
+            // persistence, matching a bounded pre-admission failure.
+            const runnerFailureResult = runPersistedFixStage({
+              fixRunId: created.fixRunId,
+              stage,
+              processor,
+            });
             await expect(runnerFailureResult).resolves.toMatchObject({
               status: "validation_failed",
               failureCategory: "runner_result_invalid",
               diagnosticPersistence: "recorded",
             });
           } else {
+            const injectedFailure = withVerificationRunnerCorrelation(
+              retryableRunnerFailure("runner_unavailable", {
+                phase: "admission",
+                httpStatus: 503,
+                responseCategory: "unrecognized",
+                reason: "http_error",
+              }),
+              {
+                jobId: "a".repeat(64),
+                requestFingerprint: "b".repeat(64),
+                admissionState: "unconfirmed",
+              },
+            );
+            const runnerFailureResult = runPersistedFixStage({
+              fixRunId: created.fixRunId,
+              stage,
+              processor: async () => {
+                throw injectedFailure;
+              },
+            });
             await expect(runnerFailureResult).rejects.toThrow("runner_unavailable");
           }
           const { data: runnerDiagnostic, error: runnerDiagnosticError } = await client
@@ -868,33 +855,44 @@ describe.skipIf(!enabled)(
             .eq("stage", "verify_patch")
             .single();
           expect(runnerDiagnosticError).toBeNull();
-          expect(runnerDiagnostic).toMatchObject({
-            job_id: "a".repeat(64),
-            request_fingerprint: "b".repeat(64),
-            admission_state: runnerDiagnosticAcceptance ? "accepted" : "unconfirmed",
-            failure_category: runnerDiagnosticAcceptance
-              ? "runner_result_invalid"
-              : "runner_unavailable",
-            retryable: !runnerDiagnosticAcceptance,
-            diagnostics: runnerDiagnosticAcceptance
-              ? [
-                  {
-                    phase: "result_validation",
-                    httpStatus: 200,
-                    responseCategory: null,
-                    reason: "result_identity_mismatch",
-                    identityField: "patchFingerprint",
-                  },
-                ]
-              : [
-                  {
-                    phase: "admission",
-                    httpStatus: 503,
-                    responseCategory: "unrecognized",
-                    reason: "http_error",
-                  },
-                ],
-          });
+          if (runnerDiagnosticAcceptance) {
+            expect(runnerDiagnostic).toMatchObject({
+              job_id: expect.stringMatching(/^[a-f0-9]{64}$/),
+              request_fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+              admission_state: "rejected",
+              failure_category: "runner_result_invalid",
+              retryable: false,
+              diagnostics: [
+                {
+                  phase: "admission",
+                  httpStatus: 400,
+                  responseCategory: "verification_job_invalid",
+                  reason: "http_error",
+                },
+              ],
+            });
+            expect(runnerJobStorePath).not.toBeNull();
+            const records = await readdir(runnerJobStorePath!);
+            expect(records.filter((name) => /^[a-f0-9]{64}\.json$/.test(name))).toEqual([]);
+            const spool = await readdir(path.join(runnerJobStorePath!, "artifacts"));
+            expect(spool).toEqual([]);
+          } else {
+            expect(runnerDiagnostic).toMatchObject({
+              job_id: "a".repeat(64),
+              request_fingerprint: "b".repeat(64),
+              admission_state: "unconfirmed",
+              failure_category: "runner_unavailable",
+              retryable: true,
+              diagnostics: [
+                {
+                  phase: "admission",
+                  httpStatus: 503,
+                  responseCategory: "unrecognized",
+                  reason: "http_error",
+                },
+              ],
+            });
+          }
           expect(JSON.stringify(runnerDiagnostic)).not.toMatch(
             /signedUrl|authorization|headers|responseBody|signature/i,
           );

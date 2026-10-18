@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   freshAcceptanceDispatchKey,
   M1578R_FRESH_ACCEPTANCE_KEY,
+  M1578R_FRESH_V3_ACCEPTANCE_KEY,
   M1578R_FRESH_FIXTURE_COMMIT_SHA,
   M1578RInternalTestAcceptanceInputSchema,
   sanitizeFreshEndpointReferences,
@@ -41,9 +42,32 @@ describe("M15.78R bounded Fix Run status readback", () => {
         }).success,
       ).toBe(false);
     }
+    expect(M1578R_FRESH_V3_ACCEPTANCE_KEY).toBe("m1578r-internal-qa-fix-engine-v3");
+    expect(M1578R_FRESH_V3_ACCEPTANCE_KEY).not.toBe(M1578R_FRESH_ACCEPTANCE_KEY);
+    for (const action of [
+      "verify_fresh_v3",
+      "create_fresh_v3_source",
+      "dispatch_fresh_v3_intelligence",
+      "read_fresh_v3_status",
+      "start_fresh_v3_fix_run",
+    ] as const) {
+      expect(M1578RInternalTestAcceptanceInputSchema.safeParse({ action }).success).toBe(true);
+      expect(
+        M1578RInternalTestAcceptanceInputSchema.safeParse({
+          action,
+          workspaceId: "caller-controlled",
+          repositoryId: "caller-controlled",
+          sourceChangeId: "11111111-1111-4111-8111-111111111111",
+          fixRunId: "caller-controlled",
+        }).success,
+      ).toBe(false);
+    }
     expect(freshAcceptanceDispatchKey("11111111-1111-4111-8111-111111111111", "classify")).toBe(
       "m1578r-fresh-v2:11111111-1111-4111-8111-111111111111:classify",
     );
+    expect(
+      freshAcceptanceDispatchKey("11111111-1111-4111-8111-111111111111", "classify", "v3"),
+    ).toBe("m1578r-fresh-v3:11111111-1111-4111-8111-111111111111:classify");
     expect(() => freshAcceptanceDispatchKey("not-a-uuid", "fix")).toThrow(
       "invalid_source_change_id",
     );
