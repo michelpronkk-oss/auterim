@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   canonicalJson,
   sha256,
+  VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF,
+  VERIFICATION_RUNNER_IDENTITY_ATTESTATION_PATH,
   VERIFICATION_RUNNER_IMAGE,
   VERIFICATION_RUNNER_PROTOCOL_VERSION,
   type VerificationJobRequest,
@@ -26,7 +28,14 @@ import {
 import {
   assertNoSnapshotSecrets,
   createVerificationRunnerServer,
+  type VerificationRunnerConfig,
 } from "../verification-runner/server";
+import {
+  AWS_EU_WEST_1_RSA_CERTIFICATE_SHA256,
+  EXPECTED_VERIFIER_INSTANCE,
+  verifyRsaSha256DocumentSignature,
+  verifyRunnerIdentityAttestation,
+} from "../src/lib/fix-engine/runner-identity-attestation";
 import { extractSafeTarGzip, packSafeDirectory } from "../verification-runner/archive";
 import { resolveVerificationProfile } from "../src/lib/fix-engine/verification-profile";
 import {
@@ -355,6 +364,7 @@ describe("M15.78R remote verification runner", () => {
       maxJobRecords?: number;
       maxSpoolBytes?: number;
       cachePublicKey?: string;
+      attestIdentity?: VerificationRunnerConfig["attestIdentity"];
     } = {},
   ) {
     const root = await mkdtemp(path.join(os.tmpdir(), "m1578r-runner-test-"));
@@ -413,6 +423,185 @@ describe("M15.78R remote verification runner", () => {
     expect(first.status).toBe("passed");
     expect(replay.jobId).toBe(first.jobId);
     expect(executions).toBe(1);
+  });
+
+  it("authenticates a nonce-bound read-only runner identity attestation without admitting a job", async () => {
+    const fakeIdentity = {
+      instanceIdentityDocument: JSON.stringify({
+        accountId: EXPECTED_VERIFIER_INSTANCE.accountId,
+        region: EXPECTED_VERIFIER_INSTANCE.region,
+        instanceId: EXPECTED_VERIFIER_INSTANCE.instanceId,
+        imageId: "ami-0123456789abcdef0",
+      }),
+      instanceIdentitySignature: "A".repeat(344),
+      containerImageId: `sha256:${"a".repeat(64)}`,
+      containerImageRef: VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF,
+    };
+    let attestCalls = 0;
+    let executeCalls = 0;
+    const { base, root } = await startRunner(
+      async () => {
+        executeCalls += 1;
+        throw new Error("verification_job_must_not_execute");
+      },
+      {
+        attestIdentity: async () => {
+          attestCalls += 1;
+          return fakeIdentity;
+        },
+      },
+    );
+    const challenge = "b".repeat(64);
+    const body = Buffer.from(JSON.stringify({ nonce: challenge }));
+    const response = await signedFetch(
+      base,
+      "POST",
+      VERIFICATION_RUNNER_IDENTITY_ATTESTATION_PATH,
+      body,
+    );
+    const value = (await response.json()) as Record<string, unknown>;
+    const signature = response.headers.get("x-auterim-identity-signature") ?? "";
+    const expected = createHmac("sha256", AUTH_SECRET)
+      .update(canonicalJson(value), "utf8")
+      .digest("hex");
+
+    expect(response.status).toBe(200);
+    expect(signature).toBe(expected);
+    expect(value).toMatchObject({ nonce: challenge, ...fakeIdentity });
+    expect(attestCalls).toBe(1);
+    expect(executeCalls).toBe(0);
+    const persisted = await readdir(path.join(root, "jobs"), { withFileTypes: true }).catch(
+      () => [],
+    );
+    expect(persisted.some((entry) => entry.isFile() && entry.name.endsWith(".json"))).toBe(false);
+    const spool = await readdir(path.join(root, "jobs", "artifacts")).catch(() => []);
+    expect(spool).toHaveLength(0);
+  });
+
+  it("fails closed for unauthenticated or malformed runner identity attestation requests", async () => {
+    let attestCalls = 0;
+    const { base } = await startRunner(undefined, {
+      attestIdentity: async () => {
+        attestCalls += 1;
+        throw new Error("should_not_be_called");
+      },
+    });
+    const pathName = VERIFICATION_RUNNER_IDENTITY_ATTESTATION_PATH;
+    const unauthenticated = await fetch(new URL(pathName, base), {
+      method: "POST",
+      body: JSON.stringify({ nonce: "c".repeat(64) }),
+    });
+    expect(unauthenticated.status).toBe(401);
+
+    const malformed = await signedFetch(
+      base,
+      "POST",
+      pathName,
+      Buffer.from(JSON.stringify({ nonce: "wrong" })),
+      "d".repeat(48),
+    );
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toEqual({ error: "runner_identity_attestation_invalid" });
+    expect(attestCalls).toBe(0);
+  });
+
+  it("verifies the AWS RSA identity signature and rejects nonce, host, and signature mismatches", () => {
+    const keys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const identityDocument = JSON.stringify({
+      accountId: EXPECTED_VERIFIER_INSTANCE.accountId,
+      region: EXPECTED_VERIFIER_INSTANCE.region,
+      instanceId: EXPECTED_VERIFIER_INSTANCE.instanceId,
+      imageId: "ami-0123456789abcdef0",
+    });
+    const identitySignature = sign(
+      "sha256",
+      Buffer.from(identityDocument),
+      keys.privateKey,
+    ).toString("base64");
+    expect(
+      verifyRsaSha256DocumentSignature(identityDocument, identitySignature, keys.publicKey),
+    ).toBe(true);
+    expect(
+      verifyRsaSha256DocumentSignature(`${identityDocument} `, identitySignature, keys.publicKey),
+    ).toBe(false);
+
+    const nonce = "e".repeat(64);
+    const body = {
+      nonce,
+      issuedAt: Date.now(),
+      instanceIdentityDocument: identityDocument,
+      instanceIdentitySignature: identitySignature,
+      containerImageId: `sha256:${"b".repeat(64)}`,
+      containerImageRef: VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF,
+    };
+    const responseSignature = createHmac("sha256", AUTH_SECRET)
+      .update(canonicalJson(body), "utf8")
+      .digest("hex");
+    expect(AWS_EU_WEST_1_RSA_CERTIFICATE_SHA256).toBe(
+      "7092993efe38800eedd69def9cf34b734ac828cce30ef94342388bc7a548827d",
+    );
+    expect(
+      verifyRunnerIdentityAttestation({
+        body,
+        responseSignature,
+        requestNonce: nonce,
+        authSecret: AUTH_SECRET,
+        signaturePublicKey: keys.publicKey,
+      }),
+    ).toEqual({
+      accountId: EXPECTED_VERIFIER_INSTANCE.accountId,
+      region: EXPECTED_VERIFIER_INSTANCE.region,
+      instanceId: EXPECTED_VERIFIER_INSTANCE.instanceId,
+      instanceImageId: "ami-0123456789abcdef0",
+      runnerContainerImageId: `sha256:${"b".repeat(64)}`,
+      runnerContainerImageRef: VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF,
+    });
+    expect(() =>
+      verifyRunnerIdentityAttestation({
+        body,
+        responseSignature,
+        requestNonce: "f".repeat(64),
+        authSecret: AUTH_SECRET,
+        signaturePublicKey: keys.publicKey,
+      }),
+    ).toThrow("runner_identity_attestation_signature_invalid");
+    const wrongHost = {
+      ...body,
+      instanceIdentityDocument: JSON.stringify({
+        accountId: EXPECTED_VERIFIER_INSTANCE.accountId,
+        region: EXPECTED_VERIFIER_INSTANCE.region,
+        instanceId: "i-00000000000000000",
+        imageId: "ami-0123456789abcdef0",
+      }),
+    };
+    const wrongHostSignature = createHmac("sha256", AUTH_SECRET)
+      .update(canonicalJson(wrongHost), "utf8")
+      .digest("hex");
+    expect(() =>
+      verifyRunnerIdentityAttestation({
+        body: wrongHost,
+        responseSignature: wrongHostSignature,
+        requestNonce: nonce,
+        authSecret: AUTH_SECRET,
+        signaturePublicKey: keys.publicKey,
+      }),
+    ).toThrow("runner_identity_claim_mismatch");
+    const wrongDocumentSignature = {
+      ...body,
+      instanceIdentitySignature: Buffer.alloc(256, 1).toString("base64"),
+    };
+    const wrongSignatureHmac = createHmac("sha256", AUTH_SECRET)
+      .update(canonicalJson(wrongDocumentSignature), "utf8")
+      .digest("hex");
+    expect(() =>
+      verifyRunnerIdentityAttestation({
+        body: wrongDocumentSignature,
+        responseSignature: wrongSignatureHmac,
+        requestNonce: nonce,
+        authSecret: AUTH_SECRET,
+        signaturePublicKey: keys.publicKey,
+      }),
+    ).toThrow("runner_identity_signature_invalid");
   });
 
   it("executes admitted artifacts after their signed URLs expire and reconciles a long-running job once", async () => {

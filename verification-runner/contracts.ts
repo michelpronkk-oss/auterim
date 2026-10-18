@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const VERIFICATION_RUNNER_PROTOCOL_VERSION = "m1578-verification-runner-v1";
+export const VERIFICATION_RUNNER_IDENTITY_ATTESTATION_PATH = "/v1/identity-attestation";
+export const VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF = "auterim-verification-runner:ac73ed8";
 export const VERIFICATION_RUNNER_IMAGE =
   "node:24.8.0-alpine3.22@sha256:3e843c608bb5232f39ecb2b25e41214b958b0795914707374c8acc28487dea17";
 export const MAX_SNAPSHOT_BYTES = 25 * 1024 * 1024;
@@ -14,6 +16,27 @@ export const MAX_ARCHIVE_EXPANDED_BYTES = 512 * 1024 * 1024;
 const fingerprint = z.string().regex(/^[a-f0-9]{64}$/);
 const commitSha = z.string().regex(/^[a-f0-9]{40,64}$/i);
 const uuid = z.string().uuid();
+
+export const VerificationRunnerIdentityAttestationRequestSchema = z
+  .object({ nonce: fingerprint })
+  .strict();
+export type VerificationRunnerIdentityAttestationRequest = z.infer<
+  typeof VerificationRunnerIdentityAttestationRequestSchema
+>;
+
+export const VerificationRunnerIdentityAttestationBodySchema = z
+  .object({
+    nonce: fingerprint,
+    issuedAt: z.number().int().positive(),
+    instanceIdentityDocument: z.string().min(1).max(8_192),
+    instanceIdentitySignature: z.string().min(128).max(2_048),
+    containerImageId: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    containerImageRef: z.literal(VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF),
+  })
+  .strict();
+export type VerificationRunnerIdentityAttestationBody = z.infer<
+  typeof VerificationRunnerIdentityAttestationBodySchema
+>;
 const artifact = z
   .object({
     url: z.string().url().max(4096),

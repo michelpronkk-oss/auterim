@@ -12,7 +12,7 @@ import {
   rename,
   rm,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -28,7 +28,12 @@ import {
   MAX_PATCH_BYTES,
   MAX_SNAPSHOT_BYTES,
   VERIFICATION_RUNNER_PROTOCOL_VERSION,
+  VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF,
+  VERIFICATION_RUNNER_IDENTITY_ATTESTATION_PATH,
   VERIFICATION_RUNNER_IMAGE,
+  VerificationRunnerIdentityAttestationBodySchema,
+  VerificationRunnerIdentityAttestationRequestSchema,
+  type VerificationRunnerIdentityAttestationBody,
   VerificationJobRequestSchema,
   VerificationJobResultSchema,
   canonicalJson,
@@ -88,7 +93,132 @@ export type VerificationRunnerConfig = {
     spoolRoot: string,
     secret: string,
   ) => Promise<MaterializedVerificationJob>;
+  /** Test seam; Production reads IMDSv2 and the local Docker daemon through fixed endpoints. */
+  attestIdentity?: () => Promise<{
+    instanceIdentityDocument: string;
+    instanceIdentitySignature: string;
+    containerImageId: string;
+    containerImageRef: string;
+  }>;
 };
+
+const EC2_METADATA_ORIGIN = "http://169.254.169.254";
+const RUNNER_CONTAINER_NAME = "auterim-verification-runner";
+
+async function readLimitedResponseText(response: Response, maxBytes: number) {
+  if (!response.body) throw new Error("runner_identity_metadata_unavailable");
+  const declaredLength = response.headers.get("content-length");
+  if (declaredLength && /^\d+$/.test(declaredLength) && Number(declaredLength) > maxBytes) {
+    await response.body.cancel().catch(() => undefined);
+    throw new Error("runner_identity_metadata_unavailable");
+  }
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      const chunk = Buffer.from(part.value);
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error("runner_identity_metadata_unavailable");
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, total).toString("utf8");
+}
+
+async function readEc2IdentityAndContainerImage() {
+  try {
+    const tokenResponse = await fetch(`${EC2_METADATA_ORIGIN}/latest/api/token`, {
+      method: "PUT",
+      redirect: "error",
+      headers: { "X-aws-ec2-metadata-token-ttl-seconds": "60" },
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (!tokenResponse.ok) throw new Error("runner_identity_metadata_unavailable");
+    const token = (await readLimitedResponseText(tokenResponse, 4_096)).trim();
+    if (!token || token.length > 4_096) throw new Error("runner_identity_metadata_unavailable");
+
+    const metadataHeaders = { "X-aws-ec2-metadata-token": token };
+    const [documentResponse, signatureResponse] = await Promise.all([
+      fetch(`${EC2_METADATA_ORIGIN}/latest/dynamic/instance-identity/document`, {
+        redirect: "error",
+        headers: metadataHeaders,
+        signal: AbortSignal.timeout(2_000),
+      }),
+      fetch(`${EC2_METADATA_ORIGIN}/latest/dynamic/instance-identity/signature`, {
+        redirect: "error",
+        headers: metadataHeaders,
+        signal: AbortSignal.timeout(2_000),
+      }),
+    ]);
+    if (!documentResponse.ok || !signatureResponse.ok)
+      throw new Error("runner_identity_metadata_unavailable");
+    const [instanceIdentityDocument, signatureText] = await Promise.all([
+      readLimitedResponseText(documentResponse, 8_192),
+      readLimitedResponseText(signatureResponse, 2_048),
+    ]);
+    const instanceIdentitySignature = signatureText.trim();
+    if (
+      !instanceIdentityDocument ||
+      !/^[A-Za-z0-9+/]+={0,2}$/.test(instanceIdentitySignature) ||
+      Buffer.from(instanceIdentitySignature, "base64").byteLength !== 256 ||
+      Buffer.from(instanceIdentitySignature, "base64").toString("base64") !==
+        instanceIdentitySignature
+    )
+      throw new Error("runner_identity_metadata_unavailable");
+
+    const containerHostId = hostname().toLowerCase();
+    if (!/^[a-f0-9]{12,64}$/.test(containerHostId))
+      throw new Error("runner_container_identity_unavailable");
+    const inspected = await execFileAsync(
+      "docker",
+      ["inspect", "--format={{.Id}}|{{.Image}}|{{.Config.Image}}", RUNNER_CONTAINER_NAME],
+      {
+        windowsHide: true,
+        timeout: 3_000,
+        maxBuffer: 1_024,
+        env: {
+          NODE_ENV: "production",
+          PATH: process.env.PATH ?? "",
+          DOCKER_HOST: "unix:///var/run/docker.sock",
+        },
+      },
+    );
+    const [containerId, containerImageId, containerImageRef] = inspected.stdout.trim().split("|");
+    if (
+      !containerId ||
+      !containerImageId ||
+      !containerImageRef ||
+      !containerId.startsWith(containerHostId) ||
+      !/^sha256:[a-f0-9]{64}$/.test(containerImageId) ||
+      containerImageRef !== VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF
+    )
+      throw new Error("runner_container_identity_unavailable");
+
+    return {
+      instanceIdentityDocument,
+      instanceIdentitySignature,
+      containerImageId,
+      containerImageRef,
+    };
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      ["runner_identity_metadata_unavailable", "runner_container_identity_unavailable"].includes(
+        error.message,
+      )
+    )
+      throw error;
+    throw new Error("runner_identity_attestation_unavailable");
+  }
+}
 
 function publicError(response: ServerResponse, status: number, error: string) {
   response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
@@ -109,6 +239,21 @@ function signedResult(response: ServerResponse, body: VerificationJobResult, sec
     "content-type": "application/json",
     "cache-control": "no-store",
     "x-auterim-result-signature": signature,
+  });
+  response.end(serialized);
+}
+
+function signedIdentityAttestation(
+  response: ServerResponse,
+  body: VerificationRunnerIdentityAttestationBody,
+  secret: string,
+) {
+  const serialized = canonicalJson(body);
+  const signature = createHmac("sha256", secret).update(serialized, "utf8").digest("hex");
+  response.writeHead(200, {
+    "content-type": "application/json",
+    "cache-control": "no-store",
+    "x-auterim-identity-signature": signature,
   });
   response.end(serialized);
 }
@@ -909,6 +1054,41 @@ export function createVerificationRunnerServer(config: VerificationRunnerConfig)
     const requestPath = `${url.pathname}${url.search}`;
     if (!authenticate(request, requestPath, body, config.authSecret, seenNonces)) {
       publicError(response, 401, "runner_authentication_failed");
+      return;
+    }
+    if (
+      request.method === "POST" &&
+      url.pathname === VERIFICATION_RUNNER_IDENTITY_ATTESTATION_PATH
+    ) {
+      let nonce: string;
+      try {
+        if (url.search) throw new Error();
+        nonce = VerificationRunnerIdentityAttestationRequestSchema.parse(
+          JSON.parse(body.toString("utf8")),
+        ).nonce;
+      } catch {
+        publicError(response, 400, "runner_identity_attestation_invalid");
+        return;
+      }
+      try {
+        const identity = await (config.attestIdentity ?? readEc2IdentityAndContainerImage)();
+        const attestation = VerificationRunnerIdentityAttestationBodySchema.parse({
+          nonce,
+          issuedAt: Date.now(),
+          ...identity,
+        });
+        signedIdentityAttestation(response, attestation, config.authSecret);
+      } catch (error) {
+        const category =
+          error instanceof Error &&
+          [
+            "runner_identity_metadata_unavailable",
+            "runner_container_identity_unavailable",
+          ].includes(error.message)
+            ? error.message
+            : "runner_identity_attestation_unavailable";
+        publicError(response, 503, category);
+      }
       return;
     }
     if (request.method === "POST" && url.pathname === "/v1/verification-jobs") {
