@@ -485,11 +485,6 @@ begin
         where a.fix_run_id = q.fix_run_id and a.workspace_id = q.workspace_id and a.stage_id = q.id
           and a.stage = 'diagnose' and a.recovery_generation = 1
       ))
-      or (q.stage = 'verify_patch' and q.attempt_count = 3 and exists (
-        select 1 from public.fix_verification_recovery_generation_three_authorizations a
-        where a.fix_run_id = q.fix_run_id and a.workspace_id = q.workspace_id and a.stage_id = q.id
-          and a.stage = 'verify_patch' and a.recovery_generation = 3
-      ))
     )) or (q.status = 'claimed' and q.lease_expires_at < now()))
     order by q.created_at, q.id limit p_limit;
 end;

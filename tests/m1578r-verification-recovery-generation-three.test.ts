@@ -114,6 +114,9 @@ describe("M15.78R one-time Generation 3 recovery preparation", () => {
   });
 
   it("serializes concurrent authorization and makes replay return the same authorization without creating a new generation", () => {
+    const genericDispatcher = migration.slice(
+      migration.indexOf("create or replace function public.list_fix_stage_work"),
+    );
     expect(migration).toContain("for update");
     expect(migration).toContain("unique (fix_run_id, stage)");
     expect(migration).toContain("return jsonb_build_object('status', 'already_authorized'");
@@ -139,6 +142,10 @@ describe("M15.78R one-time Generation 3 recovery preparation", () => {
     expect(migration).toContain("v_stage.status in ('claimed', 'completed', 'failed')");
     expect(migration).toContain("recoveryGeneration', 3");
     expect(migration).toMatch(/recovery_generation_three_once unique \(fix_run_id, stage\)/);
+    expect(genericDispatcher).not.toContain(
+      "fix_verification_recovery_generation_three_authorizations",
+    );
+    expect(genericDispatcher).toContain("q.attempt_count < 3");
     expect(runtime).toMatch(
       /value\.stage === "verify_patch"\s*&&\s*value\.attemptNumber === 4\s*&&\s*value\.recoveryGeneration === 3/,
     );
