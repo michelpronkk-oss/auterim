@@ -40,6 +40,7 @@ import type { FixStageProcessor } from "@/lib/fix-engine/stage-runtime";
 import { stableFingerprint } from "@/lib/fix-engine/identity";
 import type { FixCodingModel, FixModelContext, ModelEnvelope } from "@/lib/fix-engine/model";
 import { createPersistedFixRun, runPersistedFixStage } from "@/lib/fix-engine/stage-runtime";
+import { withExactBaseGitHubSnapshot } from "@/lib/fix-engine/sandbox";
 import type { FixStage } from "@/lib/fix-engine/contracts";
 import type { GitHubAppRepositoryProvider } from "@/lib/preflight/github-provider";
 import { dependencyCacheIdentityKey } from "@/lib/fix-engine/dependency-cache";
@@ -56,6 +57,7 @@ import {
 import { RemoteVerificationExecutor } from "@/lib/fix-engine/verification-executor";
 import { RemoteVerificationRunnerClient } from "@/lib/fix-engine/verification-runner-client";
 import {
+  terminalRunnerFailure,
   retryableRunnerFailure,
   withVerificationRunnerCorrelation,
 } from "@/lib/fix-engine/verification-retry";
@@ -69,6 +71,7 @@ const productId = "de1f2a12-de3c-4644-8892-b6c2d458a300";
 const repositoryId = "b2abf377-2dbc-4b9c-b546-b0604f3ee4fe";
 const sha256 = (value: string) => stableFingerprint(value);
 const remoteAcceptance = process.env.AUTERIM_M1578R_DOCKER_ACCEPTANCE === "1";
+const runnerDiagnosticAcceptance = process.env.AUTERIM_M1578R_DOCKER_RUNNER_DIAGNOSTIC === "1";
 const runnerServers: Array<ReturnType<typeof createVerificationRunnerServer>> = [];
 const runnerRoots: string[] = [];
 let artifactHarness: Awaited<ReturnType<typeof createM1578RPrivateArtifactHarness>> | null = null;
@@ -799,41 +802,102 @@ describe.skipIf(!enabled)(
         stages.push(stage);
         if (stage === "verify_patch" && remoteAcceptance) {
           const injectedFailure = withVerificationRunnerCorrelation(
-            retryableRunnerFailure("runner_unavailable", {
-              phase: "admission",
-              httpStatus: 503,
-              responseCategory: "unrecognized",
-              reason: "http_error",
-            }),
+            runnerDiagnosticAcceptance
+              ? terminalRunnerFailure("runner_result_invalid", {
+                  phase: "result_validation",
+                  httpStatus: 200,
+                  responseCategory: null,
+                  reason: "result_identity_mismatch",
+                  identityField: "patchFingerprint",
+                })
+              : retryableRunnerFailure("runner_unavailable", {
+                  phase: "admission",
+                  httpStatus: 503,
+                  responseCategory: "unrecognized",
+                  reason: "http_error",
+                }),
             {
               jobId: "a".repeat(64),
               requestFingerprint: "b".repeat(64),
-              admissionState: "unconfirmed",
+              admissionState: runnerDiagnosticAcceptance ? "accepted" : "unconfirmed",
             },
           );
-          await expect(
-            runPersistedFixStage({
-              fixRunId: created.fixRunId,
-              stage,
-              processor: async () => {
-                throw injectedFailure;
-              },
-            }),
-          ).rejects.toThrow("runner_unavailable");
+          const runnerFailureResult = runPersistedFixStage({
+            fixRunId: created.fixRunId,
+            stage,
+            processor: () =>
+              runnerDiagnosticAcceptance
+                ? withExactBaseGitHubSnapshot({
+                    expectedBaseSha: "a".repeat(40),
+                    materialize: async (destination) => {
+                      await writeFile(path.join(destination, "endpoint.txt"), "old\n");
+                      return { skippedLinks: 0 };
+                    },
+                    unifiedDiff: [
+                      "diff --git a/endpoint.txt b/endpoint.txt",
+                      "--- a/endpoint.txt",
+                      "+++ b/endpoint.txt",
+                      "@@ -1 +1 @@",
+                      "-old",
+                      "+new",
+                      "",
+                    ].join("\n"),
+                    run: async () => {
+                      throw injectedFailure;
+                    },
+                  })
+                : (async () => {
+                    throw injectedFailure;
+                  })(),
+          });
+          if (runnerDiagnosticAcceptance) {
+            await expect(runnerFailureResult).resolves.toMatchObject({
+              status: "validation_failed",
+              failureCategory: "runner_result_invalid",
+              diagnosticPersistence: "recorded",
+            });
+          } else {
+            await expect(runnerFailureResult).rejects.toThrow("runner_unavailable");
+          }
           const { data: runnerDiagnostic, error: runnerDiagnosticError } = await client
             .from("fix_stage_runner_diagnostic_events")
-            .select("job_id,request_fingerprint,admission_state,failure_category,retryable")
+            .select(
+              "job_id,request_fingerprint,admission_state,failure_category,retryable,diagnostics",
+            )
             .eq("fix_run_id", created.fixRunId)
             .eq("stage", "verify_patch")
             .single();
           expect(runnerDiagnosticError).toBeNull();
-          expect(runnerDiagnostic).toEqual({
+          expect(runnerDiagnostic).toMatchObject({
             job_id: "a".repeat(64),
             request_fingerprint: "b".repeat(64),
-            admission_state: "unconfirmed",
-            failure_category: "runner_unavailable",
-            retryable: true,
+            admission_state: runnerDiagnosticAcceptance ? "accepted" : "unconfirmed",
+            failure_category: runnerDiagnosticAcceptance
+              ? "runner_result_invalid"
+              : "runner_unavailable",
+            retryable: !runnerDiagnosticAcceptance,
+            diagnostics: runnerDiagnosticAcceptance
+              ? [
+                  {
+                    phase: "result_validation",
+                    httpStatus: 200,
+                    responseCategory: null,
+                    reason: "result_identity_mismatch",
+                    identityField: "patchFingerprint",
+                  },
+                ]
+              : [
+                  {
+                    phase: "admission",
+                    httpStatus: 503,
+                    responseCategory: "unrecognized",
+                    reason: "http_error",
+                  },
+                ],
           });
+          expect(JSON.stringify(runnerDiagnostic)).not.toMatch(
+            /signedUrl|authorization|headers|responseBody|signature/i,
+          );
           const invalidCorrelationWrite = await client.rpc(
             "complete_fix_stage_with_runner_diagnostics_v2",
             {
@@ -869,6 +933,7 @@ describe.skipIf(!enabled)(
             },
           );
           expect(deniedDiagnosticWrite.error).not.toBeNull();
+          if (runnerDiagnosticAcceptance) return;
         }
         const result = await runPersistedFixStage({ fixRunId: created.fixRunId, stage, processor });
         expect(result.status).toBe("completed");
