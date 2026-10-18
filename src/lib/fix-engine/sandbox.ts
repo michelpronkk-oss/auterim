@@ -8,6 +8,7 @@ import {
   type VerificationCommand,
 } from "@/lib/fix-engine/verification-profile";
 import type { TrustedDependencyCache } from "@/lib/fix-engine/dependency-cache";
+import { VerificationRunnerFailure } from "@/lib/fix-engine/verification-retry";
 
 const execFileAsync = promisify(execFile);
 const MAX_OUTPUT_BYTES = 64 * 1024;
@@ -190,6 +191,9 @@ export async function withExactBaseGitHubSnapshot<T>(input: {
     });
     return await input.run(checkoutPath);
   } catch (error) {
+    // Preserve typed runner failures and their bounded phase/correlation metadata.
+    // Rewrapping these as a generic Error suppresses the durable diagnostic RPC.
+    if (error instanceof VerificationRunnerFailure) throw error;
     const category =
       error instanceof Error && /^[a-z0-9_]{1,100}$/.test(error.message)
         ? error.message
