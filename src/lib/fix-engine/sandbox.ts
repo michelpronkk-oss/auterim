@@ -251,6 +251,7 @@ export async function withExactBaseFixCheckout<T>(input: {
     });
     return await input.run(checkoutPath);
   } catch (error) {
+    if (error instanceof VerificationRunnerFailure) throw error;
     const category =
       error instanceof Error && /^[a-z0-9_]{1,100}$/.test(error.message)
         ? error.message

@@ -1,7 +1,10 @@
+import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { withExactBaseGitHubSnapshot } from "@/lib/fix-engine/sandbox";
+import { withExactBaseFixCheckout, withExactBaseGitHubSnapshot } from "@/lib/fix-engine/sandbox";
 import {
   terminalRunnerFailure,
   withVerificationRunnerCorrelation,
@@ -63,5 +66,69 @@ describe("M15.78R sandbox error propagation", () => {
         }),
       ),
     ).rejects.toThrow("sandbox_setup_failed");
+  });
+
+  it("preserves typed runner failures in the local exact-base checkout wrapper", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "auterim-sandbox-runner-error-"));
+    const sourceRepositoryPath = path.join(root, "source");
+    const gitEnv = {
+      ...process.env,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+    };
+    try {
+      await mkdir(sourceRepositoryPath, { recursive: true });
+      await writeFile(path.join(sourceRepositoryPath, "endpoint.txt"), "old\n");
+      execFileSync("git", ["init", "--quiet", sourceRepositoryPath], { env: gitEnv });
+      execFileSync("git", ["-C", sourceRepositoryPath, "add", "--all"], { env: gitEnv });
+      execFileSync(
+        "git",
+        [
+          "-C",
+          sourceRepositoryPath,
+          "-c",
+          "user.name=Auterim Test",
+          "-c",
+          "user.email=test@auterim.invalid",
+          "commit",
+          "--quiet",
+          "-m",
+          "fixture",
+        ],
+        { env: gitEnv },
+      );
+      const expectedBaseSha = execFileSync(
+        "git",
+        ["-C", sourceRepositoryPath, "rev-parse", "HEAD"],
+        { encoding: "utf8", env: gitEnv },
+      ).trim();
+      const failure = withVerificationRunnerCorrelation(
+        terminalRunnerFailure("runner_result_invalid", {
+          phase: "result_validation",
+          httpStatus: 200,
+          responseCategory: null,
+          reason: "result_identity_mismatch",
+          identityField: "patchFingerprint",
+        }),
+        {
+          jobId: "a".repeat(64),
+          requestFingerprint: "b".repeat(64),
+          admissionState: "accepted",
+        },
+      );
+
+      await expect(
+        withExactBaseFixCheckout({
+          sourceRepositoryPath,
+          expectedBaseSha,
+          unifiedDiff: diff,
+          run: async () => {
+            throw failure;
+          },
+        }),
+      ).rejects.toBe(failure);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
