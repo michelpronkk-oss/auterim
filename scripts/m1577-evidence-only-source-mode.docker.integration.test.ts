@@ -302,7 +302,7 @@ describe("M15.77 internal evidence-only source mode on local Docker Supabase", (
     expect(providerChange.status).toBe("changed");
     if (!providerChange.changeId) throw new Error("m1577_provider_change_missing");
 
-    const internal = await persistInternalTestSourceChange({
+    const internalInput = {
       workspaceId: targetA.workspaceId,
       productId: targetA.productId,
       dependencyId,
@@ -311,7 +311,18 @@ describe("M15.77 internal evidence-only source mode on local Docker Supabase", (
         "POST https://api.openai.com/v1/responses is available and applications may send Responses API requests to this endpoint.",
       changed:
         "POST https://api.openai.com/v1/responses is removed in the next API version. Applications using this endpoint must migrate before upgrading because requests to the existing endpoint will no longer work.",
+    };
+    const internal = await persistInternalTestSourceChange(internalInput);
+    const internalReplay = await persistInternalTestSourceChange(internalInput);
+    expect(internalReplay).toMatchObject({
+      sourceId: internal.sourceId,
+      sourceChangeId: internal.sourceChangeId,
+      replayed: true,
     });
+    const replayedChanges = await row(
+      client.from("source_changes").select("id").eq("source_id", internal.sourceId),
+    );
+    expect(replayedChanges).toHaveLength(1);
     const internalChange = await row(
       client
         .from("source_changes")

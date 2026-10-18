@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runPersistedFixStage } from "@/lib/fix-engine/stage-runtime";
-import { terminalRunnerFailure } from "@/lib/fix-engine/verification-retry";
+import {
+  terminalRunnerFailure,
+  withVerificationRunnerCorrelation,
+} from "@/lib/fix-engine/verification-retry";
 
 const mocks = vi.hoisted(() => ({ createSupabaseServerClient: vi.fn() }));
 vi.mock("server-only", () => ({}));
@@ -74,10 +77,12 @@ function makeQuery(data: unknown) {
 function makeClient(options: {
   claim?: { data: unknown; error: unknown };
   diagnostic?: { data: unknown; error: unknown };
+  diagnosticV2?: { data: unknown; error: unknown };
   transition?: { data: unknown; error: unknown };
   queueAfterBusy?: unknown;
 }) {
-  const rpc = vi.fn(async (name: string) => {
+  const rpc = vi.fn(async (name: string, ...args: unknown[]) => {
+    void args;
     if (name === "claim_fix_stage")
       return (
         options.claim ?? {
@@ -95,6 +100,13 @@ function makeClient(options: {
       );
     if (name === "complete_fix_stage_with_runner_diagnostics")
       return options.diagnostic ?? { data: null, error: { code: "PGRST000" } };
+    if (name === "complete_fix_stage_with_runner_diagnostics_v2")
+      return options.diagnosticV2 ?? { data: null, error: { code: "PGRST000" } };
+    if (name === "record_fix_verification_runner_result")
+      return {
+        data: { status: "recorded", recordId: "f0000000-0000-4000-8000-00000000000f" },
+        error: null,
+      };
     if (name === "complete_fix_stage")
       return options.transition ?? { data: { status: "validation_failed" }, error: null };
     return { data: null, error: { code: "unexpected_rpc" } };
@@ -175,6 +187,86 @@ describe("M15.78R stage runtime recovery reporting", () => {
       "claim_fix_stage",
       "complete_fix_stage_with_runner_diagnostics",
     ]);
+  });
+
+  it("persists bounded runner correlation atomically through the v2 diagnostic RPC", async () => {
+    const client = makeClient({
+      diagnosticV2: {
+        data: { status: "recorded", transition: { status: "validation_failed" } },
+        error: null,
+      },
+    });
+    const failure = withVerificationRunnerCorrelation(
+      terminalRunnerFailure("runner_result_invalid", {
+        phase: "admission",
+        httpStatus: 400,
+        responseCategory: "verification_artifact_unavailable",
+        reason: "http_error",
+      }),
+      {
+        jobId: "a".repeat(64),
+        requestFingerprint: "b".repeat(64),
+        admissionState: "rejected",
+      },
+    );
+    const result = await runPersistedFixStage({
+      fixRunId,
+      stage: "verify_patch",
+      processor: async () => {
+        throw failure;
+      },
+    });
+    const diagnosticCall = client.rpc.mock.calls.find(
+      ([name]) => name === "complete_fix_stage_with_runner_diagnostics_v2",
+    );
+    expect(diagnosticCall?.[1]).toMatchObject({
+      p_failure_category: "runner_result_invalid",
+      p_correlation: {
+        jobId: "a".repeat(64),
+        requestFingerprint: "b".repeat(64),
+        admissionState: "rejected",
+      },
+    });
+    expect(result).toMatchObject({
+      status: "validation_failed",
+      diagnosticPersistence: "recorded",
+    });
+  });
+
+  it("persists signed remote result identity before completing verification", async () => {
+    const client = makeClient({});
+    const record = {
+      patchId: "f0000000-0000-4000-8000-000000000010",
+      patchFingerprint: "c".repeat(64),
+      profileId: "javascript-typescript-v1",
+      status: "passed",
+      checks: [],
+      diagnosticSummary: "",
+      durationMs: 12,
+      attemptNumber: 1,
+      runnerEvidence: {
+        jobId: "a".repeat(64),
+        requestFingerprint: "b".repeat(64),
+        resultFingerprint: "d".repeat(64),
+        protocolVersion: "m1578-verification-runner-v1",
+        runnerVersion: "m1578-runner-v1",
+        runtimeImage:
+          "node:24.8.0-alpine3.22@sha256:3e843c608bb5232f39ecb2b25e41214b958b0795914707374c8acc28487dea17",
+        resultSignatureValidated: true,
+      },
+    };
+    const result = await runPersistedFixStage({
+      fixRunId,
+      stage: "verify_patch",
+      processor: async () => ({ recordKind: "verification", record }),
+    });
+    expect(client.rpc.mock.calls.map(([name]) => name)).toEqual([
+      "claim_fix_stage",
+      "record_fix_verification_runner_result",
+      "complete_fix_stage",
+    ]);
+    expect(client.rpc.mock.calls[1]?.[1]).toMatchObject({ p_payload: record });
+    expect(result).toMatchObject({ status: "completed", replayed: false });
   });
 
   it("does not classify a claim RPC error as ordinary contention", async () => {

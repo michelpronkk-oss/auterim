@@ -10,6 +10,13 @@ const migration = readFileSync(
   ),
   "utf8",
 );
+const freshEvidenceMigration = readFileSync(
+  new URL(
+    "../supabase/migrations/20261224000000_m1578r_fresh_acceptance_runner_evidence.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
 const stageRuntime = readFileSync(
   new URL("../src/lib/fix-engine/stage-runtime.ts", import.meta.url),
   "utf8",
@@ -32,6 +39,9 @@ const event = {
   failure_category: "runner_result_invalid",
   retryable: false,
   diagnostics: [diagnostic],
+  job_id: "a".repeat(64),
+  request_fingerprint: "b".repeat(64),
+  admission_state: "rejected",
   created_at: "2026-10-18T00:00:00.000Z",
 };
 
@@ -77,6 +87,9 @@ describe("M15.78R durable runner diagnostic contract", () => {
         failureCategory: "runner_result_invalid",
         retryable: false,
         diagnostics: [diagnostic],
+        jobId: "a".repeat(64),
+        requestFingerprint: "b".repeat(64),
+        admissionState: "rejected",
         createdAt: event.created_at,
       },
     ]);
@@ -90,6 +103,34 @@ describe("M15.78R durable runner diagnostic contract", () => {
       ]),
     ).toBeNull();
     expect(sanitizeM1578RRunnerDiagnosticEvents([{ ...event, retryable: true }])).toBeNull();
+    expect(
+      sanitizeM1578RRunnerDiagnosticEvents([
+        { ...event, job_id: null, request_fingerprint: "b".repeat(64) },
+      ]),
+    ).toBeNull();
+    expect(
+      sanitizeM1578RRunnerDiagnosticEvents([
+        { ...event, admission_state: "accepted", job_id: null, request_fingerprint: null },
+      ]),
+    ).toBeNull();
+  });
+
+  it("persists bounded admission identity and signed result identity without widening table writes", () => {
+    expect(freshEvidenceMigration).toContain("runner_request_fingerprint text");
+    expect(freshEvidenceMigration).toContain("runner_result_signature_validated is true");
+    expect(freshEvidenceMigration).toContain("job_id text");
+    expect(freshEvidenceMigration).toContain("admission_state text");
+    expect(freshEvidenceMigration).toContain("complete_fix_stage_with_runner_diagnostics_v2");
+    expect(freshEvidenceMigration).toContain("record_fix_verification_runner_result");
+    expect(freshEvidenceMigration).toContain(
+      "grant execute on function public.record_fix_verification_runner_result",
+    );
+    expect(freshEvidenceMigration).not.toMatch(
+      /grant\s+(?:insert|all)\s+on\s+public\.fix_verification_runs\s+to\s+(?:authenticated|anon)/i,
+    );
+    expect(freshEvidenceMigration).toContain("'not_sent', 'unconfirmed', 'rejected', 'accepted'");
+    expect(freshEvidenceMigration).not.toContain("response_body text");
+    expect(freshEvidenceMigration).not.toContain("signed_url text");
   });
 
   it("persists diagnostics and the original stage transition through a service-only atomic RPC", () => {

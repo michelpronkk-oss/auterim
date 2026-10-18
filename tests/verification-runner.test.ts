@@ -345,6 +345,7 @@ describe("M15.78R remote verification runner", () => {
     ] as const)
       expect(isVerificationRunnerRetryableFailure(retryableRunnerFailure(category))).toBe(true);
     for (const category of [
+      "runner_request_invalid",
       "runner_auth_failed",
       "runner_protocol_unsupported",
       "runner_result_invalid",
@@ -424,6 +425,14 @@ describe("M15.78R remote verification runner", () => {
     const first = await client.execute(request);
     const replay = await client.execute(request);
     expect(first.status).toBe("passed");
+    expect(first).toMatchObject({
+      jobId: request.jobId,
+      requestFingerprint: request.requestFingerprint,
+      protocolVersion: VERIFICATION_RUNNER_PROTOCOL_VERSION,
+      runnerVersion: "m1578-runner-v1",
+      runtimeImage: VERIFICATION_RUNNER_IMAGE,
+      status: "passed",
+    });
     expect(replay.jobId).toBe(first.jobId);
     expect(executions).toBe(1);
   });
@@ -1110,9 +1119,105 @@ describe("M15.78R remote verification runner", () => {
           identityField: "jobId",
         },
       ],
+      correlation: {
+        jobId: expect.any(String),
+        requestFingerprint: expect.any(String),
+        admissionState: "unconfirmed",
+      },
     });
     expect(JSON.stringify(caught)).not.toContain("untrusted-job-id");
     expect(JSON.stringify(caught)).not.toContain("untrusted-request-fingerprint");
+  });
+
+  it("records schema-invalid requests as not sent without making a network request", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const request = makeRequest();
+    const malformed = { ...request, requestFingerprint: "not-a-fingerprint" };
+    let caught: unknown;
+    try {
+      await new RemoteVerificationRunnerClient({
+        url: "https://runner.invalid",
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 1_000,
+      }).execute(malformed);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_request_invalid",
+      retryable: false,
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: null,
+          reason: "request_schema_invalid",
+        },
+      ],
+      correlation: {
+        jobId: request.jobId,
+        requestFingerprint: null,
+        admissionState: "not_sent",
+      },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(JSON.stringify(caught)).not.toContain("not-a-fingerprint");
+  });
+
+  it("records an expired capability as not sent with a sanitized reason", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const issuedAt = Date.now() - 60_000;
+    const request = makeRequest({ issuedAt, expiresAt: issuedAt + 1 });
+    let caught: unknown;
+    try {
+      await new RemoteVerificationRunnerClient({
+        url: "https://runner.invalid",
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 1_000,
+      }).execute(request);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_request_invalid",
+      diagnostics: [{ phase: "admission", httpStatus: null, reason: "request_capability_expired" }],
+      correlation: {
+        jobId: request.jobId,
+        requestFingerprint: request.requestFingerprint,
+        admissionState: "not_sent",
+      },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("records transport ambiguity as unconfirmed rather than not sent", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("transport detail must not escape");
+      }),
+    );
+    let caught: unknown;
+    try {
+      await new RemoteVerificationRunnerClient({
+        url: "https://runner.invalid",
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 1_000,
+      }).execute(makeRequest());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_transport_ambiguous",
+      retryable: true,
+      correlation: {
+        jobId: expect.any(String),
+        requestFingerprint: expect.any(String),
+        admissionState: "unconfirmed",
+      },
+    });
+    expect(JSON.stringify(caught)).not.toContain("transport detail must not escape");
   });
 
   it("rejects a signed result bound to a different commit", async () => {
@@ -1176,8 +1281,53 @@ describe("M15.78R remote verification runner", () => {
           reason: "result_signature_mismatch",
         },
       ],
+      correlation: {
+        jobId: expect.any(String),
+        requestFingerprint: expect.any(String),
+        admissionState: "accepted",
+      },
     });
     expect(JSON.stringify(caught)).not.toContain("0".repeat(64));
+  });
+
+  it("keeps direct terminal responses unconfirmed until signed result validation", async () => {
+    const request = makeRequest();
+    const materializedRequest = toMaterializedVerificationJob(request);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(resultFor(materializedRequest)), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    let caught: unknown;
+    try {
+      await new RemoteVerificationRunnerClient({
+        url: "https://runner.invalid",
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 1_000,
+      }).execute(request);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_result_invalid",
+      diagnostics: [
+        {
+          phase: "result_signature",
+          httpStatus: 200,
+          reason: "result_signature_missing",
+        },
+      ],
+      correlation: {
+        jobId: request.jobId,
+        requestFingerprint: request.requestFingerprint,
+        admissionState: "unconfirmed",
+      },
+    });
   });
 
   it("recovers an interrupted immutable job record after runner restart", async () => {

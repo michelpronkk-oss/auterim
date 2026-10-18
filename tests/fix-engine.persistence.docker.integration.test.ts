@@ -55,6 +55,10 @@ import {
 } from "@/lib/fix-engine/verification-artifacts";
 import { RemoteVerificationExecutor } from "@/lib/fix-engine/verification-executor";
 import { RemoteVerificationRunnerClient } from "@/lib/fix-engine/verification-runner-client";
+import {
+  retryableRunnerFailure,
+  withVerificationRunnerCorrelation,
+} from "@/lib/fix-engine/verification-retry";
 import { createVerificationRunnerServer } from "../verification-runner/server";
 
 const enabled = process.env.AUTERIM_M1578_DOCKER_ACCEPTANCE === "1";
@@ -550,13 +554,15 @@ describe.skipIf(!enabled)(
         expect(finished.error).toBeNull();
         throw new Error(failureCategory);
       };
-      await expect(
-        runPersistedFixStage({
-          fixRunId: created.fixRunId,
-          stage: "diagnose",
-          processor: retryTestProcessor,
-        }),
-      ).rejects.toThrow("fix_model_provider_rejected_401");
+      const authFailure = await runPersistedFixStage({
+        fixRunId: created.fixRunId,
+        stage: "diagnose",
+        processor: retryTestProcessor,
+      });
+      expect(authFailure).toMatchObject({
+        status: "diagnosis_failed",
+        failureCategory: "fix_model_provider_rejected_401",
+      });
 
       const requeued = await client.rpc("requeue_internal_fix_diagnosis_after_model_auth_repair", {
         p_fix_run_id: created.fixRunId,
@@ -578,13 +584,15 @@ describe.skipIf(!enabled)(
         retryGeneration: 1,
       });
 
-      await expect(
-        runPersistedFixStage({
-          fixRunId: created.fixRunId,
-          stage: "diagnose",
-          processor: retryTestProcessor,
-        }),
-      ).rejects.toThrow("fix_model_provider_rejected_400");
+      const requestShapeFailure = await runPersistedFixStage({
+        fixRunId: created.fixRunId,
+        stage: "diagnose",
+        processor: retryTestProcessor,
+      });
+      expect(requestShapeFailure).toMatchObject({
+        status: "diagnosis_failed",
+        failureCategory: "fix_model_provider_rejected_400",
+      });
       const requestShapeRetry = await client.rpc(
         "requeue_internal_fix_diagnosis_after_model_auth_repair",
         { p_fix_run_id: created.fixRunId },
@@ -623,13 +631,15 @@ describe.skipIf(!enabled)(
       expect(retryState).toEqual({ status: "queued", attempt_count: 2, operator_retry_count: 2 });
 
       returnInvalidDiagnosis = true;
-      await expect(
-        runPersistedFixStage({
-          fixRunId: created.fixRunId,
-          stage: "diagnose",
-          processor: retryTestProcessor,
-        }),
-      ).rejects.toThrow("fix_diagnosis_schema_invalid");
+      const schemaFailure = await runPersistedFixStage({
+        fixRunId: created.fixRunId,
+        stage: "diagnose",
+        processor: retryTestProcessor,
+      });
+      expect(schemaFailure).toMatchObject({
+        status: "diagnosis_failed",
+        failureCategory: "fix_diagnosis_schema_invalid",
+      });
       returnInvalidDiagnosis = false;
 
       const [
@@ -787,6 +797,79 @@ describe.skipIf(!enabled)(
       while (stage) {
         if (stages.length >= 8) throw new Error("fix_stage_bound_exceeded");
         stages.push(stage);
+        if (stage === "verify_patch" && remoteAcceptance) {
+          const injectedFailure = withVerificationRunnerCorrelation(
+            retryableRunnerFailure("runner_unavailable", {
+              phase: "admission",
+              httpStatus: 503,
+              responseCategory: "unrecognized",
+              reason: "http_error",
+            }),
+            {
+              jobId: "a".repeat(64),
+              requestFingerprint: "b".repeat(64),
+              admissionState: "unconfirmed",
+            },
+          );
+          await expect(
+            runPersistedFixStage({
+              fixRunId: created.fixRunId,
+              stage,
+              processor: async () => {
+                throw injectedFailure;
+              },
+            }),
+          ).rejects.toThrow("runner_unavailable");
+          const { data: runnerDiagnostic, error: runnerDiagnosticError } = await client
+            .from("fix_stage_runner_diagnostic_events")
+            .select("job_id,request_fingerprint,admission_state,failure_category,retryable")
+            .eq("fix_run_id", created.fixRunId)
+            .eq("stage", "verify_patch")
+            .single();
+          expect(runnerDiagnosticError).toBeNull();
+          expect(runnerDiagnostic).toEqual({
+            job_id: "a".repeat(64),
+            request_fingerprint: "b".repeat(64),
+            admission_state: "unconfirmed",
+            failure_category: "runner_unavailable",
+            retryable: true,
+          });
+          const invalidCorrelationWrite = await client.rpc(
+            "complete_fix_stage_with_runner_diagnostics_v2",
+            {
+              p_stage_id: "00000000-0000-4000-8000-000000000001",
+              p_claim_token: "00000000-0000-4000-8000-000000000002",
+              p_result: "retry",
+              p_failure_category: "runner_unavailable",
+              p_retryable: true,
+              p_diagnostics: [],
+              p_correlation: {
+                jobId: "c".repeat(64),
+                requestFingerprint: "d".repeat(64),
+                admissionState: "unconfirmed",
+                signedUrl: "must_not_be_accepted",
+              },
+            },
+          );
+          expect(invalidCorrelationWrite.error).not.toBeNull();
+          const deniedDiagnosticWrite = await anonymousClient.rpc(
+            "complete_fix_stage_with_runner_diagnostics_v2",
+            {
+              p_stage_id: "00000000-0000-4000-8000-000000000001",
+              p_claim_token: "00000000-0000-4000-8000-000000000002",
+              p_result: "retry",
+              p_failure_category: "runner_unavailable",
+              p_retryable: true,
+              p_diagnostics: [],
+              p_correlation: {
+                jobId: "c".repeat(64),
+                requestFingerprint: "d".repeat(64),
+                admissionState: "unconfirmed",
+              },
+            },
+          );
+          expect(deniedDiagnosticWrite.error).not.toBeNull();
+        }
         const result = await runPersistedFixStage({ fixRunId: created.fixRunId, stage, processor });
         expect(result.status).toBe("completed");
         stage = result.nextStage;
@@ -814,7 +897,9 @@ describe.skipIf(!enabled)(
           .single(),
         client
           .from("fix_verification_runs")
-          .select("status,profile_id,checks,patch_fingerprint")
+          .select(
+            "status,profile_id,checks,patch_fingerprint,runner_job_id,runner_request_fingerprint,runner_result_fingerprint,runner_protocol,runner_version,runner_image,runner_result_signature_validated",
+          )
           .eq("fix_run_id", created.fixRunId)
           .single(),
         client.from("fix_stage_queue").select("stage,status").eq("fix_run_id", created.fixRunId),
@@ -836,6 +921,57 @@ describe.skipIf(!enabled)(
         profile_id: "javascript-typescript-v1",
       });
       if (remoteAcceptance) {
+        expect(verification).toMatchObject({
+          runner_job_id: expect.stringMatching(/^[a-f0-9]{64}$/),
+          runner_request_fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+          runner_result_fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+          runner_protocol: "m1578-verification-runner-v1",
+          runner_version: "m1578-runner-v1",
+          runner_image:
+            "node:24.8.0-alpine3.22@sha256:3e843c608bb5232f39ecb2b25e41214b958b0795914707374c8acc28487dea17",
+          runner_result_signature_validated: true,
+        });
+        const anonVerificationRead = await anonymousClient
+          .from("fix_verification_runs")
+          .select("id")
+          .eq("fix_run_id", created.fixRunId);
+        expect(anonVerificationRead.error).not.toBeNull();
+        const deniedRunnerResultWrite = await anonymousClient.rpc(
+          "record_fix_verification_runner_result",
+          {
+            p_fix_run_id: created.fixRunId,
+            p_stage_id: "00000000-0000-4000-8000-000000000003",
+            p_claim_token: "00000000-0000-4000-8000-000000000004",
+            p_payload: {},
+          },
+        );
+        expect(deniedRunnerResultWrite.error).not.toBeNull();
+        const invalidRunnerResult = await client.rpc("record_fix_verification_runner_result", {
+          p_fix_run_id: created.fixRunId,
+          p_stage_id: "00000000-0000-4000-8000-000000000003",
+          p_claim_token: "00000000-0000-4000-8000-000000000004",
+          p_payload: {
+            patchId: "afe737c9-866f-4d8f-a8b3-0b5eaf89e001",
+            patchFingerprint: "c".repeat(64),
+            profileId: "javascript-typescript-v1",
+            status: "passed",
+            checks: [],
+            diagnosticSummary: "",
+            durationMs: 1,
+            attemptNumber: 1,
+            runnerEvidence: {
+              jobId: "invalid",
+              requestFingerprint: "b".repeat(64),
+              resultFingerprint: "d".repeat(64),
+              protocolVersion: "m1578-verification-runner-v1",
+              runnerVersion: "m1578-runner-v1",
+              runtimeImage:
+                "node:24.8.0-alpine3.22@sha256:3e843c608bb5232f39ecb2b25e41214b958b0795914707374c8acc28487dea17",
+              resultSignatureValidated: true,
+            },
+          },
+        });
+        expect(invalidRunnerResult.error).not.toBeNull();
         const { data: retainedSnapshot, error: retainedSnapshotError } = await client
           .from("fix_verification_snapshots")
           .select(

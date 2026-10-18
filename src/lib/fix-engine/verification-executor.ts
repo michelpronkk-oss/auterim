@@ -13,6 +13,10 @@ import type {
 } from "@/lib/fix-engine/verification-artifacts";
 import type { DependencyCacheIdentity } from "@/lib/fix-engine/cache-identity";
 import type { VerificationJobResult } from "../../../verification-runner/contracts";
+import {
+  terminalRunnerFailure,
+  withVerificationRunnerCorrelation,
+} from "@/lib/fix-engine/verification-retry";
 
 export type RemoteVerificationInput = {
   workspaceId: string;
@@ -97,36 +101,56 @@ export class RemoteVerificationExecutor implements VerificationExecutor {
   async execute(input: VerificationExecutorInput): Promise<VerificationExecutorResult> {
     const remote = input.remote;
     if (!remote) throw new Error("verification_runner_request_missing");
-    const request = createVerificationJobRequest({
-      identity: {
-        workspaceId: remote.workspaceId,
-        productId: remote.productId,
-        fixRunId: remote.fixRunId,
-        planId: remote.planId,
-        planFingerprint: remote.planFingerprint,
-        evidenceFingerprint: remote.evidenceFingerprint,
-        patchId: remote.patchId,
-        patchFingerprint: remote.patchFingerprint,
-        allowedPaths: remote.allowedPaths,
-        repositoryId: remote.repositoryId,
-        repositoryIdentity: remote.repositoryIdentity,
-        baseCommitSha: remote.baseCommitSha,
-        packageManager: remote.dependencyCacheIdentity.packageManager as "npm",
-        packageManifestSha256: remote.dependencyCacheIdentity.packageManifestSha256,
-        lockfileSha256: remote.dependencyCacheIdentity.lockfileSha256,
-        runtimeProfile: remote.dependencyCacheIdentity.runtimeProfile,
-        profileId: input.profile.id as "javascript-typescript-v1",
-        profileVersion: "javascript-typescript-v1",
-        cacheIdentityKey: remote.cache.manifest.identityKey,
-        cacheTreeSha256: remote.cache.manifest.treeSha256,
-      },
-      snapshot: remote.snapshot,
-      patch: remote.patch,
-      cacheArchive: remote.cache.archive,
-      cacheManifest: remote.cache.manifest,
-      cacheSignature: remote.cache.signature,
-      commands: input.commands,
-    });
+    let request;
+    try {
+      request = createVerificationJobRequest({
+        identity: {
+          workspaceId: remote.workspaceId,
+          productId: remote.productId,
+          fixRunId: remote.fixRunId,
+          planId: remote.planId,
+          planFingerprint: remote.planFingerprint,
+          evidenceFingerprint: remote.evidenceFingerprint,
+          patchId: remote.patchId,
+          patchFingerprint: remote.patchFingerprint,
+          allowedPaths: remote.allowedPaths,
+          repositoryId: remote.repositoryId,
+          repositoryIdentity: remote.repositoryIdentity,
+          baseCommitSha: remote.baseCommitSha,
+          packageManager: remote.dependencyCacheIdentity.packageManager as "npm",
+          packageManifestSha256: remote.dependencyCacheIdentity.packageManifestSha256,
+          lockfileSha256: remote.dependencyCacheIdentity.lockfileSha256,
+          runtimeProfile: remote.dependencyCacheIdentity.runtimeProfile,
+          profileId: input.profile.id as "javascript-typescript-v1",
+          profileVersion: "javascript-typescript-v1",
+          cacheIdentityKey: remote.cache.manifest.identityKey,
+          cacheTreeSha256: remote.cache.manifest.treeSha256,
+        },
+        snapshot: remote.snapshot,
+        patch: remote.patch,
+        cacheArchive: remote.cache.archive,
+        cacheManifest: remote.cache.manifest,
+        cacheSignature: remote.cache.signature,
+        commands: input.commands,
+      });
+    } catch (error) {
+      const unsupported =
+        error instanceof Error && error.message === "verification_command_unsupported";
+      throw withVerificationRunnerCorrelation(
+        terminalRunnerFailure(
+          unsupported ? "verification_unsupported" : "runner_request_invalid",
+          unsupported
+            ? []
+            : {
+                phase: "admission",
+                httpStatus: null,
+                responseCategory: null,
+                reason: "request_schema_invalid",
+              },
+        ),
+        { jobId: null, requestFingerprint: null, admissionState: "not_sent" },
+      );
+    }
     const result = await this.client.execute(request);
     return {
       status: result.status,
