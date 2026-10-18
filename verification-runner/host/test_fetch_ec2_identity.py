@@ -17,7 +17,7 @@ class HostIdentityRefreshTests(unittest.TestCase):
             },
             separators=(",", ":"),
         )
-        self.signature = base64.b64encode(bytes(range(256))).decode("ascii")
+        self.signature = base64.b64encode(bytes(range(128))).decode("ascii")
 
     def test_fetches_only_imdsv2_token_and_signed_identity_documents(self):
         with patch.object(
@@ -68,6 +68,45 @@ class HostIdentityRefreshTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(identity.IdentityRefreshError, "metadata_signature_invalid"):
                 identity.fetch_identity()
+
+    def test_normalizes_ascii_wrapped_base64_to_canonical_signature(self):
+        wrapped = (self.signature[:48] + "\r\n \t" + self.signature[48:]).encode("ascii")
+        with patch.object(
+            identity,
+            "_metadata_request",
+            side_effect=[b"token", self.document.encode(), wrapped],
+        ):
+            value = identity.fetch_identity(now_ms=123)
+        self.assertEqual(value["signature"], self.signature)
+        self.assertEqual(len(base64.b64decode(value["signature"], validate=True)), 128)
+
+    def test_rejects_non_ascii_whitespace_and_malformed_base64(self):
+        malformed_values = (
+            b"not-a-signature",
+            self.signature.encode("ascii") + b"\x00",
+            self.signature.encode("ascii") + "\u00a0".encode("utf-8"),
+            self.signature.encode("ascii") + b"\v",
+            self.signature.encode("ascii") + b"\f",
+        )
+        for malformed in malformed_values:
+            with self.subTest(malformed=malformed[:16]), patch.object(
+                identity,
+                "_metadata_request",
+                side_effect=[b"token", self.document.encode(), malformed],
+            ):
+                with self.assertRaisesRegex(identity.IdentityRefreshError, "metadata_signature_invalid"):
+                    identity.fetch_identity()
+
+    def test_rejects_rsa_signature_lengths_other_than_128_bytes(self):
+        for byte_count in (127, 129):
+            signature = base64.b64encode(bytes(byte_count))
+            with self.subTest(byte_count=byte_count), patch.object(
+                identity,
+                "_metadata_request",
+                side_effect=[b"token", self.document.encode(), signature],
+            ):
+                with self.assertRaisesRegex(identity.IdentityRefreshError, "metadata_signature_invalid"):
+                    identity.fetch_identity()
 
     def test_refresh_writes_only_the_fetched_identity(self):
         record = {"document": self.document, "signature": self.signature, "fetchedAt": 123}

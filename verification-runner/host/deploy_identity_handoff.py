@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import ipaddress
 import json
@@ -37,13 +38,13 @@ REFRESH_TIMER_PATH = Path("/etc/systemd/system/auterim-verifier-identity-refresh
 IDENTITY_DIRECTORY_VALUE = "/run/auterim-verifier-identity"
 IDENTITY_DIRECTORY = Path(IDENTITY_DIRECTORY_VALUE)
 IMAGE_REF = "auterim-verification-runner:ac73ed8"
-IMAGE_ARCHIVE_SHA256 = "cd53d09403387e9ecbd15748547a873691c04c28e67c57ce78e598bcf24c2b8c"
-IMAGE_CONFIG_ID = "sha256:e923f5dc4ae35047cc76e10a0430a9cd0b6f122e3d34ea2c64c6bfb59a1e54c7"
+IMAGE_ARCHIVE_SHA256 = "6757e75b16442b17fb7de76837ee5073ed89b3faeba54b1a6ea23d153955f26d"
+IMAGE_CONFIG_ID = "sha256:c8bfd835ad08ed3516f0a5c2315d519317b4b71b18e4fe1c7735cad89bc3e90a"
 IMAGE_IDS = (
-    "sha256:dc150aabdf5c7ad152fe637c307b68d489887be2b834f447ff92b69d1671a230",
+    "sha256:408117eeeee5477f56eae8d8bb16cda12cf01ad0596b7ce3269bf2e2beaa56ee",
     IMAGE_CONFIG_ID,
 )
-HELPER_SHA256 = "e5f11b8aaafa921b8815b3ceb9e8700383a3e42ca4ba07cbf4968518883cf818"
+HELPER_SHA256 = "0b836df1db71ef0a9003719f99e1625c97d6cb597c1f452b493e15033208af98"
 IMAGE_ARCHIVE_NAME = "auterim-verification-runner-host-identity.tar"
 EXPECTED_ENV_HANDOFFS = [
     "FIX_VERIFICATION_RUNNER_AUTH_SECRET",
@@ -53,16 +54,13 @@ EXPECTED_ENV_HANDOFFS = [
 ]
 GROUP_ID = 62000
 CONTAINER_NAME = "auterim-verification-runner"
+IDENTITY_REFRESH_PRESTART = "-/usr/bin/systemctl start auterim-verifier-identity-refresh.service"
 JOB_STORE_PATH = Path("/srv/auterim-runner/jobs")
 EXPECTED_ACCOUNT = "737759272471"
 EXPECTED_REGION = "eu-west-1"
 EXPECTED_INSTANCE = "i-0592719b99a518001"
 BACKUP_ROOT = Path("/var/backups/auterim-verifier-identity-handoff")
 MAX_IMAGE_ARCHIVE_BYTES = 1_000_000_000
-MAX_IDENTITY_AGE_MS = 5 * 60 * 1000
-MAX_IDENTITY_FILE_BYTES = 16_384
-MAX_IDENTITY_AGE_MS = 5 * 60 * 1000
-MAX_IDENTITY_FILE_BYTES = 16_384
 MAX_IDENTITY_AGE_MS = 5 * 60 * 1000
 MAX_IDENTITY_FILE_BYTES = 16_384
 
@@ -301,69 +299,13 @@ def publish_binding_matches_runtime(binding: dict[str, str], runtime_ports: obje
     return entries[0] == {"HostIp": binding["hostIp"], "HostPort": binding["hostPort"]}
 
 
-def validate_identity_record(raw: bytes, now_ms: int) -> None:
-    try:
-        if len(raw) > MAX_IDENTITY_FILE_BYTES:
-            raise ValueError()
-        value = json.loads(raw.decode("utf-8"))
-        if not isinstance(value, dict) or set(value) != {"document", "signature", "fetchedAt"}:
-            raise ValueError()
-        if (
-            not isinstance(value["document"], str)
-            or not isinstance(value["signature"], str)
-            or not isinstance(value["fetchedAt"], int)
-            or isinstance(value["fetchedAt"], bool)
-            or value["fetchedAt"] <= 0
-            or value["fetchedAt"] > now_ms + 5_000
-            or now_ms - value["fetchedAt"] > MAX_IDENTITY_AGE_MS
-        ):
-            raise ValueError()
-        claims = json.loads(value["document"])
-        signature = value["signature"]
-        import base64
-
-        decoded = base64.b64decode(signature, validate=True)
-        if (
-            not isinstance(claims, dict)
-            or claims.get("accountId") != EXPECTED_ACCOUNT
-            or claims.get("region") != EXPECTED_REGION
-            or claims.get("instanceId") != EXPECTED_INSTANCE
-            or not isinstance(claims.get("imageId"), str)
-            or not re.fullmatch(r"ami-[a-f0-9]+", claims["imageId"])
-            or len(decoded) != 256
-            or base64.b64encode(decoded).decode("ascii") != signature
-        ):
-            raise ValueError()
-    except Exception as exc:  # noqa: BLE001 - no identity data in errors
-        raise PreflightError("host_identity_record_invalid_or_stale") from exc
-
-
-def validate_host_identity_file(now_ms: int | None = None) -> None:
-    identity_file = IDENTITY_DIRECTORY / "identity.json"
-    try:
-        directory_stat = IDENTITY_DIRECTORY.lstat()
-        file_stat = identity_file.lstat()
-        if (
-            not stat.S_ISDIR(directory_stat.st_mode)
-            or stat.S_ISLNK(directory_stat.st_mode)
-            or directory_stat.st_uid != 0
-            or directory_stat.st_gid != GROUP_ID
-            or stat.S_IMODE(directory_stat.st_mode) != 0o750
-            or not stat.S_ISREG(file_stat.st_mode)
-            or stat.S_ISLNK(file_stat.st_mode)
-            or file_stat.st_uid != 0
-            or file_stat.st_gid != GROUP_ID
-            or stat.S_IMODE(file_stat.st_mode) != 0o440
-            or file_stat.st_nlink != 1
-            or file_stat.st_size < 1
-            or file_stat.st_size > MAX_IDENTITY_FILE_BYTES
-        ):
-            raise PreflightError("host_identity_file_permissions_unsafe")
-        validate_identity_record(identity_file.read_bytes(), int(time.time() * 1000) if now_ms is None else now_ms)
-    except PreflightError:
-        raise
-    except OSError as exc:
-        raise PreflightError("host_identity_file_unavailable") from exc
+def _decode_canonical_identity_signature(signature: str) -> bytes:
+    if not re.fullmatch(r"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?", signature):
+        raise ValueError()
+    decoded = base64.b64decode(signature, validate=True)
+    if len(decoded) != 128 or base64.b64encode(decoded).decode("ascii") != signature:
+        raise ValueError()
+    return decoded
 
 
 def validate_identity_record(raw: bytes, now_ms: int) -> None:
@@ -384,10 +326,7 @@ def validate_identity_record(raw: bytes, now_ms: int) -> None:
         ):
             raise ValueError()
         claims = json.loads(value["document"])
-        signature = value["signature"]
-        import base64
-
-        decoded = base64.b64decode(signature, validate=True)
+        _decode_canonical_identity_signature(value["signature"])
         if (
             not isinstance(claims, dict)
             or claims.get("accountId") != EXPECTED_ACCOUNT
@@ -395,73 +334,6 @@ def validate_identity_record(raw: bytes, now_ms: int) -> None:
             or claims.get("instanceId") != EXPECTED_INSTANCE
             or not isinstance(claims.get("imageId"), str)
             or not re.fullmatch(r"ami-[a-f0-9]+", claims["imageId"])
-            or len(decoded) != 256
-            or base64.b64encode(decoded).decode("ascii") != signature
-        ):
-            raise ValueError()
-    except Exception as exc:  # noqa: BLE001 - no identity data in errors
-        raise PreflightError("host_identity_record_invalid_or_stale") from exc
-
-
-def validate_host_identity_file(now_ms: int | None = None) -> None:
-    identity_file = IDENTITY_DIRECTORY / "identity.json"
-    try:
-        directory_stat = IDENTITY_DIRECTORY.lstat()
-        file_stat = identity_file.lstat()
-        if (
-            not stat.S_ISDIR(directory_stat.st_mode)
-            or stat.S_ISLNK(directory_stat.st_mode)
-            or directory_stat.st_uid != 0
-            or directory_stat.st_gid != GROUP_ID
-            or stat.S_IMODE(directory_stat.st_mode) != 0o750
-            or not stat.S_ISREG(file_stat.st_mode)
-            or stat.S_ISLNK(file_stat.st_mode)
-            or file_stat.st_uid != 0
-            or file_stat.st_gid != GROUP_ID
-            or stat.S_IMODE(file_stat.st_mode) != 0o440
-            or file_stat.st_nlink != 1
-            or file_stat.st_size < 1
-            or file_stat.st_size > MAX_IDENTITY_FILE_BYTES
-        ):
-            raise PreflightError("host_identity_file_permissions_unsafe")
-        validate_identity_record(identity_file.read_bytes(), int(time.time() * 1000) if now_ms is None else now_ms)
-    except PreflightError:
-        raise
-    except OSError as exc:
-        raise PreflightError("host_identity_file_unavailable") from exc
-
-
-def validate_identity_record(raw: bytes, now_ms: int) -> None:
-    try:
-        if len(raw) > MAX_IDENTITY_FILE_BYTES:
-            raise ValueError()
-        value = json.loads(raw.decode("utf-8"))
-        if not isinstance(value, dict) or set(value) != {"document", "signature", "fetchedAt"}:
-            raise ValueError()
-        if (
-            not isinstance(value["document"], str)
-            or not isinstance(value["signature"], str)
-            or not isinstance(value["fetchedAt"], int)
-            or isinstance(value["fetchedAt"], bool)
-            or value["fetchedAt"] <= 0
-            or value["fetchedAt"] > now_ms + 5_000
-            or now_ms - value["fetchedAt"] > MAX_IDENTITY_AGE_MS
-        ):
-            raise ValueError()
-        claims = json.loads(value["document"])
-        signature = value["signature"]
-        import base64
-
-        decoded = base64.b64decode(signature, validate=True)
-        if (
-            not isinstance(claims, dict)
-            or claims.get("accountId") != EXPECTED_ACCOUNT
-            or claims.get("region") != EXPECTED_REGION
-            or claims.get("instanceId") != EXPECTED_INSTANCE
-            or not isinstance(claims.get("imageId"), str)
-            or not re.fullmatch(r"ami-[a-f0-9]+", claims["imageId"])
-            or len(decoded) != 256
-            or base64.b64encode(decoded).decode("ascii") != signature
         ):
             raise ValueError()
     except Exception as exc:  # noqa: BLE001 - no identity data in errors
@@ -500,16 +372,21 @@ def validate_unit(unit_text: str, *, allow_identity_mount: bool = False) -> dict
     directives = _service_directives(unit_text)
     if any(
         directives.get(name)
-        for name in ("ExecCondition", "ExecStartPost", "ExecReload", "ExecStop", "ExecStopPost")
+        for name in ("ExecCondition", "ExecStartPost", "ExecReload", "ExecStopPost")
     ):
         raise PreflightError("systemd_extra_execution_directive_unsupported")
     exec_starts = directives.get("ExecStart", [])
     if len(exec_starts) != 1:
         raise PreflightError("systemd_execstart_count_mismatch")
     prestart = directives.get("ExecStartPre", [])
-    if (prestart and not allow_identity_mount) or (
+    prestart_values = [item[2] for item in prestart]
+    if (not allow_identity_mount and IDENTITY_REFRESH_PRESTART in prestart_values) or (
         allow_identity_mount
-        and (len(prestart) != 1 or prestart[0][2] != "-/usr/bin/systemctl start auterim-verifier-identity-refresh.service")
+        and (
+            not prestart_values
+            or prestart_values[-1] != IDENTITY_REFRESH_PRESTART
+            or prestart_values.count(IDENTITY_REFRESH_PRESTART) != 1
+        )
     ):
         raise PreflightError("systemd_execstartpre_mismatch")
     command, shell, pull_policy = _split_execstart(
@@ -545,11 +422,22 @@ def patch_unit(unit_text: str) -> str:
     service_header = f"[Service]{newline}"
     if updated.count(service_header) != 1:
         raise PreflightError("systemd_service_section_ambiguous")
-    updated = updated.replace(
-        service_header,
-        service_header + f"ExecStartPre=-/usr/bin/systemctl start auterim-verifier-identity-refresh.service{newline}",
-        1,
-    )
+    before_directives = _service_directives(unit_text)
+    existing_prestart = before_directives.get("ExecStartPre", [])
+    if existing_prestart:
+        insertion_index = existing_prestart[-1][1] + 1
+        physical_lines = updated.splitlines(keepends=True)
+        physical_lines.insert(
+            insertion_index,
+            f"ExecStartPre=-/usr/bin/systemctl start auterim-verifier-identity-refresh.service{newline}",
+        )
+        updated = "".join(physical_lines)
+    else:
+        updated = updated.replace(
+            service_header,
+            service_header + f"ExecStartPre=-/usr/bin/systemctl start auterim-verifier-identity-refresh.service{newline}",
+            1,
+        )
     before = validate_unit(unit_text)["command"]
     after = validate_unit(updated, allow_identity_mount=True)["command"]
     added = [
@@ -560,6 +448,18 @@ def patch_unit(unit_text: str) -> str:
     ]
     if after != before[:-1] + added + [IMAGE_REF]:
         raise PreflightError("systemd_candidate_semantics_mismatch")
+    after_directives = _service_directives(updated)
+    for name in set(before_directives) | set(after_directives):
+        if name in {"ExecStart", "ExecStartPre"}:
+            continue
+        if [item[2] for item in before_directives.get(name, [])] != [
+            item[2] for item in after_directives.get(name, [])
+        ]:
+            raise PreflightError("systemd_existing_directive_changed")
+    if [item[2] for item in after_directives.get("ExecStartPre", [])] != [
+        item[2] for item in before_directives.get("ExecStartPre", [])
+    ] + [IDENTITY_REFRESH_PRESTART]:
+        raise PreflightError("systemd_existing_execstartpre_changed")
     return updated
 
 

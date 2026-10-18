@@ -436,7 +436,7 @@ describe("M15.78R remote verification runner", () => {
         instanceId: EXPECTED_VERIFIER_INSTANCE.instanceId,
         imageId: "ami-0123456789abcdef0",
       }),
-      instanceIdentitySignature: "A".repeat(344),
+      instanceIdentitySignature: Buffer.alloc(128).toString("base64"),
       identityFetchedAt: Date.now(),
       containerImageId: EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS[0],
       containerImageRef: VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF,
@@ -474,6 +474,14 @@ describe("M15.78R remote verification runner", () => {
     expect(value).toMatchObject({ nonce: challenge, ...fakeIdentity });
     expect(attestCalls).toBe(1);
     expect(executeCalls).toBe(0);
+    const replay = await signedFetch(
+      base,
+      "POST",
+      VERIFICATION_RUNNER_IDENTITY_ATTESTATION_PATH,
+      body,
+    );
+    expect(replay.status).toBe(401);
+    expect(attestCalls).toBe(1);
     const persisted = await readdir(path.join(root, "jobs"), { withFileTypes: true }).catch(
       () => [],
     );
@@ -518,7 +526,7 @@ describe("M15.78R remote verification runner", () => {
         instanceId: EXPECTED_VERIFIER_INSTANCE.instanceId,
         imageId: "ami-0123456789abcdef0",
       }),
-      signature: Buffer.alloc(256, 7).toString("base64"),
+      signature: Buffer.alloc(128, 7).toString("base64"),
       fetchedAt: now,
     };
     expect(parseHostIdentityFile(JSON.stringify(identityRecord), now)).toMatchObject({
@@ -535,6 +543,17 @@ describe("M15.78R remote verification runner", () => {
         now,
       ),
     ).toThrow("runner_identity_metadata_unavailable");
+    for (const byteCount of [127, 129]) {
+      expect(() =>
+        parseHostIdentityFile(
+          JSON.stringify({
+            ...identityRecord,
+            signature: Buffer.alloc(byteCount).toString("base64"),
+          }),
+          now,
+        ),
+      ).toThrow("runner_identity_metadata_unavailable");
+    }
     expect(() =>
       parseHostIdentityFile(JSON.stringify({ ...identityRecord, fetchedAt: now + 5_001 }), now),
     ).toThrow("runner_identity_metadata_unavailable");
@@ -544,10 +563,19 @@ describe("M15.78R remote verification runner", () => {
     expect(() =>
       parseHostIdentityFile(JSON.stringify({ ...identityRecord, signature: "not-base64" }), now),
     ).toThrow("runner_identity_metadata_unavailable");
+    expect(() =>
+      parseHostIdentityFile(
+        JSON.stringify({
+          ...identityRecord,
+          signature: `${identityRecord.signature.slice(0, 64)}\n${identityRecord.signature.slice(64)}`,
+        }),
+        now,
+      ),
+    ).toThrow("runner_identity_metadata_unavailable");
   });
 
   it("verifies the AWS RSA identity signature and rejects nonce, host, and signature mismatches", () => {
-    const keys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const keys = generateKeyPairSync("rsa", { modulusLength: 1024 });
     const identityDocument = JSON.stringify({
       accountId: EXPECTED_VERIFIER_INSTANCE.accountId,
       region: EXPECTED_VERIFIER_INSTANCE.region,
@@ -562,8 +590,32 @@ describe("M15.78R remote verification runner", () => {
     expect(
       verifyRsaSha256DocumentSignature(identityDocument, identitySignature, keys.publicKey),
     ).toBe(true);
+    const wrappedSignature = `${identitySignature.slice(0, 64)}\r\n \t${identitySignature.slice(64)}`;
+    expect(
+      verifyRsaSha256DocumentSignature(identityDocument, wrappedSignature, keys.publicKey),
+    ).toBe(true);
     expect(
       verifyRsaSha256DocumentSignature(`${identityDocument} `, identitySignature, keys.publicKey),
+    ).toBe(false);
+    for (const malformed of [
+      `${identitySignature}\u0000`,
+      `${identitySignature}\u00a0`,
+      `${identitySignature}\v`,
+      `${identitySignature}\f`,
+      Buffer.alloc(127).toString("base64"),
+      Buffer.alloc(129).toString("base64"),
+    ]) {
+      expect(verifyRsaSha256DocumentSignature(identityDocument, malformed, keys.publicKey)).toBe(
+        false,
+      );
+    }
+    const wrongCertificateKey = generateKeyPairSync("rsa", { modulusLength: 1024 });
+    expect(
+      verifyRsaSha256DocumentSignature(
+        identityDocument,
+        identitySignature,
+        wrongCertificateKey.publicKey,
+      ),
     ).toBe(false);
 
     const nonce = "e".repeat(64);
@@ -572,7 +624,7 @@ describe("M15.78R remote verification runner", () => {
       issuedAt: Date.now(),
       identityFetchedAt: Date.now(),
       instanceIdentityDocument: identityDocument,
-      instanceIdentitySignature: identitySignature,
+      instanceIdentitySignature: wrappedSignature,
       containerImageId: EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS[0],
       containerImageRef: VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF,
     };
@@ -616,20 +668,25 @@ describe("M15.78R remote verification runner", () => {
         signaturePublicKey: keys.publicKey,
       }),
     ).toThrow("runner_identity_document_stale");
-    const otherImage = { ...body, containerImageId: `sha256:${"d".repeat(64)}` };
-    const otherImageSignature = createHmac("sha256", AUTH_SECRET)
-      .update(canonicalJson(otherImage), "utf8")
-      .digest("hex");
-    expect(() =>
-      verifyRunnerIdentityAttestation({
-        body: otherImage,
-        responseSignature: otherImageSignature,
-        requestNonce: nonce,
-        authSecret: AUTH_SECRET,
-        now,
-        signaturePublicKey: keys.publicKey,
-      }),
-    ).toThrow("runner_container_image_mismatch");
+    for (const unapprovedImageId of [
+      "sha256:c8bfd835ad08ed3516f0a5c2315d519317b4b71b18e4fe1c7735cad89bc3e90a",
+      `sha256:${"d".repeat(64)}`,
+    ]) {
+      const otherImage = { ...body, containerImageId: unapprovedImageId };
+      const otherImageSignature = createHmac("sha256", AUTH_SECRET)
+        .update(canonicalJson(otherImage), "utf8")
+        .digest("hex");
+      expect(() =>
+        verifyRunnerIdentityAttestation({
+          body: otherImage,
+          responseSignature: otherImageSignature,
+          requestNonce: nonce,
+          authSecret: AUTH_SECRET,
+          now,
+          signaturePublicKey: keys.publicKey,
+        }),
+      ).toThrow("runner_container_image_mismatch");
+    }
     expect(() =>
       verifyRunnerIdentityAttestation({
         body,
@@ -662,7 +719,7 @@ describe("M15.78R remote verification runner", () => {
     ).toThrow("runner_identity_claim_mismatch");
     const wrongDocumentSignature = {
       ...body,
-      instanceIdentitySignature: Buffer.alloc(256, 1).toString("base64"),
+      instanceIdentitySignature: Buffer.alloc(128, 1).toString("base64"),
     };
     const wrongSignatureHmac = createHmac("sha256", AUTH_SECRET)
       .update(canonicalJson(wrongDocumentSignature), "utf8")

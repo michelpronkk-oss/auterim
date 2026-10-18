@@ -74,8 +74,10 @@ def fetch_identity(now_ms: int | None = None) -> dict[str, object]:
     try:
         document = document_bytes.decode("utf-8")
         claims = json.loads(document)
-        signature = signature_bytes.decode("ascii").strip()
+        signature = _canonicalize_rsa_signature(signature_bytes)
     except Exception as exc:  # noqa: BLE001 - no untrusted data is included in error
+        if isinstance(exc, IdentityRefreshError):
+            raise
         raise IdentityRefreshError("metadata_identity_invalid") from exc
     if not isinstance(claims, dict) or (
         claims.get("accountId") != EXPECTED_ACCOUNT
@@ -85,8 +87,6 @@ def fetch_identity(now_ms: int | None = None) -> dict[str, object]:
         or not claims["imageId"].startswith("ami-")
     ):
         raise IdentityRefreshError("metadata_identity_mismatch")
-    if not signature or len(signature) > MAX_SIGNATURE_BYTES or not _valid_rsa_signature_shape(signature):
-        raise IdentityRefreshError("metadata_signature_invalid")
     return {
         "document": document,
         "signature": signature,
@@ -94,15 +94,26 @@ def fetch_identity(now_ms: int | None = None) -> dict[str, object]:
     }
 
 
-def _valid_rsa_signature_shape(signature: str) -> bool:
+def _canonicalize_rsa_signature(signature_bytes: bytes) -> str:
+    """Accept ASCII-wrapped IMDS Base64, then return its strict canonical form."""
     import base64
     import binascii
 
+    if not signature_bytes or len(signature_bytes) > MAX_SIGNATURE_BYTES:
+        raise IdentityRefreshError("metadata_signature_invalid")
+    allowed_whitespace = b" \t\r\n"
+    if any(byte > 0x7F for byte in signature_bytes):
+        raise IdentityRefreshError("metadata_signature_invalid")
+    compact = bytes(byte for byte in signature_bytes if byte not in allowed_whitespace)
+    if not compact:
+        raise IdentityRefreshError("metadata_signature_invalid")
     try:
-        decoded = base64.b64decode(signature, validate=True)
+        decoded = base64.b64decode(compact, validate=True)
     except (ValueError, binascii.Error):
-        return False
-    return len(decoded) == 256 and base64.b64encode(decoded).decode("ascii") == signature
+        raise IdentityRefreshError("metadata_signature_invalid") from None
+    if len(decoded) != 128 or base64.b64encode(decoded) != compact:
+        raise IdentityRefreshError("metadata_signature_invalid")
+    return compact.decode("ascii")
 
 
 def _ensure_directory() -> None:

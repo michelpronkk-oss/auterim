@@ -23,10 +23,9 @@ export const EXPECTED_VERIFIER_INSTANCE = {
   instanceId: "i-0592719b99a518001",
 } as const;
 
-/** Content/config digest and Docker's OCI-index ID for the same reviewed image archive. */
+/** Exact Docker image ID independently confirmed on the live EC2 runner. */
 export const EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS = [
-  "sha256:dc150aabdf5c7ad152fe637c307b68d489887be2b834f447ff92b69d1671a230",
-  "sha256:e923f5dc4ae35047cc76e10a0430a9cd0b6f122e3d34ea2c64c6bfb59a1e54c7",
+  "sha256:408117eeeee5477f56eae8d8bb16cda12cf01ad0596b7ce3269bf2e2beaa56ee",
 ] as const;
 
 // AWS's eu-west-1 RSA certificate for the IMDS /instance-identity/signature endpoint.
@@ -54,6 +53,7 @@ qi33rAq6owWGi/5uEcfCR+JP7W+oSYVir5r/yDmWzx+BVH5S/g==
 -----END CERTIFICATE-----`;
 
 const AWS_EU_WEST_1_RSA_PUBLIC_KEY = createPublicKey(AWS_EU_WEST_1_RSA_CERTIFICATE);
+const AWS_EU_WEST_1_RSA_SIGNATURE_BYTES = 128;
 const certificateFingerprint = new X509Certificate(AWS_EU_WEST_1_RSA_CERTIFICATE).fingerprint256
   .replaceAll(":", "")
   .toLowerCase();
@@ -84,9 +84,24 @@ export function verifyRsaSha256DocumentSignature(
   signatureBase64: string,
   publicKey: KeyObject,
 ) {
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(signatureBase64)) return false;
-  const signature = Buffer.from(signatureBase64, "base64");
-  if (signature.byteLength !== 256 || signature.toString("base64") !== signatureBase64)
+  let canonicalBase64 = "";
+  for (const character of signatureBase64) {
+    const code = character.charCodeAt(0);
+    if (code === 0x09 || code === 0x0a || code === 0x0d || code === 0x20) continue;
+    if (code > 0x7f) return false;
+    canonicalBase64 += character;
+  }
+  if (
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(canonicalBase64) ||
+    publicKey.asymmetricKeyType !== "rsa" ||
+    publicKey.asymmetricKeyDetails?.modulusLength !== 1024
+  )
+    return false;
+  const signature = Buffer.from(canonicalBase64, "base64");
+  if (
+    signature.byteLength !== AWS_EU_WEST_1_RSA_SIGNATURE_BYTES ||
+    signature.toString("base64") !== canonicalBase64
+  )
     return false;
   try {
     return verifySignature("RSA-SHA256", Buffer.from(document, "utf8"), publicKey, signature);

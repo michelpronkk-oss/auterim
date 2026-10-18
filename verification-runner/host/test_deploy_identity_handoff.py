@@ -50,6 +50,41 @@ class DeploymentParserTests(unittest.TestCase):
         self.assertEqual(after["command"], before["command"][:-1] + expected_added + [deploy.IMAGE_REF])
         self.assertIn("ExecStartPre=-/usr/bin/systemctl start auterim-verifier-identity-refresh.service", changed)
 
+    def test_preserves_existing_execstartpre_order_and_execstop(self):
+        original = unit_text().replace(
+            "EnvironmentFile=/etc/auterim-verifier/runner.env",
+            "ExecStartPre=/usr/bin/test -S /var/run/docker.sock\n"
+            "ExecStartPre=/usr/bin/test -e /etc/os-release\n"
+            "ExecStop=/usr/bin/docker stop --time 10 auterim-verification-runner\n"
+            "EnvironmentFile=/etc/auterim-verifier/runner.env",
+        )
+
+        before = deploy._service_directives(original)
+        before_prestart = [item[2] for item in before["ExecStartPre"]]
+        before_stop = [item[2] for item in before["ExecStop"]]
+        changed = deploy.patch_unit(original)
+        after = deploy._service_directives(changed)
+
+        self.assertEqual(
+            [item[2] for item in after["ExecStartPre"]],
+            before_prestart + [deploy.IDENTITY_REFRESH_PRESTART],
+        )
+        self.assertEqual([item[2] for item in after["ExecStop"]], before_stop)
+        self.assertEqual(
+            deploy.validate_unit(changed, allow_identity_mount=True)["command"],
+            deploy.validate_unit(original)["command"][:-1]
+            + ["--group-add", str(deploy.GROUP_ID), "--mount", f"type=bind,source={deploy.IDENTITY_DIRECTORY_VALUE},target={deploy.IDENTITY_DIRECTORY_VALUE},readonly", deploy.IMAGE_REF],
+        )
+
+    def test_rejects_preexisting_identity_refresh_execstartpre(self):
+        malformed = unit_text().replace(
+            "EnvironmentFile=/etc/auterim-verifier/runner.env",
+            "ExecStartPre=-/usr/bin/systemctl start auterim-verifier-identity-refresh.service\n"
+            "EnvironmentFile=/etc/auterim-verifier/runner.env",
+        )
+        with self.assertRaisesRegex(deploy.PreflightError, "systemd_execstartpre_mismatch"):
+            deploy.validate_unit(malformed)
+
     def test_rejects_missing_public_key_handoff(self):
         malformed = unit_text().replace("FIX_DEPENDENCY_CACHE_PUBLIC_KEY", "MISSING_KEY")
         with self.assertRaisesRegex(deploy.PreflightError, "systemd_environment_handoff_mismatch"):
@@ -110,7 +145,7 @@ class DeploymentParserTests(unittest.TestCase):
                 },
                 separators=(",", ":"),
             ),
-            "signature": base64.b64encode(bytes(range(256))).decode("ascii"),
+            "signature": base64.b64encode(bytes(range(128))).decode("ascii"),
             "fetchedAt": now,
         }
         deploy.validate_identity_record(json.dumps(valid).encode(), now)
@@ -126,6 +161,15 @@ class DeploymentParserTests(unittest.TestCase):
             deploy.validate_identity_record(
                 json.dumps({**valid, "signature": "not-base64"}).encode(), now
             )
+        for malformed in (
+            valid["signature"][:64] + "\n" + valid["signature"][64:],
+            base64.b64encode(bytes(127)).decode("ascii"),
+            base64.b64encode(bytes(129)).decode("ascii"),
+        ):
+            with self.subTest(signature_case=len(malformed)), self.assertRaisesRegex(
+                deploy.PreflightError, "host_identity_record_invalid_or_stale"
+            ):
+                deploy.validate_identity_record(json.dumps({**valid, "signature": malformed}).encode(), now)
 
     def test_deployment_artifact_staging_is_bounded_and_copies_exact_bytes(self):
         with tempfile.TemporaryDirectory() as directory:

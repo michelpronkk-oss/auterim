@@ -119,7 +119,7 @@ export function parseHostIdentityFile(raw: string, now = Date.now()) {
     const instanceIdentitySignature = parsed.data.signature;
     if (
       !/^[A-Za-z0-9+/]+={0,2}$/.test(instanceIdentitySignature) ||
-      Buffer.from(instanceIdentitySignature, "base64").byteLength !== 256 ||
+      Buffer.from(instanceIdentitySignature, "base64").byteLength !== 128 ||
       Buffer.from(instanceIdentitySignature, "base64").toString("base64") !==
         instanceIdentitySignature
     )
