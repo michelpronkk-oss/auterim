@@ -9,7 +9,11 @@ import {
   FIX_VERIFICATION_RUNTIME_PROFILE,
   type DependencyCacheIdentity,
 } from "@/lib/fix-engine/dependency-cache";
-import { dependencyCacheManifestFingerprint, sha256 } from "../../verification-runner/contracts";
+import {
+  dependencyCacheManifestFingerprint,
+  sha256,
+  VERIFICATION_RUNNER_PROTOCOL_VERSION,
+} from "../../verification-runner/contracts";
 
 const FIX_RUN_ID = "7de04a75-aefa-43a6-ba64-9fa4a70e0ec1";
 const VERIFY_STAGE_ID = "bd3238d9-79a9-46ca-88d1-e67f346ecc0a";
@@ -24,6 +28,40 @@ const CACHE_IDENTITY: DependencyCacheIdentity = {
 };
 const EXPECTED_CACHE_IDENTITY_KEY =
   "86ab5d3a45b9e1a5218418e7856cb48b1c8fadf242c0b5ffb18ffb517463832c";
+const EXPECTED_CACHE_PUBLIC_KEY_FINGERPRINT =
+  "071a6d11f634731fb4c1673278cd69cb70607725455dcdac46dff8eb78a7180f";
+
+async function verificationRunnerProtocolMatches(baseUrl: string) {
+  try {
+    const origin = new URL(baseUrl);
+    if (origin.protocol !== "https:") return false;
+    const response = await fetch(new URL("/healthz", origin), {
+      method: "GET",
+      cache: "no-store",
+      redirect: "error",
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) return false;
+    const declaredLength = response.headers.get("content-length");
+    if (declaredLength && /^\d+$/.test(declaredLength) && Number(declaredLength) > 2_048) {
+      await response.body?.cancel().catch(() => undefined);
+      return false;
+    }
+    const body = await response.text();
+    if (Buffer.byteLength(body, "utf8") > 2_048) return false;
+    const value: unknown = JSON.parse(body);
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      "status" in value &&
+      value.status === "ok" &&
+      "protocolVersion" in value &&
+      value.protocolVersion === VERIFICATION_RUNNER_PROTOCOL_VERSION
+    );
+  } catch {
+    return false;
+  }
+}
 
 export const recoverInternalFixVerificationAfterCacheRepairTask = schemaTask({
   id: "recover-internal-fix-verification-after-cache-repair",
@@ -35,6 +73,7 @@ export const recoverInternalFixVerificationAfterCacheRepairTask = schemaTask({
       })
       .strict(),
     z.object({ action: z.literal("recover"), fixRunId: z.string().uuid() }).strict(),
+    z.object({ action: z.literal("recover_generation_two"), fixRunId: z.string().uuid() }).strict(),
   ]),
   retry: { maxAttempts: 1 },
   maxDuration: 180,
@@ -59,6 +98,7 @@ export const recoverInternalFixVerificationAfterCacheRepairTask = schemaTask({
     }
 
     const { fixRunId } = input;
+    const recoveryGeneration = input.action === "recover_generation_two" ? 2 : 1;
     if (
       fixRunId !== FIX_RUN_ID ||
       dependencyCacheIdentityKey(CACHE_IDENTITY) !== EXPECTED_CACHE_IDENTITY_KEY
@@ -69,6 +109,33 @@ export const recoverInternalFixVerificationAfterCacheRepairTask = schemaTask({
     const environment = getEnvironment();
     if (!environment.FIX_DEPENDENCY_CACHE_PUBLIC_KEY) {
       return { status: "blocked", category: "verification_cache_key_unavailable" } as const;
+    }
+    if (recoveryGeneration === 2) {
+      try {
+        const actualFingerprint = sha256(
+          Buffer.from(
+            createPublicKey(environment.FIX_DEPENDENCY_CACHE_PUBLIC_KEY).export({
+              type: "spki",
+              format: "der",
+            }),
+          ),
+        );
+        if (actualFingerprint !== EXPECTED_CACHE_PUBLIC_KEY_FINGERPRINT) {
+          return { status: "blocked", category: "verification_cache_key_mismatch" } as const;
+        }
+      } catch {
+        return { status: "blocked", category: "verification_cache_key_invalid" } as const;
+      }
+      if (environment.FIX_GITHUB_DRAFT_PR_WRITES !== "0") {
+        return { status: "blocked", category: "draft_pr_writes_must_remain_disabled" } as const;
+      }
+      if (
+        environment.FIX_VERIFICATION_RUNNER_PROTOCOL !== VERIFICATION_RUNNER_PROTOCOL_VERSION ||
+        !environment.FIX_VERIFICATION_RUNNER_URL ||
+        !(await verificationRunnerProtocolMatches(environment.FIX_VERIFICATION_RUNNER_URL))
+      ) {
+        return { status: "blocked", category: "verification_runner_protocol_unverified" } as const;
+      }
     }
 
     let cache: Awaited<ReturnType<typeof createSignedDependencyCacheReference>>;
@@ -98,22 +165,29 @@ export const recoverInternalFixVerificationAfterCacheRepairTask = schemaTask({
       return { status: "blocked", category: "verification_cache_archive_mismatch" } as const;
     }
 
-    const { data, error } = await client.rpc("authorize_internal_fix_verification_recovery", {
+    const rpcArgs = {
       p_fix_run_id: fixRunId,
-      p_authorization_reference: "M15.78R user-authorized single bounded verification recovery",
+      p_authorization_reference:
+        recoveryGeneration === 2
+          ? "M15.78R user-authorized generation 2 after AWS runner public-key correction"
+          : "M15.78R user-authorized single bounded verification recovery",
       p_trigger_run_id: ctx.run.id,
       p_cache_identity_key: cache.manifest.identityKey,
       p_cache_manifest_fingerprint: cache.manifest.manifestFingerprint,
       p_cache_archive_sha256: cache.manifest.archiveSha256,
       p_cache_tree_sha256: cache.manifest.treeSha256,
-    });
+    };
+    const { data, error } =
+      recoveryGeneration === 2
+        ? await client.rpc("authorize_internal_fix_verification_recovery_generation_two", rpcArgs)
+        : await client.rpc("authorize_internal_fix_verification_recovery", rpcArgs);
     if (
       error ||
       !data ||
       data.fixRunId !== fixRunId ||
       data.stageId !== VERIFY_STAGE_ID ||
       typeof data.recoveryId !== "string" ||
-      data.recoveryGeneration !== 1 ||
+      data.recoveryGeneration !== recoveryGeneration ||
       !["retry_queued", "already_authorized"].includes(data.status)
     ) {
       return { status: "blocked", category: "verification_recovery_not_eligible" } as const;
@@ -131,6 +205,7 @@ export const recoverInternalFixVerificationAfterCacheRepairTask = schemaTask({
       status: "recovery_dispatched",
       fixRunId,
       recoveryId: data.recoveryId,
+      recoveryGeneration,
       stageId: VERIFY_STAGE_ID,
       cacheIdentityKey: cache.manifest.identityKey,
       cacheManifestFingerprint: cache.manifest.manifestFingerprint,
