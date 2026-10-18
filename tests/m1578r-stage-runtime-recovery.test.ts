@@ -81,7 +81,8 @@ function makeClient(options: {
   transition?: { data: unknown; error: unknown };
   queueAfterBusy?: unknown;
 }) {
-  const rpc = vi.fn(async (name: string, ..._args: unknown[]) => {
+  const rpc = vi.fn(async (name: string, ...args: unknown[]) => {
+    void args;
     if (name === "claim_fix_stage")
       return (
         options.claim ?? {
