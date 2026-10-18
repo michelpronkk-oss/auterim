@@ -134,6 +134,36 @@ export function stageArtifactPersistenceFailureCategory(error: {
   return code ? `fix_stage_record_failed_${code}` : "fix_stage_record_failed";
 }
 
+function safeRpcErrorCode(error: unknown): string | null {
+  if (typeof error !== "object" || error === null || !("code" in error)) return null;
+  const code = error.code;
+  return typeof code === "string" && /^(?:[0-9A-Z]{5}|PGRST[0-9]{3})$/.test(code) ? code : null;
+}
+
+async function readUnclaimedStageOutcome(
+  client: ReturnType<typeof createSupabaseServerClient>,
+  fixRunId: string,
+  stageId: string,
+) {
+  const { data, error } = await client
+    .from("fix_stage_queue")
+    .select("status,failure_category")
+    .eq("id", stageId)
+    .eq("fix_run_id", fixRunId)
+    .maybeSingle();
+  if (error || !data) throw new Error("fix_stage_claim_state_unavailable");
+  if (data.status === "failed")
+    return {
+      status: "failed" as const,
+      nextStage: null,
+      ...(typeof data.failure_category === "string"
+        ? { failureCategory: data.failure_category }
+        : {}),
+    };
+  if (data.status === "cancelled") return { status: "cancelled" as const, nextStage: null };
+  return { status: "busy" as const, nextStage: null };
+}
+
 export async function createPersistedFixRun(graphBuildId: string) {
   if (!uuid.safeParse(graphBuildId).success) throw new Error("invalid_graph_build_id");
   const { data, error } = await createSupabaseServerClient().rpc("create_fix_run_from_graph", {
@@ -173,7 +203,9 @@ export async function runPersistedFixStage(input: {
     // cannot reclaim a stage that is still legitimately running.
     p_lease_seconds: 300,
   });
-  if (claimError || !claimData) return { status: "busy" as const, nextStage: null };
+  if (claimError) throw new Error("fix_stage_claim_unavailable");
+  if (!claimData || typeof claimData !== "object" || Array.isArray(claimData))
+    throw new Error("fix_stage_claim_response_invalid");
   if (claimData.status === "stale_scope")
     return { status: "stale_scope" as const, nextStage: null };
   if (claimData.status === "stale_policy")
@@ -185,7 +217,8 @@ export async function runPersistedFixStage(input: {
         typeof claimData.nextStage === "string" ? FixStageSchema.parse(claimData.nextStage) : null,
       replayed: true,
     };
-  if (claimData.status !== "claimed") return { status: "busy" as const, nextStage: null };
+  if (claimData.status === "busy") return readUnclaimedStageOutcome(client, runId, queueRow.id);
+  if (claimData.status !== "claimed") throw new Error("fix_stage_claim_response_invalid");
   const claim = z
     .object({
       stageId: uuid,
@@ -316,11 +349,13 @@ export async function runPersistedFixStage(input: {
           message.includes("ambiguous") ||
           message.includes("transport_ambiguous")));
     const safeCategory = /^[a-z0-9_]{1,100}$/.test(message) ? message : "fix_stage_failed";
+    let diagnosticsPersisted = false;
+    let diagnosticData: unknown = null;
+    let diagnosticPersistenceErrorCode: string | null = null;
     if (error instanceof VerificationRunnerFailure) {
       // This RPC atomically appends the allowlisted diagnostic and applies the
       // existing stage transition. It intentionally receives no URLs, headers,
       // bodies, request identities, signatures, or source content.
-      let diagnosticsPersisted = false;
       try {
         const diagnosticWrite = await client.rpc("complete_fix_stage_with_runner_diagnostics", {
           p_stage_id: claim.stageId,
@@ -331,13 +366,21 @@ export async function runPersistedFixStage(input: {
           p_diagnostics: error.diagnostics,
         });
         diagnosticsPersisted = !diagnosticWrite.error && Boolean(diagnosticWrite.data);
+        diagnosticData = diagnosticWrite.data;
+        if (diagnosticWrite.error)
+          diagnosticPersistenceErrorCode =
+            safeRpcErrorCode(diagnosticWrite.error) ?? "unclassified";
+        else if (!diagnosticWrite.data) diagnosticPersistenceErrorCode = "empty_response";
       } catch {
-        // A transport failure must still follow the prior stage transition path.
+        diagnosticPersistenceErrorCode = "transport_error";
       }
       if (!diagnosticsPersisted) {
-        // Preserve the previous terminal/retry behavior if the diagnostic ledger
-        // itself is unavailable. The fixed message contains no provider data.
-        console.warn("fix_engine_runner_diagnostic_persistence_failed", input.stage);
+        // Persist only an allowlisted backend code/category; never log raw RPC errors.
+        console.warn(
+          "fix_engine_runner_diagnostic_persistence_failed",
+          input.stage,
+          diagnosticPersistenceErrorCode,
+        );
       } else {
         // Console logs remain a secondary aid; the bounded event is durable and
         // available through the operator-only readback task.
@@ -350,15 +393,49 @@ export async function runPersistedFixStage(input: {
             diagnostics: error.diagnostics,
           }),
         );
-        throw new Error(safeCategory);
       }
     }
-    await client.rpc("complete_fix_stage", {
-      p_stage_id: claim.stageId,
-      p_claim_token: claim.claimToken,
-      p_result: retryable ? "retry" : "failed",
-      p_failure_category: safeCategory,
-    });
-    throw new Error(safeCategory);
+    let transitionStatus: unknown;
+    if (diagnosticsPersisted) {
+      const data = diagnosticData as { transition?: { status?: unknown } };
+      transitionStatus = data.transition?.status;
+    } else {
+      const transition = await client.rpc("complete_fix_stage", {
+        p_stage_id: claim.stageId,
+        p_claim_token: claim.claimToken,
+        p_result: retryable ? "retry" : "failed",
+        p_failure_category: safeCategory,
+      });
+      if (transition.error || !transition.data) throw new Error("fix_stage_transition_failed");
+      transitionStatus = transition.data.status;
+    }
+
+    if (transitionStatus === "retry_queued") throw new Error(safeCategory);
+    const terminalRunStatuses = [
+      "diagnosis_failed",
+      "plan_failed",
+      "patch_failed",
+      "patch_conflict",
+      "validation_failed",
+      "preflight_failed",
+      "risk_blocked",
+      "failed",
+      "cancelled",
+    ] as const;
+    if (terminalRunStatuses.includes(transitionStatus as (typeof terminalRunStatuses)[number])) {
+      return {
+        status: transitionStatus as (typeof terminalRunStatuses)[number],
+        nextStage: null,
+        failureCategory: safeCategory,
+        diagnosticPersistence:
+          error instanceof VerificationRunnerFailure
+            ? diagnosticsPersisted
+              ? ("recorded" as const)
+              : ("unavailable" as const)
+            : ("not_applicable" as const),
+        ...(diagnosticPersistenceErrorCode ? { diagnosticPersistenceErrorCode } : {}),
+      };
+    }
+    throw new Error("fix_stage_transition_result_invalid");
   }
 }
