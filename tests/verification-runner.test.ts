@@ -369,10 +369,13 @@ describe("M15.78R remote verification runner", () => {
       maxSpoolBytes?: number;
       cachePublicKey?: string;
       attestIdentity?: VerificationRunnerConfig["attestIdentity"];
+      materialize?: VerificationRunnerConfig["materialize"];
+      persistQueuedJob?: VerificationRunnerConfig["persistQueuedJob"];
+      useBuiltInMaterializer?: boolean;
     } = {},
   ) {
     const root = await mkdtemp(path.join(os.tmpdir(), "m1578r-runner-test-"));
-    const { cachePublicKey, ...runnerLimits } = limits;
+    const { cachePublicKey, materialize, useBuiltInMaterializer, ...runnerLimits } = limits;
     const runner = createVerificationRunnerServer({
       authSecret: AUTH_SECRET,
       artifactOrigin: "http://127.0.0.1:54321",
@@ -380,25 +383,31 @@ describe("M15.78R remote verification runner", () => {
         cachePublicKey ?? CACHE_KEYS.publicKey.export({ type: "spki", format: "pem" }).toString(),
       jobStorePath: path.join(root, "jobs"),
       workRoot: path.join(root, "work"),
-      materialize: async (request, spoolRoot, secret) => {
-        const job = toMaterializedVerificationJob(request);
-        const directory = path.join(spoolRoot, job.jobId);
-        await mkdir(directory, { recursive: true });
-        for (const artifact of [job.snapshot, job.patch, job.cacheArchive]) {
-          const content =
-            artifact.fileName === "snapshot.tar.gz"
-              ? SNAPSHOT_BYTES
-              : artifact.fileName === "patch.diff"
-                ? PATCH_BYTES
-                : CACHE_BYTES;
-          await writeFile(path.join(directory, artifact.fileName), content, {
-            flag: "wx",
-            mode: 0o600,
-          });
-        }
-        await persistMaterializedJobManifest(directory, job, secret);
-        return job;
-      },
+      ...(!useBuiltInMaterializer
+        ? {
+            materialize:
+              materialize ??
+              (async (request, spoolRoot, secret) => {
+                const job = toMaterializedVerificationJob(request);
+                const directory = path.join(spoolRoot, job.jobId);
+                await mkdir(directory, { recursive: true });
+                for (const artifact of [job.snapshot, job.patch, job.cacheArchive]) {
+                  const content =
+                    artifact.fileName === "snapshot.tar.gz"
+                      ? SNAPSHOT_BYTES
+                      : artifact.fileName === "patch.diff"
+                        ? PATCH_BYTES
+                        : CACHE_BYTES;
+                  await writeFile(path.join(directory, artifact.fileName), content, {
+                    flag: "wx",
+                    mode: 0o600,
+                  });
+                }
+                await persistMaterializedJobManifest(directory, job, secret);
+                return job;
+              }),
+          }
+        : {}),
       ...runnerLimits,
       execute,
     });
@@ -902,6 +911,273 @@ describe("M15.78R remote verification runner", () => {
     expect(await readdir(path.join(root, "jobs", "artifacts"))).toEqual([]);
   });
 
+  it("classifies an unknown admission exception as a terminal safe internal error", async () => {
+    const admissionLog = vi.spyOn(console, "warn").mockImplementation(() => {
+      throw new Error("logger sink unavailable");
+    });
+    const { base, root } = await startRunner(undefined, {
+      materialize: async () => {
+        throw new Error("EIO: C:\\private\\runner\\secret-token");
+      },
+    });
+    const request = makeRequest();
+    const client = new RemoteVerificationRunnerClient({
+      url: base,
+      authSecret: AUTH_SECRET,
+      maxWaitMs: 5_000,
+    });
+
+    await expect(client.execute(request)).rejects.toMatchObject({
+      category: "runner_result_invalid",
+      retryable: false,
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 500,
+          responseCategory: "verification_runner_internal_error",
+          reason: "http_error",
+          admissionSubphase: "artifact_materialization",
+        },
+      ],
+      correlation: {
+        jobId: expect.stringMatching(/^[a-f0-9]{64}$/),
+        requestFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        admissionState: "rejected",
+      },
+    });
+    expect(JSON.stringify(await readdir(path.join(root, "jobs")))).not.toContain("private");
+    expect(await readdir(path.join(root, "jobs"))).toEqual(["artifacts"]);
+    expect(await readdir(path.join(root, "jobs", "artifacts"))).toEqual([]);
+    expect(admissionLog).toHaveBeenCalledOnce();
+    expect(admissionLog.mock.calls[0]?.[0]).toBe(
+      JSON.stringify({
+        event: "verification_runner_admission_failure",
+        admissionSubphase: "artifact_materialization",
+        responseCategory: "verification_runner_internal_error",
+        httpStatus: 500,
+      }),
+    );
+    expect(String(admissionLog.mock.calls[0]?.[0])).not.toContain("private");
+  });
+
+  it("keeps an unclassified HTTP 500 admission response unconfirmed", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: "verification_runner_internal_error" }), {
+            status: 500,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    let caught: unknown;
+    try {
+      await new RemoteVerificationRunnerClient({
+        url: "https://runner.invalid",
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 1_000,
+      }).execute(makeRequest());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_result_invalid",
+      retryable: false,
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 500,
+          responseCategory: "verification_runner_internal_error",
+          reason: "http_error",
+        },
+      ],
+      correlation: {
+        jobId: expect.stringMatching(/^[a-f0-9]{64}$/),
+        requestFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        admissionState: "unconfirmed",
+      },
+    });
+    expect(JSON.stringify(caught)).not.toContain("admissionSubphase");
+  });
+
+  it("reports only the job-record persistence phase for filesystem errors", async () => {
+    const { base, root } = await startRunner(undefined, {
+      persistQueuedJob: async () => {
+        throw Object.assign(new Error("EACCES: C:\\private\\job-store"), { code: "EACCES" });
+      },
+    });
+    let caught: unknown;
+    try {
+      await new RemoteVerificationRunnerClient({
+        url: base,
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 5_000,
+      }).execute(makeRequest());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_result_invalid",
+      retryable: false,
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 500,
+          responseCategory: "verification_runner_internal_error",
+          admissionSubphase: "job_record_persistence",
+        },
+      ],
+    });
+    expect(JSON.stringify(caught)).not.toContain("C:\\private");
+    expect(await readdir(path.join(root, "jobs"))).toEqual(["artifacts"]);
+  });
+
+  it("records download transport failure and removes the partial staging spool", async () => {
+    const { base, root } = await startRunner(undefined, { useBuiltInMaterializer: true });
+    const originalFetch = globalThis.fetch.bind(globalThis);
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const target = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (target.port === "54321") throw new TypeError("private signed URL and token");
+      return originalFetch(input, init);
+    });
+    let caught: unknown;
+    try {
+      await new RemoteVerificationRunnerClient({
+        url: base,
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 5_000,
+      }).execute(makeRequest());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_unavailable",
+      retryable: true,
+      diagnostics: [
+        {
+          httpStatus: 503,
+          responseCategory: "verification_artifact_unavailable",
+          admissionSubphase: "artifact_download",
+        },
+      ],
+    });
+    expect(JSON.stringify(caught)).not.toContain("private signed URL");
+    expect(await readdir(path.join(root, "jobs", "artifacts"))).toEqual([]);
+  });
+
+  it("classifies an artifact stream failure as retryable transport and cleans staging", async () => {
+    const { base, root } = await startRunner(undefined, { useBuiltInMaterializer: true });
+    const originalFetch = globalThis.fetch.bind(globalThis);
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const target = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (target.port === "54321") {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1, 2, 3]));
+            controller.error(new TypeError("private signed URL and response detail"));
+          },
+        });
+        return new Response(stream, { status: 200 });
+      }
+      return originalFetch(input, init);
+    });
+    let caught: unknown;
+    try {
+      await new RemoteVerificationRunnerClient({
+        url: base,
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 5_000,
+      }).execute(makeRequest());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_unavailable",
+      retryable: true,
+      diagnostics: [
+        {
+          httpStatus: 503,
+          responseCategory: "verification_artifact_unavailable",
+          admissionSubphase: "artifact_download",
+        },
+      ],
+    });
+    expect(JSON.stringify(caught)).not.toContain("private signed URL");
+    expect(await readdir(path.join(root, "jobs", "artifacts"))).toEqual([]);
+  });
+
+  it("distinguishes downloaded artifact integrity failures from transport failures", async () => {
+    const { base, root } = await startRunner(undefined, { useBuiltInMaterializer: true });
+    const originalFetch = globalThis.fetch.bind(globalThis);
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const target = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (target.port === "54321") return new Response("untrusted artifact body", { status: 200 });
+      return originalFetch(input, init);
+    });
+    let caught: unknown;
+    try {
+      await new RemoteVerificationRunnerClient({
+        url: base,
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 5_000,
+      }).execute(makeRequest());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_result_invalid",
+      retryable: false,
+      diagnostics: [
+        {
+          httpStatus: 400,
+          responseCategory: "verification_artifact_fingerprint_mismatch",
+          admissionSubphase: "artifact_integrity_validation",
+        },
+      ],
+    });
+    expect(JSON.stringify(caught)).not.toContain("untrusted artifact body");
+    expect(await readdir(path.join(root, "jobs", "artifacts"))).toEqual([]);
+  });
+
+  it("reports archive extraction separately and waits for downloads before cleanup", async () => {
+    const { base, root } = await startRunner(undefined, { useBuiltInMaterializer: true });
+    const originalFetch = globalThis.fetch.bind(globalThis);
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const target = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (target.port === "54321") {
+        const bytes = target.pathname.includes("/snapshots/")
+          ? SNAPSHOT_BYTES
+          : target.pathname.endsWith(".diff")
+            ? PATCH_BYTES
+            : CACHE_BYTES;
+        return new Response(bytes, { status: 200 });
+      }
+      return originalFetch(input, init);
+    });
+    let caught: unknown;
+    try {
+      await new RemoteVerificationRunnerClient({
+        url: base,
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 5_000,
+      }).execute(makeRequest());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_result_invalid",
+      retryable: false,
+      diagnostics: [
+        {
+          httpStatus: 400,
+          admissionSubphase: "snapshot_archive_extraction",
+        },
+      ],
+    });
+    expect(await readdir(path.join(root, "jobs", "artifacts"))).toEqual([]);
+  });
+
   it("rejects artifact path substitution before enqueue", async () => {
     const { base } = await startRunner(async (request) => resultFor(request));
     const request = makeRequest();
@@ -1080,6 +1356,36 @@ describe("M15.78R remote verification runner", () => {
       ],
     });
     expect(JSON.stringify(caught)).not.toContain("provider_returned_untrusted_detail");
+  });
+
+  it("keeps explicit transient admission categories bounded and correctly classified", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: "verification_runner_state_write_failed" }), {
+            status: 503,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    await expect(
+      new RemoteVerificationRunnerClient({
+        url: "https://runner.invalid",
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 1_000,
+      }).execute(makeRequest()),
+    ).rejects.toMatchObject({
+      category: "runner_state_temporarily_unavailable",
+      retryable: true,
+      diagnostics: [
+        {
+          httpStatus: 503,
+          responseCategory: "verification_runner_state_write_failed",
+          reason: "http_error",
+        },
+      ],
+    });
   });
 
   it("reports only the safe field name for an accepted-job identity mismatch", async () => {
@@ -1643,5 +1949,15 @@ describe("M15.78R remote verification runner", () => {
     const fullResponse = await submit(third, "3".repeat(48));
     expect(fullResponse.status).toBe(503);
     expect(await fullResponse.json()).toEqual({ error: "verification_runner_job_store_full" });
+    await expect(client.execute(third)).rejects.toMatchObject({
+      category: "runner_queue_full",
+      retryable: true,
+      diagnostics: [
+        {
+          httpStatus: 503,
+          responseCategory: "verification_runner_job_store_full",
+        },
+      ],
+    });
   });
 });

@@ -17,6 +17,13 @@ const freshEvidenceMigration = readFileSync(
   ),
   "utf8",
 );
+const admissionSubphaseMigration = readFileSync(
+  new URL(
+    "../supabase/migrations/20261225000000_m1578r_admission_subphase_diagnostics.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
 const stageRuntime = readFileSync(
   new URL("../src/lib/fix-engine/stage-runtime.ts", import.meta.url),
   "utf8",
@@ -31,6 +38,7 @@ const diagnostic = {
   httpStatus: 422,
   responseCategory: "verification_artifact_unavailable",
   reason: "http_error",
+  admissionSubphase: "artifact_download",
 } as const;
 const event = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -75,6 +83,12 @@ describe("M15.78R durable runner diagnostic contract", () => {
     expect(
       VerificationRunnerFailureDiagnosticSchema.safeParse({ ...diagnostic, body: "private" })
         .success,
+    ).toBe(false);
+    expect(
+      VerificationRunnerFailureDiagnosticSchema.safeParse({
+        ...diagnostic,
+        admissionSubphase: "C:\\private\\signed-url",
+      }).success,
     ).toBe(false);
   });
 
@@ -121,6 +135,12 @@ describe("M15.78R durable runner diagnostic contract", () => {
     expect(freshEvidenceMigration).toContain("job_id text");
     expect(freshEvidenceMigration).toContain("admission_state text");
     expect(freshEvidenceMigration).toContain("complete_fix_stage_with_runner_diagnostics_v2");
+    expect(freshEvidenceMigration).toMatch(
+      /revoke all on function public\.complete_fix_stage_with_runner_diagnostics_v2\(uuid,uuid,text,text,boolean,jsonb,jsonb\)\s+from public, anon, authenticated/i,
+    );
+    expect(freshEvidenceMigration).toMatch(
+      /grant execute on function public\.complete_fix_stage_with_runner_diagnostics_v2\(uuid,uuid,text,text,boolean,jsonb,jsonb\)\s+to service_role/i,
+    );
     expect(freshEvidenceMigration).toContain("record_fix_verification_runner_result");
     expect(freshEvidenceMigration).toContain(
       "grant execute on function public.record_fix_verification_runner_result",
@@ -143,6 +163,18 @@ describe("M15.78R durable runner diagnostic contract", () => {
       "v_item ?& array['phase','httpStatus','responseCategory','reason']",
     );
     expect(migration).toContain("jsonb_array_length(diagnostics) <= 4");
+    expect(admissionSubphaseMigration).toContain(
+      "create or replace function public.complete_fix_stage_with_runner_diagnostics(",
+    );
+    expect(admissionSubphaseMigration).toContain("'verification_runner_internal_error'");
+    expect(admissionSubphaseMigration).toContain("'runner_request_invalid', 'runner_auth_failed'");
+    expect(admissionSubphaseMigration).toContain(
+      "'request_schema_invalid','request_capability_expired'",
+    );
+    expect(admissionSubphaseMigration).toContain("'job_record_persistence'");
+    expect(admissionSubphaseMigration).toContain("'job_record_persistence','admission_commit'");
+    expect(admissionSubphaseMigration).toContain("from public, anon, authenticated");
+    expect(admissionSubphaseMigration).toContain("to service_role");
     expect(migration).toContain("octet_length(diagnostics::text) <= 4096");
     expect(migration).toContain(
       "alter table public.fix_stage_runner_diagnostic_events enable row level security",

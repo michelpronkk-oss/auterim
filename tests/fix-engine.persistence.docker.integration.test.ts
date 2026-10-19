@@ -508,6 +508,12 @@ describe.skipIf(!enabled)(
         GitHubAppRepositoryProvider,
         "getFile" | "materializeRepository" | "getHead"
       >;
+      let runnerDiagnosticClaim: { stageId: string; claimToken: string } | null = null;
+      let runnerDiagnosticCorrelation: {
+        jobId: string;
+        requestFingerprint: string;
+        admissionState: string;
+      } | null = null;
       const processor = createFixEngineStageProcessor({
         model: fixtureModel,
         repositoryProvider,
@@ -813,16 +819,149 @@ describe.skipIf(!enabled)(
             // stage RPC path. The local runner accepts and validates the request,
             // then deterministically rejects during materialization before job
             // persistence, matching a bounded pre-admission failure.
-            const runnerFailureResult = runPersistedFixStage({
-              fixRunId: created.fixRunId,
-              stage,
-              processor,
-            });
-            await expect(runnerFailureResult).resolves.toMatchObject({
-              status: "validation_failed",
-              failureCategory: "runner_result_invalid",
-              diagnosticPersistence: "recorded",
-            });
+            const runnerDiagnosticLog = vi
+              .spyOn(console, "warn")
+              .mockImplementation(() => undefined);
+            try {
+              const runnerFailureResult = runPersistedFixStage({
+                fixRunId: created.fixRunId,
+                stage,
+                processor: async (input) => {
+                  runnerDiagnosticClaim = {
+                    stageId: input.stageId,
+                    claimToken: input.claimToken,
+                  };
+                  const anonymousClient = createClient(url!, process.env.AUTERIM_M1578_ANON_KEY!, {
+                    auth: { autoRefreshToken: false, persistSession: false },
+                  });
+                  const deniedDiagnostic = await anonymousClient.rpc(
+                    "complete_fix_stage_with_runner_diagnostics_v2",
+                    {
+                      p_stage_id: input.stageId,
+                      p_claim_token: input.claimToken,
+                      p_result: "failed",
+                      p_failure_category: "runner_result_invalid",
+                      p_retryable: false,
+                      p_diagnostics: [
+                        {
+                          phase: "admission",
+                          httpStatus: 500,
+                          responseCategory: "verification_runner_internal_error",
+                          reason: "http_error",
+                          admissionSubphase: "artifact_materialization",
+                        },
+                      ],
+                      p_correlation: {
+                        jobId: "e".repeat(64),
+                        requestFingerprint: "f".repeat(64),
+                        admissionState: "rejected",
+                      },
+                    },
+                  );
+                  expect(deniedDiagnostic.error?.code).toBe("42501");
+                  // Exercise the database validator while the real verify stage
+                  // is claimed. Invalid provenance must roll back without
+                  // appending an event or transitioning the stage.
+                  const invalidSubphase = await client.rpc(
+                    "complete_fix_stage_with_runner_diagnostics_v2",
+                    {
+                      p_stage_id: input.stageId,
+                      p_claim_token: input.claimToken,
+                      p_result: "failed",
+                      p_failure_category: "runner_result_invalid",
+                      p_retryable: false,
+                      p_diagnostics: [
+                        {
+                          phase: "admission",
+                          httpStatus: 500,
+                          responseCategory: "verification_runner_internal_error",
+                          reason: "http_error",
+                          admissionSubphase: "../../job_record_persistence",
+                        },
+                      ],
+                      p_correlation: {
+                        jobId: "e".repeat(64),
+                        requestFingerprint: "f".repeat(64),
+                        admissionState: "rejected",
+                      },
+                    },
+                  );
+                  expect(invalidSubphase.error?.code).toBe("22023");
+                  const { data: claimedStage, error: claimedStageError } = await client
+                    .from("fix_stage_queue")
+                    .select("status,claim_token")
+                    .eq("id", input.stageId)
+                    .single();
+                  expect(claimedStageError).toBeNull();
+                  expect(claimedStage).toEqual({
+                    status: "claimed",
+                    claim_token: input.claimToken,
+                  });
+                  const { count: diagnosticCount, error: diagnosticCountError } = await client
+                    .from("fix_stage_runner_diagnostic_events")
+                    .select("id", { count: "exact", head: true })
+                    .eq("stage_id", input.stageId)
+                    .eq("claim_token", input.claimToken);
+                  expect(diagnosticCountError).toBeNull();
+                  expect(diagnosticCount).toBe(0);
+
+                  // The original service-only RPC still accepts the pre-
+                  // subphase diagnostic shape. A deliberately stale claim token
+                  // reaches the stage-claim check, proving validation passed
+                  // without writing an event or changing the live claim.
+                  const legacyDiagnostic = await client.rpc(
+                    "complete_fix_stage_with_runner_diagnostics",
+                    {
+                      p_stage_id: input.stageId,
+                      p_claim_token: "00000000-0000-4000-8000-000000000001",
+                      p_result: "failed",
+                      p_failure_category: "runner_result_invalid",
+                      p_retryable: false,
+                      p_diagnostics: [
+                        {
+                          phase: "admission",
+                          httpStatus: 500,
+                          responseCategory: "verification_runner_internal_error",
+                          reason: "http_error",
+                        },
+                      ],
+                    },
+                  );
+                  expect(legacyDiagnostic.error?.code).toBe("40001");
+                  const { data: stillClaimedStage, error: stillClaimedStageError } = await client
+                    .from("fix_stage_queue")
+                    .select("status,claim_token")
+                    .eq("id", input.stageId)
+                    .single();
+                  expect(stillClaimedStageError).toBeNull();
+                  expect(stillClaimedStage).toEqual({
+                    status: "claimed",
+                    claim_token: input.claimToken,
+                  });
+
+                  // This delegates to the actual HTTP runner. Its deterministic
+                  // admission failure is returned as terminal HTTP 500 and the
+                  // stage runtime persists it through the Production v2 RPC.
+                  return processor(input);
+                },
+              });
+              await expect(runnerFailureResult).resolves.toMatchObject({
+                status: "validation_failed",
+                failureCategory: "runner_result_invalid",
+                diagnosticPersistence: "recorded",
+              });
+              const logCall = runnerDiagnosticLog.mock.calls.find(
+                ([event]) => event === "fix_engine_verification_runner_failure",
+              );
+              expect(typeof logCall?.[1]).toBe("string");
+              runnerDiagnosticCorrelation = JSON.parse(String(logCall?.[1])) as {
+                jobId: string;
+                requestFingerprint: string;
+                admissionState: string;
+              };
+            } finally {
+              runnerDiagnosticLog.mockRestore();
+            }
           } else {
             const injectedFailure = withVerificationRunnerCorrelation(
               retryableRunnerFailure("runner_unavailable", {
@@ -849,27 +988,60 @@ describe.skipIf(!enabled)(
           const { data: runnerDiagnostic, error: runnerDiagnosticError } = await client
             .from("fix_stage_runner_diagnostic_events")
             .select(
-              "job_id,request_fingerprint,admission_state,failure_category,retryable,diagnostics",
+              "stage_id,claim_token,attempt_number,job_id,request_fingerprint,admission_state,failure_category,retryable,diagnostics",
             )
             .eq("fix_run_id", created.fixRunId)
             .eq("stage", "verify_patch")
             .single();
           expect(runnerDiagnosticError).toBeNull();
           if (runnerDiagnosticAcceptance) {
+            expect(runnerDiagnosticClaim).not.toBeNull();
+            expect(runnerDiagnosticCorrelation).not.toBeNull();
             expect(runnerDiagnostic).toMatchObject({
-              job_id: expect.stringMatching(/^[a-f0-9]{64}$/),
-              request_fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+              stage_id: runnerDiagnosticClaim!.stageId,
+              claim_token: runnerDiagnosticClaim!.claimToken,
+              attempt_number: 1,
+              job_id: runnerDiagnosticCorrelation!.jobId,
+              request_fingerprint: runnerDiagnosticCorrelation!.requestFingerprint,
               admission_state: "rejected",
               failure_category: "runner_result_invalid",
               retryable: false,
               diagnostics: [
                 {
                   phase: "admission",
-                  httpStatus: 400,
-                  responseCategory: "verification_job_invalid",
+                  httpStatus: 500,
+                  responseCategory: "verification_runner_internal_error",
                   reason: "http_error",
+                  admissionSubphase: "artifact_materialization",
                 },
               ],
+            });
+            const { data: transitionedStage, error: transitionedStageError } = await client
+              .from("fix_stage_queue")
+              .select("status,failure_category,claim_token,attempt_count")
+              .eq("fix_run_id", created.fixRunId)
+              .eq("stage", "verify_patch")
+              .single();
+            expect(transitionedStageError).toBeNull();
+            expect(transitionedStage).toMatchObject({
+              status: "failed",
+              failure_category: "runner_result_invalid",
+              claim_token: null,
+              attempt_count: 1,
+            });
+            expect(runnerDiagnostic?.diagnostics).toEqual([
+              {
+                phase: "admission",
+                httpStatus: 500,
+                responseCategory: "verification_runner_internal_error",
+                reason: "http_error",
+                admissionSubphase: "artifact_materialization",
+              },
+            ]);
+            expect(runnerDiagnosticCorrelation).toMatchObject({
+              jobId: runnerDiagnostic!.job_id,
+              requestFingerprint: runnerDiagnostic!.request_fingerprint,
+              admissionState: runnerDiagnostic!.admission_state,
             });
             expect(runnerJobStorePath).not.toBeNull();
             const records = await readdir(runnerJobStorePath!);

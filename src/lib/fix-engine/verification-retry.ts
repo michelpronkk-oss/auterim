@@ -84,12 +84,34 @@ export const VERIFICATION_RUNNER_RESPONSE_CATEGORIES = [
   "verification_job_id_conflict",
   "verification_runner_state_corrupt",
   "verification_runner_state_unavailable",
+  "verification_runner_state_write_failed",
   "verification_runner_queue_full",
   "verification_runner_job_store_full",
+  "verification_runner_spool_invalid",
+  "verification_runner_spool_identity_mismatch",
+  "verification_runner_spool_authentication_failed",
+  "verification_runner_spool_path_invalid",
+  "verification_runner_spool_artifact_invalid",
+  "verification_archive_path_too_long",
+  "verification_archive_invalid_size",
+  "verification_archive_invalid_data",
+  "verification_archive_unsafe_path",
+  "verification_archive_file_limit",
+  "verification_archive_size_limit",
+  "verification_archive_special_file",
+  "verification_archive_truncated",
+  "verification_archive_invalid_header",
+  "verification_archive_unsafe_entry",
+  "verification_archive_git_metadata_forbidden",
+  "verification_archive_secret_file",
+  "verification_archive_duplicate_entry",
+  "verification_archive_mutable_entry",
+  "verification_archive_invalid_directory",
   "verification_command_unsupported",
   "verification_command_failed",
   "verification_runner_execution_failed",
   "verification_runner_cleanup_failed",
+  "verification_runner_internal_error",
   "verification_job_not_found",
   "runner_route_not_found",
 ] as const;
@@ -137,6 +159,19 @@ const VERIFICATION_RUNNER_DIAGNOSTIC_IDENTITY_FIELDS = [
   "profileId",
   "profileVersion",
 ] as const;
+export const VERIFICATION_RUNNER_ADMISSION_SUBPHASES = [
+  "artifact_materialization",
+  "artifact_download",
+  "artifact_integrity_validation",
+  "snapshot_archive_extraction",
+  "snapshot_content_validation",
+  "dependency_cache_validation",
+  "spool_persistence",
+  "spool_accounting",
+  "spool_cleanup",
+  "job_record_persistence",
+  "admission_commit",
+] as const;
 
 const responseCategorySchema = z
   .string()
@@ -154,6 +189,7 @@ export const VerificationRunnerFailureDiagnosticSchema = z
     responseCategory: responseCategorySchema.nullable(),
     reason: z.enum(VERIFICATION_RUNNER_DIAGNOSTIC_REASONS),
     identityField: z.enum(VERIFICATION_RUNNER_DIAGNOSTIC_IDENTITY_FIELDS).optional(),
+    admissionSubphase: z.enum(VERIFICATION_RUNNER_ADMISSION_SUBPHASES).optional(),
   })
   .strict();
 
