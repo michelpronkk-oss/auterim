@@ -39,7 +39,7 @@ MAX_ARCHIVE_BYTES = 1_000_000_000
 MAX_ARCHIVE_ENTRIES = 50_000
 MAX_ARCHIVE_EXPANDED_BYTES = 1_000_000_000
 CONTAINER_NAME = "auterim-verification-runner"
-EXPECTED_EXECSTOP = "/usr/bin/docker stop --time 10 auterim-verification-runner"
+EXPECTED_EXECSTOP = "/usr/bin/docker stop --time 20 auterim-verification-runner"
 
 
 class UpgradeError(Exception):
