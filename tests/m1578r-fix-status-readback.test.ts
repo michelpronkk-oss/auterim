@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   freshAcceptanceDispatchKey,
   freshAcceptanceFixtureCommitSha,
+  freshIntelligenceDispatchDecision,
   freshV4ActionKind,
   freshV4PrewriteDecision,
   freshV4ReplayDecision,
@@ -133,6 +134,124 @@ describe("M15.78R bounded Fix Run status readback", () => {
     expect(freshAcceptanceDispatchKey(sourceChangeId, "classify", "v3")).toBe(
       `m1578r-fresh-v3:${sourceChangeId}:classify`,
     );
+  });
+
+  it("dispatches only one canonical, unclaimed queued V4 intelligence decision", () => {
+    const queued = {
+      status: "queued",
+      engine_version: "jev-shadow-v1",
+      policy_version: "intelligence-policy-v1",
+      provider: "openrouter",
+      model: "typesafe/jev-1.14",
+      trigger_run_id: null,
+      attempt_number: null,
+      attempts_count: 0,
+    };
+
+    expect(freshIntelligenceDispatchDecision("v4", [queued])).toEqual({ action: "dispatch" });
+    expect(freshIntelligenceDispatchDecision("v4", [])).toEqual({
+      action: "blocked",
+      category: "fresh_v4_intelligence_decision_missing",
+    });
+    expect(freshIntelligenceDispatchDecision("v4", [queued, queued])).toEqual({
+      action: "blocked",
+      category: "fresh_v4_intelligence_decision_ambiguous",
+    });
+  });
+
+  it("waits on V4 queued decisions with active or ambiguous claim metadata", () => {
+    const queued = {
+      status: "queued",
+      engine_version: "jev-shadow-v1",
+      policy_version: "intelligence-policy-v1",
+      provider: "openrouter",
+      model: "typesafe/jev-1.14",
+      trigger_run_id: null,
+      attempt_number: null,
+      attempts_count: 0,
+    };
+
+    expect(
+      freshIntelligenceDispatchDecision("v4", [
+        { ...queued, trigger_run_id: "run_pending", attempt_number: 1 },
+      ]),
+    ).toEqual({ action: "waiting", category: "fresh_v4_intelligence_claim_ambiguous" });
+    expect(freshIntelligenceDispatchDecision("v4", [{ ...queued, attempts_count: 1 }])).toEqual({
+      action: "waiting",
+      category: "fresh_v4_intelligence_claim_ambiguous",
+    });
+    expect(
+      freshIntelligenceDispatchDecision("v4", [
+        { ...queued, trigger_run_id: "run_orphaned", attempt_number: null },
+      ]),
+    ).toEqual({ action: "blocked", category: "fresh_v4_intelligence_claim_ambiguous" });
+  });
+
+  it("waits for processing V4 decisions and never redispatches them", () => {
+    expect(
+      freshIntelligenceDispatchDecision("v4", [
+        {
+          status: "processing",
+          engine_version: "jev-shadow-v1",
+          policy_version: "intelligence-policy-v1",
+          provider: "openrouter",
+          model: "typesafe/jev-1.14",
+          trigger_run_id: "run_active",
+          attempt_number: 1,
+          attempts_count: 1,
+        },
+      ]),
+    ).toEqual({ action: "waiting", category: "fresh_v4_intelligence_processing" });
+  });
+
+  it("preserves completed V4 decisions and blocks failed V4 decisions from acceptance retries", () => {
+    const base = {
+      engine_version: "jev-shadow-v1",
+      policy_version: "intelligence-policy-v1",
+      provider: "openrouter",
+      model: "typesafe/jev-1.14",
+      trigger_run_id: "run_previous",
+      attempt_number: 1,
+      attempts_count: 1,
+    };
+
+    expect(freshIntelligenceDispatchDecision("v4", [{ ...base, status: "completed" }])).toEqual({
+      action: "already_evaluated",
+      decisionCount: 1,
+    });
+    expect(freshIntelligenceDispatchDecision("v4", [{ ...base, status: "failed" }])).toEqual({
+      action: "blocked",
+      category: "fresh_v4_intelligence_failed",
+    });
+  });
+
+  it("keeps V4 dispatch idempotency stable and leaves V2/V3 row handling unchanged", () => {
+    const sourceChangeId = "11111111-1111-4111-8111-111111111111";
+    const v4Decision = {
+      status: "queued",
+      engine_version: "jev-shadow-v1",
+      policy_version: "intelligence-policy-v1",
+      provider: "openrouter",
+      model: "typesafe/jev-1.14",
+      trigger_run_id: null,
+      attempt_number: null,
+      attempts_count: 0,
+    };
+
+    expect(freshAcceptanceDispatchKey(sourceChangeId, "intelligence", "v4")).toBe(
+      freshAcceptanceDispatchKey(sourceChangeId, "intelligence", "v4"),
+    );
+    expect(freshAcceptanceDispatchKey(sourceChangeId, "intelligence", "v4")).toBe(
+      `m1578r-fresh-v4:${sourceChangeId}:intelligence`,
+    );
+    expect(freshIntelligenceDispatchDecision("v2", [v4Decision])).toEqual({
+      action: "already_evaluated",
+      decisionCount: 1,
+    });
+    expect(freshIntelligenceDispatchDecision("v3", [v4Decision])).toEqual({
+      action: "already_evaluated",
+      decisionCount: 1,
+    });
   });
 
   it("allows V4 source creation only when readback proves the key is absent", () => {
