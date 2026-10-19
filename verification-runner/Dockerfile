@@ -1,6 +1,6 @@
 FROM node:24.8.0-alpine3.22@sha256:3e843c608bb5232f39ecb2b25e41214b958b0795914707374c8acc28487dea17
 
-RUN apk add --no-cache docker-cli
+RUN apk add --no-cache ca-certificates=20260909-r0 docker-cli=28.3.3-r5
 WORKDIR /opt/auterim-runner
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund

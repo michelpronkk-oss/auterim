@@ -16,25 +16,26 @@ import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import BinaryIO
 
 SERVICE = "auterim-verification-runner.service"
 SERVICE_PATH = Path("/etc/systemd/system/auterim-verification-runner.service")
-OLD_IMAGE_REF = "auterim-verification-runner:ac73ed8"
-IMAGE_REF = "auterim-verification-runner:f03235a2ddf2d59846fd0062ddcd6df614e1ad40"
+OLD_IMAGE_REF = "auterim-verification-runner:f03235a2ddf2d59846fd0062ddcd6df614e1ad40"
+IMAGE_REF = "auterim-verification-runner:m1578r-self-id-20261019-03"
 OLD_IMAGE_IDS = (
-    "sha256:408117eeeee5477f56eae8d8bb16cda12cf01ad0596b7ce3269bf2e2beaa56ee",
-    "sha256:c8bfd835ad08ed3516f0a5c2315d519317b4b71b18e4fe1c7735cad89bc3e90a",
-)
-IMAGE_IDS = (
     "sha256:5c8e5dacc9aab8f84ad41f8a288decb7effdce183e09a4721335a0c3bd552bd3",
     "sha256:0d439b25ab2b717f5cb2f669ccca112e9ab281a1b32bf645c5abaf4a58c9b04b",
 )
-IMAGE_CONFIG_ID = IMAGE_IDS[1]
-IMAGE_ARCHIVE_SHA256 = "76cb2a75a7f7d78e7328925c55da45428a5987ec29a696bc74280378fe5935a0"
-IMAGE_ARCHIVE_NAME = "auterim-verification-runner-f03235a2.tar"
+IMAGE_IDS = (
+    "sha256:86ba0b06d9314a4df98b09fc57ceb185c6584598a8197bba23d78ae446098b7b",
+    "sha256:8057869831067a84e653c55cc321b37dbb737892512eed45df743a540532956d",
+    "sha256:015a340ef9eaa09ab9e8b7371f75ffe1b9cdf4d2631774c6800128bba89ee993",
+)
+IMAGE_CONFIG_ID = IMAGE_IDS[2]
+IMAGE_ARCHIVE_SHA256 = "484f186c2714d7527fddf95527ae6de34c1843077843c2f54a95607a33381f01"
+IMAGE_ARCHIVE_NAME = "auterim-verification-runner-m1578r-self-id-20261019-03.tar"
 LEGACY_LIBRARY_SHA256 = "55c2e568ec60b12edd435df42655ba6114654b3a5922101665877f9a38dff59e"
 BACKUP_ROOT = Path("/var/backups/auterim-verifier-runner-image")
 MAX_ARCHIVE_BYTES = 1_000_000_000
@@ -183,6 +184,82 @@ def _open_regular(path: Path, max_bytes: int) -> tuple[int, os.stat_result]:
         raise UpgradeError("artifact_file_unavailable") from exc
 
 
+def _validate_embedded_deployment_image_ref(
+    archive: tarfile.TarFile,
+    manifest_entry: dict[str, object],
+    by_name: dict[str, tarfile.TarInfo],
+) -> None:
+    layers = manifest_entry.get("Layers")
+    if not isinstance(layers, list) or not layers or len(layers) > 128:
+        raise UpgradeError("image_archive_layers_invalid")
+
+    effective_ref: str | None = None
+    nested_entry_count = 0
+    contracts_path = PurePosixPath("opt/auterim-runner/contracts.ts")
+    contracts_parent = contracts_path.parent
+    for layer_name in layers:
+        if not isinstance(layer_name, str):
+            raise UpgradeError("image_archive_layers_invalid")
+        layer_member = by_name.get(layer_name)
+        if layer_member is None or not layer_member.isfile() or layer_member.size < 1:
+            raise UpgradeError("image_archive_layer_invalid")
+        layer_stream = archive.extractfile(layer_member)
+        if layer_stream is None:
+            raise UpgradeError("image_archive_layer_invalid")
+        try:
+            with tarfile.open(fileobj=layer_stream, mode="r|*") as layer:
+                contracts_seen_in_layer = False
+                for member in layer:
+                    nested_entry_count += 1
+                    if nested_entry_count > MAX_ARCHIVE_ENTRIES:
+                        raise UpgradeError("image_archive_layer_entry_limit_exceeded")
+                    member_path = PurePosixPath(member.name)
+                    parts = member_path.parts
+                    if member_path.is_absolute() or ".." in parts:
+                        continue
+                    if member_path == contracts_parent / ".wh..wh..opq":
+                        effective_ref = None
+                    elif member_path == PurePosixPath("opt/.wh.auterim-runner"):
+                        effective_ref = None
+                    elif member_path == contracts_parent / ".wh.contracts.ts":
+                        effective_ref = None
+                    elif member_path == contracts_path:
+                        if (
+                            contracts_seen_in_layer
+                            or not member.isfile()
+                            or member.size > 1_000_000
+                        ):
+                            raise UpgradeError("image_archive_embedded_contract_invalid")
+                        contracts_seen_in_layer = True
+                        contract_stream = layer.extractfile(member)
+                        if contract_stream is None:
+                            raise UpgradeError("image_archive_embedded_contract_invalid")
+                        source = contract_stream.read(1_000_001)
+                        if len(source) != member.size or len(source) > 1_000_000:
+                            raise UpgradeError("image_archive_embedded_contract_invalid")
+                        try:
+                            text = source.decode("utf-8")
+                        except UnicodeDecodeError as exc:
+                            raise UpgradeError("image_archive_embedded_contract_invalid") from exc
+                        matches = re.findall(
+                            r"(?m)^\s*export\s+const\s+VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF\s*=\s*"
+                            r"['\"]([^'\"\r\n]+)['\"]\s*;?\s*$",
+                            text,
+                        )
+                        if len(matches) != 1:
+                            raise UpgradeError("image_archive_embedded_contract_invalid")
+                        effective_ref = matches[0]
+        except UpgradeError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - image archive detail is never emitted
+            raise UpgradeError("image_archive_layer_invalid") from exc
+
+    if effective_ref is None:
+        raise UpgradeError("image_archive_embedded_contract_missing")
+    if effective_ref != IMAGE_REF:
+        raise UpgradeError("image_archive_embedded_image_ref_mismatch")
+
+
 def validate_archive(path: Path) -> dict[str, str | int]:
     fd, info = _open_regular(path, MAX_ARCHIVE_BYTES)
     try:
@@ -242,6 +319,7 @@ def validate_archive(path: Path) -> dict[str, str | int]:
                     config = config_stream.read(4 * 1024 * 1024 + 1)
                     if hashlib.sha256(config).hexdigest() != match.group(1):
                         raise UpgradeError("image_archive_config_fingerprint_mismatch")
+                    _validate_embedded_deployment_image_ref(archive, manifest[0], by_name)
             except UpgradeError:
                 raise
             except Exception as exc:  # noqa: BLE001 - safe category only
@@ -290,6 +368,40 @@ def _systemd_properties(legacy: ModuleType, unit_info: dict[str, object]) -> dic
     if values["Restart"] != unit_info["restart"]:
         raise UpgradeError("systemd_restart_policy_mismatch")
     return values
+
+
+def _legacy_validate_unit(legacy: ModuleType, unit_text: str) -> dict[str, object]:
+    """Use the pinned parser while translating only this release's old image token."""
+    if unit_text.count(OLD_IMAGE_REF) != 1 or IMAGE_REF in unit_text:
+        raise UpgradeError("systemd_image_token_not_unique")
+    legacy_text = unit_text.replace(OLD_IMAGE_REF, legacy.IMAGE_REF, 1)
+    try:
+        return legacy.validate_unit(legacy_text, allow_identity_mount=True)
+    except UpgradeError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - parser text is never emitted
+        parser_category = getattr(exc, "category", None)
+        if isinstance(parser_category, str) and re.fullmatch(
+            r"[a-z0-9_]{1,80}", parser_category
+        ):
+            raise UpgradeError(parser_category) from exc
+        raise UpgradeError("systemd_configuration_mismatch") from exc
+
+
+def _assert_target_image_ref_unused() -> None:
+    existing = _run(
+        [
+            "docker",
+            "image",
+            "ls",
+            "--filter",
+            f"reference={IMAGE_REF}",
+            "--format",
+            "{{.Repository}}:{{.Tag}}",
+        ]
+    )
+    if existing.splitlines():
+        raise UpgradeError("target_image_ref_already_present")
 
 
 def _validate_mounts(mounts: object, identity_dir: str) -> None:
@@ -344,7 +456,7 @@ def _read_unit(legacy: ModuleType) -> tuple[bytes, str, dict[str, object]]:
                 raise UpgradeError("systemd_parent_directory_unsafe")
         raw = SERVICE_PATH.read_bytes()
         unit_text = raw.decode("utf-8")
-        parsed = legacy.validate_unit(unit_text, allow_identity_mount=True)
+        parsed = _legacy_validate_unit(legacy, unit_text)
         directives = legacy._service_directives(unit_text)
         stops = [item[2] for item in directives.get("ExecStop", [])]
         if stops != [EXPECTED_EXECSTOP]:
@@ -452,7 +564,7 @@ def _validate_runtime(legacy: ModuleType, unit_info: dict[str, object]) -> dict[
 
 def _patch_unit(unit_text: str) -> str:
     legacy = _load_legacy()
-    parsed = legacy.validate_unit(unit_text, allow_identity_mount=True)
+    parsed = _legacy_validate_unit(legacy, unit_text)
     marker = f" {OLD_IMAGE_REF}'"
     if unit_text.count(marker) != 1 or IMAGE_REF in unit_text:
         raise UpgradeError("systemd_image_token_not_unique")
@@ -460,7 +572,7 @@ def _patch_unit(unit_text: str) -> str:
     if updated.replace(IMAGE_REF, OLD_IMAGE_REF, 1) != unit_text:
         raise UpgradeError("systemd_candidate_changed_unrelated_text")
     restored = updated.replace(IMAGE_REF, OLD_IMAGE_REF, 1)
-    reparsed = legacy.validate_unit(restored, allow_identity_mount=True)
+    reparsed = _legacy_validate_unit(legacy, restored)
     if parsed["command"] != reparsed["command"]:
         raise UpgradeError("systemd_candidate_semantics_mismatch")
     return updated
@@ -477,6 +589,7 @@ def preflight(archive_path: Path) -> dict[str, object]:
     runtime = _validate_runtime(legacy, unit_info)
     legacy.validate_host_identity_file()
     active_jobs = legacy.assert_no_active_jobs()
+    _assert_target_image_ref_unused()
     artifact = validate_archive(archive_path)
     _patch_unit(unit_text)
     return {
@@ -724,7 +837,7 @@ def _check_readiness(
         else:
             source_text = current_text
         try:
-            unit_info = legacy.validate_unit(source_text, allow_identity_mount=True)
+            unit_info = _legacy_validate_unit(legacy, source_text)
         except Exception as exc:  # noqa: BLE001 - parser details are never exposed
             raise UpgradeError("systemd_configuration_mismatch") from exc
         if unit_info.get("restart") != "always":
@@ -980,7 +1093,7 @@ def _restore_backup(backup: Path) -> dict[str, object]:
         if not isinstance(metadata["previousPortBindings"], dict):
             raise UpgradeError("rollback_record_invalid")
         old_text = old_unit.decode("utf-8")
-        legacy.validate_unit(old_text, allow_identity_mount=True)
+        _legacy_validate_unit(legacy, old_text)
         current_unit = SERVICE_PATH.read_text(encoding="utf-8")
         expected_current_unit = old_text.replace(OLD_IMAGE_REF, IMAGE_REF, 1)
         if current_unit != expected_current_unit:
@@ -1038,6 +1151,7 @@ def deploy(archive_path: Path) -> dict[str, object]:
         old_runtime = _validate_runtime(legacy, unit_info)
         backup = _write_backup(old_raw, old_runtime)
         try:
+            _assert_target_image_ref_unused()
             _docker_load(staged_archive)
             image_id = _run(["docker", "image", "inspect", "--format", "{{.Id}}", IMAGE_REF])
             if image_id not in IMAGE_IDS:
