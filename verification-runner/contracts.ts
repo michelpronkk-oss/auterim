@@ -4,7 +4,7 @@ import { z } from "zod";
 export const VERIFICATION_RUNNER_PROTOCOL_VERSION = "m1578-verification-runner-v1";
 export const VERIFICATION_RUNNER_IDENTITY_ATTESTATION_PATH = "/v1/identity-attestation";
 export const VERIFICATION_RUNNER_DEPLOYMENT_IMAGE_REF =
-  "auterim-verification-runner:m1578r-self-id-20261019-03";
+  "auterim-verification-runner:m1578r-snapshot-extraction-20261019-04";
 export const VERIFICATION_RUNNER_IDENTITY_MOUNT_PATH = "/run/auterim-verifier-identity";
 export const VERIFICATION_RUNNER_IDENTITY_FILE = "identity.json";
 export const VERIFICATION_RUNNER_IDENTITY_GROUP_GID = 62000;

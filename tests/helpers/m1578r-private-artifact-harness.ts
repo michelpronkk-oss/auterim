@@ -27,7 +27,10 @@ function hmac(secret: Buffer, value: string) {
 }
 
 /** Ephemeral, private local artifact transport for Docker acceptance only. */
-export async function createM1578RPrivateArtifactHarness() {
+export async function createM1578RPrivateArtifactHarness(options?: {
+  bindHost?: "127.0.0.1" | "0.0.0.0";
+  originHost?: "127.0.0.1" | "localhost" | "host.docker.internal";
+}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "auterim-m1578r-private-artifacts-"));
   await mkdir(root, { recursive: true, mode: 0o700 });
   const secret = randomBytes(32);
@@ -173,17 +176,19 @@ export async function createM1578RPrivateArtifactHarness() {
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
+    server.listen(0, options?.bindHost ?? "127.0.0.1", () => {
       server.off("error", reject);
       resolve();
     });
   });
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("local_artifact_server_unavailable");
-  origin = `http://127.0.0.1:${address.port}`;
+  origin = "http://" + (options?.originHost ?? "127.0.0.1") + ":" + address.port;
 
   return {
     origin,
+    rootPath: root,
+    testOnlyVerificationSecretHex: secret.toString("hex"),
     storage,
     async close() {
       await new Promise<void>((resolve, reject) =>

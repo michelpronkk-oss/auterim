@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream } from "node:fs";
-import { lstat, mkdir, open, readdir, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, rm, rmdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { createGzip, createGunzip } from "node:zlib";
@@ -206,75 +206,140 @@ export async function extractSafeTarGzip(
 ) {
   const root = path.resolve(destination);
   await mkdir(root, { recursive: true, mode: 0o700 });
+  const rootInfo = await lstat(root);
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink())
+    throw new Error("verification_archive_destination_invalid");
+  if ((await readdir(root)).length) throw new Error("verification_archive_destination_not_empty");
+  await chmod(root, 0o700);
   const reader = new TarReader(createReadStream(archive).pipe(createGunzip()));
   let count = 0;
   let bytes = 0;
   const treeFiles: SafeArchiveFile[] = [];
   const entries = new Set<string>();
-  while (true) {
-    const header = await reader.read(BLOCK);
-    if (header.every((byte) => byte === 0)) break;
-    const expectedChecksum = readOctal(header, 148, 8);
-    const checksumHeader = Buffer.from(header);
-    checksumHeader.fill(0x20, 148, 156);
-    const actualChecksum = checksumHeader.reduce((sum, byte) => sum + byte, 0);
-    if (actualChecksum !== expectedChecksum || readString(header, 257, 6) !== "ustar")
-      throw new Error("verification_archive_invalid_header");
-    const name = readString(header, 0, 100);
-    const prefix = readString(header, 345, 155);
-    const type = String.fromCharCode(header[156] ?? 0);
-    const isDirectory = type === "5";
-    const rawRelative = prefix ? `${prefix}/${name}` : name;
-    const relative = isDirectory ? rawRelative.replace(/\/$/, "") : rawRelative;
-    if ((!isDirectory && type !== "0" && type !== "\0") || !safeArchivePath(relative))
+  const createdFiles: string[] = [];
+  const createdDirectories = new Set<string>();
+
+  const ensureWritableDirectory = async (directory: string) => {
+    if (directory === root) return;
+    const relative = path.relative(root, directory);
+    if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
       throw new Error("verification_archive_unsafe_entry");
-    if (relative.split("/").some((part) => part.toLowerCase() === ".git"))
-      throw new Error("verification_archive_git_metadata_forbidden");
-    if (limits.forbidSensitiveFiles && isSensitiveArtifactPath(relative))
-      throw new Error("verification_archive_secret_file");
-    if (entries.has(relative)) throw new Error("verification_archive_duplicate_entry");
-    entries.add(relative);
-    count += 1;
-    if (count > limits.maxFiles) throw new Error("verification_archive_file_limit");
-    const target = path.resolve(root, ...relative.split("/"));
-    if (!target.startsWith(`${root}${path.sep}`))
-      throw new Error("verification_archive_unsafe_entry");
-    const mode = readOctal(header, 100, 8);
-    if (isDirectory ? mode !== 0o555 : mode !== 0o444 && mode !== 0o555)
-      throw new Error("verification_archive_mutable_entry");
-    if (isDirectory) {
-      if (readOctal(header, 124, 12) !== 0)
-        throw new Error("verification_archive_invalid_directory");
-      await mkdir(target, { recursive: true, mode: 0o555 });
-      await mkdir(path.dirname(target), { recursive: true, mode: 0o555 });
-      continue;
-    }
-    const size = readOctal(header, 124, 12);
-    const fileMode = readOctal(header, 100, 8);
-    bytes += size;
-    if (bytes > limits.maxBytes) throw new Error("verification_archive_size_limit");
-    await mkdir(path.dirname(target), { recursive: true, mode: 0o555 });
-    const handle = await open(target, "wx", mode & 0o111 ? 0o555 : 0o444);
-    const digest = createHash("sha256");
-    try {
-      let remaining = size;
-      while (remaining > 0) {
-        const chunk = await reader.read(Math.min(remaining, 1024 * 1024));
-        digest.update(chunk);
-        await handle.write(chunk);
-        remaining -= chunk.byteLength;
+    let current = root;
+    for (const part of relative.split(path.sep)) {
+      current = path.join(current, part);
+      if (!createdDirectories.has(current)) {
+        try {
+          await mkdir(current, { mode: 0o700 });
+          createdDirectories.add(current);
+        } catch (error) {
+          const code =
+            typeof error === "object" && error !== null && "code" in error
+              ? String(error.code)
+              : "";
+          if (code !== "EEXIST") throw error;
+          // Only an implicit parent directory created by this extraction may exist.
+          throw new Error("verification_archive_destination_conflict");
+        }
       }
-    } finally {
-      await handle.close();
+      await chmod(current, 0o700);
+      const info = await lstat(current);
+      if (!info.isDirectory() || info.isSymbolicLink())
+        throw new Error("verification_archive_unsafe_entry");
     }
-    treeFiles.push({ path: relative, mode: fileMode, sha256: digest.digest("hex"), bytes: size });
-    const padding = (BLOCK - (size % BLOCK)) % BLOCK;
-    if (padding) await reader.read(padding);
-  }
-  return {
-    fileCount: count,
-    byteCount: bytes,
-    treeFiles,
-    treeSha256: sha256(canonicalJson(treeFiles)),
   };
+
+  try {
+    while (true) {
+      const header = await reader.read(BLOCK);
+      if (header.every((byte) => byte === 0)) break;
+      const expectedChecksum = readOctal(header, 148, 8);
+      const checksumHeader = Buffer.from(header);
+      checksumHeader.fill(0x20, 148, 156);
+      const actualChecksum = checksumHeader.reduce((sum, byte) => sum + byte, 0);
+      if (actualChecksum !== expectedChecksum || readString(header, 257, 6) !== "ustar")
+        throw new Error("verification_archive_invalid_header");
+      const name = readString(header, 0, 100);
+      const prefix = readString(header, 345, 155);
+      const type = String.fromCharCode(header[156] ?? 0);
+      const isDirectory = type === "5";
+      const rawRelative = prefix ? `${prefix}/${name}` : name;
+      const relative = isDirectory ? rawRelative.replace(/\/$/, "") : rawRelative;
+      if ((!isDirectory && type !== "0" && type !== "\0") || !safeArchivePath(relative))
+        throw new Error("verification_archive_unsafe_entry");
+      if (relative.split("/").some((part) => part.toLowerCase() === ".git"))
+        throw new Error("verification_archive_git_metadata_forbidden");
+      if (limits.forbidSensitiveFiles && isSensitiveArtifactPath(relative))
+        throw new Error("verification_archive_secret_file");
+      if (entries.has(relative)) throw new Error("verification_archive_duplicate_entry");
+      entries.add(relative);
+      count += 1;
+      if (count > limits.maxFiles) throw new Error("verification_archive_file_limit");
+      const target = path.resolve(root, ...relative.split("/"));
+      if (!target.startsWith(`${root}${path.sep}`))
+        throw new Error("verification_archive_unsafe_entry");
+      const mode = readOctal(header, 100, 8);
+      if (isDirectory ? mode !== 0o555 : mode !== 0o444 && mode !== 0o555)
+        throw new Error("verification_archive_mutable_entry");
+      if (isDirectory) {
+        if (readOctal(header, 124, 12) !== 0)
+          throw new Error("verification_archive_invalid_directory");
+        await ensureWritableDirectory(target);
+        continue;
+      }
+      const size = readOctal(header, 124, 12);
+      bytes += size;
+      if (bytes > limits.maxBytes) throw new Error("verification_archive_size_limit");
+      await ensureWritableDirectory(path.dirname(target));
+      const fileMode = readOctal(header, 100, 8);
+      const handle = await open(target, "wx", fileMode & 0o111 ? 0o555 : 0o444);
+      createdFiles.push(target);
+      const digest = createHash("sha256");
+      try {
+        let remaining = size;
+        while (remaining > 0) {
+          const chunk = await reader.read(Math.min(remaining, 1024 * 1024));
+          digest.update(chunk);
+          await handle.write(chunk);
+          remaining -= chunk.byteLength;
+        }
+      } finally {
+        await handle.close();
+      }
+      await chmod(target, fileMode);
+      treeFiles.push({ path: relative, mode: fileMode, sha256: digest.digest("hex"), bytes: size });
+      const padding = (BLOCK - (size % BLOCK)) % BLOCK;
+      if (padding) await reader.read(padding);
+    }
+
+    for (const directory of [...createdDirectories].sort(
+      (left, right) => right.length - left.length,
+    ))
+      await chmod(directory, 0o555);
+    return {
+      fileCount: count,
+      byteCount: bytes,
+      treeFiles,
+      treeSha256: sha256(canonicalJson(treeFiles)),
+    };
+  } catch (error) {
+    let cleanupFailed = false;
+    for (const directory of [...createdDirectories].sort(
+      (left, right) => right.length - left.length,
+    ))
+      await chmod(directory, 0o700).catch(() => {
+        cleanupFailed = true;
+      });
+    for (const file of createdFiles.reverse())
+      await rm(file, { force: true }).catch(() => {
+        cleanupFailed = true;
+      });
+    for (const directory of [...createdDirectories].sort(
+      (left, right) => right.length - left.length,
+    ))
+      await rmdir(directory).catch(() => {
+        cleanupFailed = true;
+      });
+    if (cleanupFailed) throw new Error("verification_archive_cleanup_failed");
+    throw error;
+  }
 }
