@@ -253,6 +253,62 @@ export function freshV4ReplayDecision(replayed: unknown) {
   };
 }
 
+type FreshIntelligenceDispatchDecision =
+  | { action: "dispatch" }
+  | { action: "already_evaluated"; decisionCount: number }
+  | { action: "waiting"; category: string }
+  | { action: "blocked"; category: string };
+
+/** Keep legacy generation behavior stable while requiring a clean queued claim for V4. */
+export function freshIntelligenceDispatchDecision(
+  generation: FreshAcceptanceGeneration,
+  decisions: unknown,
+): FreshIntelligenceDispatchDecision {
+  if (!Array.isArray(decisions))
+    return { action: "blocked", category: "fresh_intelligence_state_unavailable" };
+
+  if (generation !== "v4")
+    return decisions.length > 0
+      ? { action: "already_evaluated", decisionCount: decisions.length }
+      : { action: "dispatch" };
+
+  if (decisions.length === 0)
+    return { action: "blocked", category: "fresh_v4_intelligence_decision_missing" };
+  if (decisions.length !== 1)
+    return { action: "blocked", category: "fresh_v4_intelligence_decision_ambiguous" };
+
+  const decision = z
+    .object({
+      status: z.enum(["queued", "processing", "completed", "failed"]),
+      engine_version: z.literal("jev-shadow-v1"),
+      policy_version: z.literal("intelligence-policy-v1"),
+      provider: z.literal("openrouter"),
+      model: z.literal("typesafe/jev-1.14"),
+      trigger_run_id: z.string().min(1).max(255).nullable(),
+      attempt_number: z.number().int().positive().max(100).nullable(),
+      attempts_count: z.number().int().min(0).max(8),
+    })
+    .passthrough()
+    .safeParse(decisions[0]);
+  if (!decision.success)
+    return { action: "blocked", category: "fresh_v4_intelligence_decision_invalid" };
+
+  const row = decision.data;
+  if ((row.trigger_run_id === null) !== (row.attempt_number === null))
+    return { action: "blocked", category: "fresh_v4_intelligence_claim_ambiguous" };
+
+  if (row.status === "completed") return { action: "already_evaluated", decisionCount: 1 };
+  if (row.status === "processing")
+    return { action: "waiting", category: "fresh_v4_intelligence_processing" };
+  if (row.status === "failed")
+    return { action: "blocked", category: "fresh_v4_intelligence_failed" };
+
+  if (row.trigger_run_id !== null || row.attempt_number !== null || row.attempts_count !== 0)
+    return { action: "waiting", category: "fresh_v4_intelligence_claim_ambiguous" };
+
+  return { action: "dispatch" };
+}
+
 type BillingSubscription = {
   plan?: unknown;
   status?: unknown;
@@ -1013,7 +1069,9 @@ async function inspectFreshM1578RAcceptance(generation: FreshAcceptanceGeneratio
     client
       .from("change_intelligence_decisions")
       .select(
-        "id,status,provider,model,response_model,proposed_route,proposed_policy_state,policy_reason,policy_version,created_at",
+        generation === "v4"
+          ? "id,status,engine_version,provider,model,response_model,proposed_route,proposed_policy_state,policy_reason,policy_version,trigger_run_id,attempt_number,attempts_count,updated_at,created_at"
+          : "id,status,provider,model,response_model,proposed_route,proposed_policy_state,policy_reason,policy_version,created_at",
       )
       .eq("source_change_id", change.id)
       .order("created_at", { ascending: false })
@@ -1404,12 +1462,21 @@ async function dispatchFreshM1578RIntelligence(generation: FreshAcceptanceGenera
     )
   )
     return { status: "waiting", category: "fresh_classification_not_persisted" } as const;
-  if (status.intelligenceDecisions.length > 0)
+  const decision = freshIntelligenceDispatchDecision(generation, status.intelligenceDecisions);
+  if (decision.action === "already_evaluated")
     return {
       status: "already_evaluated",
       sourceChangeId: status.sourceChange.id,
-      decisionCount: status.intelligenceDecisions.length,
+      decisionCount: decision.decisionCount,
     } as const;
+  if (decision.action === "waiting")
+    return {
+      status: "waiting",
+      category: decision.category,
+      sourceChangeId: status.sourceChange.id,
+    } as const;
+  if (decision.action === "blocked")
+    return { status: "blocked", category: decision.category } as const;
   const started = await tasks.trigger<typeof evaluateSourceChangeIntelligenceTask>(
     "evaluate-source-change-intelligence",
     { sourceChangeId: status.sourceChange.id },
