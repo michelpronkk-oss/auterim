@@ -6,6 +6,7 @@ import stat
 import tarfile
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -338,6 +339,311 @@ class RunnerImagePinTests(unittest.TestCase):
             run.assert_not_called()
             write.assert_not_called()
 
+    def test_readiness_polls_delayed_start_until_healthy(self):
+        clock = {"now": 0.0}
+        observations = [
+            upgrade.ReadinessObservation(False, "docker_health_starting", True),
+            upgrade.ReadinessObservation(
+                False, "application_health_endpoint_not_ready", True
+            ),
+            upgrade.ReadinessObservation(True, "ready"),
+        ]
+        with (
+            patch.object(upgrade.time, "monotonic", side_effect=lambda: clock["now"]),
+            patch.object(
+                upgrade.time,
+                "sleep",
+                side_effect=lambda duration: clock.__setitem__("now", clock["now"] + duration),
+            ) as sleep,
+            patch.object(upgrade, "_check_readiness", side_effect=observations) as check,
+        ):
+            upgrade._wait_for_healthy(
+                upgrade.IMAGE_REF, upgrade.IMAGE_IDS, {"restart_policy": "always"}
+            )
+        self.assertEqual(check.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(clock["now"], 4.0)
+
+    def test_readiness_fails_immediately_for_permanently_unhealthy_container(self):
+        with (
+            patch.object(upgrade.time, "monotonic", return_value=0.0),
+            patch.object(upgrade.time, "sleep") as sleep,
+            patch.object(
+                upgrade,
+                "_check_readiness",
+                return_value=upgrade.ReadinessObservation(False, "container_unhealthy"),
+            ) as check,
+        ):
+            with self.assertRaisesRegex(upgrade.UpgradeError, "container_unhealthy"):
+                upgrade._wait_for_healthy(
+                    upgrade.IMAGE_REF, upgrade.IMAGE_IDS, {"restart_policy": "always"}
+                )
+        check.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_readiness_timeout_is_bounded_and_preserves_last_safe_category(self):
+        clock = {"now": 0.0}
+
+        def sleep(duration):
+            clock["now"] += duration
+
+        with (
+            patch.object(upgrade, "READINESS_BUDGET_SECONDS", 5.0),
+            patch.object(upgrade, "READINESS_POLL_INTERVAL_SECONDS", 2.0),
+            patch.object(upgrade.time, "monotonic", side_effect=lambda: clock["now"]),
+            patch.object(upgrade.time, "sleep", side_effect=sleep),
+            patch.object(
+                upgrade,
+                "_check_readiness",
+                return_value=upgrade.ReadinessObservation(
+                    False, "docker_health_starting", True
+                ),
+            ) as check,
+        ):
+            with self.assertRaisesRegex(upgrade.UpgradeError, "readiness_timeout") as raised:
+                upgrade._wait_for_healthy(
+                    upgrade.IMAGE_REF, upgrade.IMAGE_IDS, {"restart_policy": "always"}
+                )
+        self.assertEqual(raised.exception.cause_category, "docker_health_starting")
+        self.assertEqual(clock["now"], 5.0)
+        self.assertLessEqual(check.call_count, 3)
+
+    def test_readiness_rejects_image_identity_mismatch_without_retry(self):
+        with (
+            patch.object(upgrade.time, "monotonic", return_value=0.0),
+            patch.object(upgrade.time, "sleep") as sleep,
+            patch.object(
+                upgrade,
+                "_check_readiness",
+                return_value=upgrade.ReadinessObservation(False, "image_identity_mismatch"),
+            ) as check,
+        ):
+            with self.assertRaisesRegex(upgrade.UpgradeError, "image_identity_mismatch"):
+                upgrade._wait_for_healthy(
+                    upgrade.IMAGE_REF, upgrade.IMAGE_IDS, {"restart_policy": "always"}
+                )
+        check.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_readiness_fails_closed_for_identity_mount_and_systemd_mismatches(self):
+        cases = (
+            "image_identity_mismatch",
+            "mount_validation_failed",
+            "identity_attestation_failed",
+            "systemd_configuration_mismatch",
+        )
+        for category in cases:
+            with self.subTest(category=category):
+                with (
+                    patch.object(upgrade.time, "monotonic", return_value=0.0),
+                    patch.object(upgrade.time, "sleep") as sleep,
+                    patch.object(
+                        upgrade,
+                        "_check_readiness",
+                        return_value=upgrade.ReadinessObservation(False, category),
+                    ) as check,
+                ):
+                    with self.assertRaisesRegex(upgrade.UpgradeError, category):
+                        upgrade._wait_for_healthy(
+                            upgrade.IMAGE_REF,
+                            upgrade.IMAGE_IDS,
+                            {"restart_policy": "always"},
+                        )
+                check.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_readiness_reports_systemd_configuration_and_container_health_categories(self):
+        runtime = {
+            "id": "a" * 64,
+            "image_id": upgrade.IMAGE_IDS[0],
+            "image_ref": upgrade.IMAGE_REF,
+            "running": True,
+            "health": "starting",
+            "restart_policy": "always",
+            "groups": ["999", "62000"],
+            "port_bindings": {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}]},
+            "mounts": [],
+        }
+        systemd = {
+            "NeedDaemonReload": "no",
+            "FragmentPath": str(upgrade.SERVICE_PATH),
+            "DropInPaths": "",
+            "EnvironmentFiles": "/etc/auterim-verifier/runner.env",
+            "ActiveState": "active",
+            "Restart": "always",
+        }
+        legacy = SimpleNamespace(
+            validate_unit=Mock(return_value={"restart": "always"}),
+            _service_directives=Mock(
+                return_value={
+                    "ExecStop": [("ExecStop", "=", upgrade.EXPECTED_EXECSTOP)]
+                }
+            ),
+            HELPER_PATH=Path("/opt/auterim-verifier/deploy_identity_handoff.py"),
+            IDENTITY_DIRECTORY_VALUE="/run/auterim-identity",
+            validate_host_identity_file=Mock(),
+        )
+        expected = {
+            "restart_policy": "always",
+            "groups": runtime["groups"],
+            "port_bindings": runtime["port_bindings"],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            unit_path = Path(directory) / "runner.service"
+            unit_path.write_text(upgrade._patch_unit(identity_enabled_unit()), encoding="utf-8")
+            systemd["NeedDaemonReload"] = "yes"
+            systemd["FragmentPath"] = str(unit_path)
+            with (
+                patch.object(upgrade, "SERVICE_PATH", unit_path),
+                patch.object(upgrade, "_load_legacy", return_value=legacy),
+                patch.object(upgrade, "_assert_readiness_unit_path"),
+                patch.object(
+                    upgrade,
+                    "_readiness_command",
+                    side_effect=lambda args, _deadline: systemd[
+                        next(arg.split("=", 1)[1] for arg in args if arg.startswith("--property="))
+                    ],
+                ),
+                patch.object(upgrade, "_readiness_container", return_value=runtime),
+                patch.object(upgrade, "_validate_mounts"),
+                patch.object(upgrade, "_validate_identity_mount_bounded"),
+            ):
+                mismatch = upgrade._check_readiness(
+                    upgrade.IMAGE_REF,
+                    upgrade.IMAGE_IDS,
+                    expected,
+                    100.0,
+                )
+                self.assertEqual(mismatch.category, "systemd_configuration_mismatch")
+
+                systemd["NeedDaemonReload"] = "no"
+                with patch.object(
+                    upgrade.subprocess, "run", return_value=SimpleNamespace(returncode=0)
+                ):
+                    starting = upgrade._check_readiness(
+                        upgrade.IMAGE_REF,
+                        upgrade.IMAGE_IDS,
+                        expected,
+                        100.0,
+                    )
+                self.assertEqual(starting.category, "docker_health_starting")
+                self.assertTrue(starting.retryable)
+
+                runtime["health"] = "unhealthy"
+                unhealthy = upgrade._check_readiness(
+                    upgrade.IMAGE_REF,
+                    upgrade.IMAGE_IDS,
+                    expected,
+                    100.0,
+                )
+                self.assertEqual(unhealthy.category, "container_unhealthy")
+                self.assertFalse(unhealthy.retryable)
+
+                runtime["running"] = False
+                exited = upgrade._check_readiness(
+                    upgrade.IMAGE_REF, upgrade.IMAGE_IDS, expected, 100.0
+                )
+                self.assertEqual(exited.category, "container_exited")
+
+                runtime["running"] = True
+                runtime["health"] = "healthy"
+                runtime["image_id"] = upgrade.OLD_IMAGE_IDS[0]
+                image_mismatch = upgrade._check_readiness(
+                    upgrade.IMAGE_REF,
+                    upgrade.IMAGE_IDS,
+                    expected,
+                    100.0,
+                )
+                self.assertEqual(image_mismatch.category, "image_identity_mismatch")
+
+                runtime["image_id"] = upgrade.IMAGE_IDS[0]
+                with patch.object(
+                    upgrade.subprocess, "run", return_value=SimpleNamespace(returncode=20)
+                ):
+                    endpoint_not_ready = upgrade._check_readiness(
+                        upgrade.IMAGE_REF, upgrade.IMAGE_IDS, expected, 100.0
+                    )
+                self.assertEqual(
+                    endpoint_not_ready.category, "application_health_endpoint_not_ready"
+                )
+                self.assertTrue(endpoint_not_ready.retryable)
+
+                with patch.object(
+                    upgrade.subprocess, "run", return_value=SimpleNamespace(returncode=0)
+                ):
+                    ready = upgrade._check_readiness(
+                        upgrade.IMAGE_REF, upgrade.IMAGE_IDS, expected, 100.0
+                    )
+                self.assertTrue(ready.ready)
+
+                with patch.object(
+                    upgrade, "_validate_mounts", side_effect=upgrade.UpgradeError("mount_bad")
+                ):
+                    with self.assertRaisesRegex(upgrade.UpgradeError, "mount_validation_failed"):
+                        upgrade._check_readiness(
+                            upgrade.IMAGE_REF, upgrade.IMAGE_IDS, expected, 100.0
+                        )
+
+                legacy.validate_host_identity_file.side_effect = RuntimeError("private detail")
+                with self.assertRaisesRegex(
+                    upgrade.UpgradeError, "identity_attestation_failed"
+                ) as identity_failure:
+                    upgrade._check_readiness(
+                        upgrade.IMAGE_REF, upgrade.IMAGE_IDS, expected, 100.0
+                    )
+                self.assertNotIn("private detail", str(identity_failure.exception))
+
+    def test_deployment_and_rollback_failure_categories_are_reported_separately(self):
+        failure = upgrade.UpgradeError(
+            "deployment_failed",
+            cause_category="readiness_timeout",
+            cause_detail_category="docker_health_starting",
+            rollback="failed",
+            rollback_cause_category="readiness_timeout",
+            rollback_detail_category="application_health_endpoint_not_ready",
+        )
+        output = io.StringIO()
+        with (
+            patch.object(upgrade, "deploy", side_effect=failure),
+            redirect_stdout(output),
+        ):
+            status = upgrade.main(["--deploy", "archive.tar"])
+        result = json.loads(output.getvalue())
+        self.assertEqual(status, 1)
+        self.assertEqual(result["cause_category"], "readiness_timeout")
+        self.assertEqual(result["cause_detail_category"], "docker_health_starting")
+        self.assertEqual(result["rollback"], "failed")
+        self.assertEqual(result["rollback_cause_category"], "readiness_timeout")
+        self.assertEqual(
+            result["rollback_detail_category"],
+            "application_health_endpoint_not_ready",
+        )
+        self.assertNotIn("private", output.getvalue())
+
+    def test_failure_output_replaces_unapproved_categories_with_safe_fallbacks(self):
+        failure = upgrade.UpgradeError(
+            "deployment_failed",
+            cause_category="credential-value-must-not-appear",
+            cause_detail_category="private-detail",
+            rollback="failed",
+            rollback_cause_category="signed-url-must-not-appear",
+            rollback_detail_category="raw-error",
+        )
+        output = io.StringIO()
+        with (
+            patch.object(upgrade, "deploy", side_effect=failure),
+            redirect_stdout(output),
+        ):
+            status = upgrade.main(["--deploy", "archive.tar"])
+        result = json.loads(output.getvalue())
+        self.assertEqual(status, 1)
+        self.assertEqual(result["cause_category"], "operation_failed")
+        self.assertNotIn("cause_detail_category", result)
+        self.assertEqual(result["rollback_cause_category"], "rollback_operation_failed")
+        self.assertNotIn("rollback_detail_category", result)
+        self.assertNotIn("credential-value-must-not-appear", output.getvalue())
+        self.assertNotIn("signed-url-must-not-appear", output.getvalue())
+
     def test_deploy_health_failure_restores_original_unit_and_old_image(self):
         original = identity_enabled_unit()
         updated = upgrade._patch_unit(original)
@@ -368,7 +674,12 @@ class RunnerImagePinTests(unittest.TestCase):
             unit_path.write_text(original, encoding="utf-8")
             backup = root / "backup"
             backup.mkdir()
-            healthy = Mock(side_effect=[False, True])
+            observations = [
+                upgrade.ReadinessObservation(False, "container_unhealthy"),
+                upgrade.ReadinessObservation(False, "docker_health_starting", True),
+                upgrade.ReadinessObservation(True, "ready"),
+            ]
+            clock = {"now": 0.0}
             with (
                 patch.object(upgrade.os, "geteuid", return_value=0, create=True),
                 patch.object(upgrade.os, "chown", return_value=None, create=True),
@@ -386,16 +697,25 @@ class RunnerImagePinTests(unittest.TestCase):
                 patch.object(upgrade, "_run", side_effect=command),
                 patch.object(upgrade, "_atomic_write", side_effect=write_file),
                 patch.object(upgrade, "_patch_unit", return_value=updated),
-                patch.object(upgrade, "_healthy", healthy),
+                patch.object(upgrade, "_check_readiness", side_effect=observations) as check,
+                patch.object(upgrade.time, "monotonic", side_effect=lambda: clock["now"]),
+                patch.object(
+                    upgrade.time,
+                    "sleep",
+                    side_effect=lambda duration: clock.__setitem__(
+                        "now", clock["now"] + duration
+                    ),
+                ) as sleep,
                 patch.object(upgrade.shutil, "rmtree") as rmtree,
                 patch.object(upgrade, "SERVICE_PATH", unit_path),
             ):
                 with self.assertRaisesRegex(upgrade.UpgradeError, "deployment_failed") as raised:
                     upgrade.deploy(source)
-            self.assertEqual(raised.exception.cause_category, "new_runner_health_check_failed")
+            self.assertEqual(raised.exception.cause_category, "container_unhealthy")
             self.assertEqual(raised.exception.rollback, "passed")
             self.assertEqual(unit_path.read_text(encoding="utf-8"), original)
-            self.assertEqual(healthy.call_count, 2)
+            self.assertEqual(check.call_count, 3)
+            sleep.assert_called_once_with(2.0)
             load.assert_called_once()
             self.assertEqual(
                 sum(1 for args in commands if args[:2] == ["systemctl", "restart"]), 2
@@ -449,7 +769,11 @@ class RunnerImagePinTests(unittest.TestCase):
                 patch.object(upgrade, "_run", side_effect=command),
                 patch.object(upgrade, "_atomic_write", side_effect=write_file),
                 patch.object(upgrade, "_patch_unit", return_value=updated),
-                patch.object(upgrade, "_healthy", return_value=True),
+                patch.object(
+                    upgrade,
+                    "_check_readiness",
+                    return_value=upgrade.ReadinessObservation(True, "ready"),
+                ),
                 patch.object(upgrade.shutil, "rmtree") as rmtree,
                 patch.object(upgrade, "SERVICE_PATH", unit_path),
             ):
