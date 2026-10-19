@@ -23,6 +23,7 @@ import {
   terminalRunnerFailure,
   withVerificationRunnerCorrelation,
   VERIFICATION_RUNNER_RESPONSE_CATEGORIES,
+  VERIFICATION_RUNNER_ADMISSION_SUBPHASES,
   VerificationRunnerFailure,
   type VerificationRunnerAdmissionState,
   type VerificationRunnerFailureDiagnostic,
@@ -121,6 +122,15 @@ function diagnostic(
       ? (category as VerificationRunnerResponseCategory)
       : "unrecognized"
     : null;
+  const admissionSubphase =
+    phase === "admission" &&
+    typeof value === "object" &&
+    value !== null &&
+    "admissionSubphase" in value &&
+    typeof value.admissionSubphase === "string" &&
+    (VERIFICATION_RUNNER_ADMISSION_SUBPHASES as readonly string[]).includes(value.admissionSubphase)
+      ? value.admissionSubphase
+      : null;
   return {
     phase,
     httpStatus:
@@ -130,6 +140,13 @@ function diagnostic(
     responseCategory,
     reason,
     ...(identityField ? { identityField } : {}),
+    ...(admissionSubphase
+      ? {
+          admissionSubphase: admissionSubphase as NonNullable<
+            VerificationRunnerFailureDiagnostic["admissionSubphase"]
+          >,
+        }
+      : {}),
   };
 }
 
@@ -261,15 +278,24 @@ function failureForResponse(
     return terminalRunnerFailure("runner_auth_failed", details);
   if (category === "runner_protocol_unsupported")
     return terminalRunnerFailure("runner_protocol_unsupported", details);
-  if (status === 503 && category === "verification_runner_queue_full")
-    return retryableRunnerFailure("runner_queue_full", details);
   if (
     status === 503 &&
-    ["verification_runner_state_unavailable", "verification_runner_state_corrupt"].includes(
+    ["verification_runner_queue_full", "verification_runner_job_store_full"].includes(
       category ?? "",
     )
   )
+    return retryableRunnerFailure("runner_queue_full", details);
+  if (
+    status === 503 &&
+    [
+      "verification_runner_state_unavailable",
+      "verification_runner_state_corrupt",
+      "verification_runner_state_write_failed",
+    ].includes(category ?? "")
+  )
     return retryableRunnerFailure("runner_state_temporarily_unavailable", details);
+  if (category === "verification_runner_internal_error")
+    return terminalRunnerFailure("runner_result_invalid", details);
   if (status >= 500) return retryableRunnerFailure("runner_unavailable", details);
   if (category?.includes("snapshot"))
     return terminalRunnerFailure("snapshot_identity_mismatch", details);

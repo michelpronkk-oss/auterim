@@ -70,6 +70,161 @@ const MAX_JOB_RECORD_BYTES = 64 * 1024;
 const MAX_JOB_DURATION_MS = 15 * 60_000;
 const MAX_SPOOL_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_SPOOL_JOBS = MAX_CONCURRENCY + MAX_QUEUED_JOBS;
+const ADMISSION_SUBPHASES = [
+  "artifact_materialization",
+  "artifact_download",
+  "artifact_integrity_validation",
+  "snapshot_archive_extraction",
+  "snapshot_content_validation",
+  "dependency_cache_validation",
+  "spool_persistence",
+  "spool_accounting",
+  "spool_cleanup",
+  "job_record_persistence",
+  "admission_commit",
+] as const;
+type AdmissionSubphase = (typeof ADMISSION_SUBPHASES)[number];
+
+const SAFE_ADMISSION_ERROR_CATEGORIES = new Set([
+  "verification_artifact_url_invalid",
+  "verification_artifact_origin_invalid",
+  "verification_snapshot_artifact_path_invalid",
+  "verification_patch_artifact_path_invalid",
+  "verification_cache_artifact_path_invalid",
+  "verification_artifact_size_limit",
+  "verification_artifact_unavailable",
+  "verification_artifact_read_failed",
+  "verification_artifact_fingerprint_mismatch",
+  "verification_snapshot_symlink_forbidden",
+  "verification_snapshot_special_file_forbidden",
+  "verification_snapshot_empty",
+  "verification_snapshot_secret_detected",
+  "verification_cache_symlink_forbidden",
+  "verification_cache_special_file_forbidden",
+  "verification_cache_tree_invalid",
+  "verification_cache_tree_fingerprint_mismatch",
+  "verification_cache_tree_file_count_mismatch",
+  "verification_cache_tree_byte_count_mismatch",
+  "verification_cache_identity_mismatch",
+  "verification_cache_signature_invalid",
+  "verification_patch_unsafe",
+  "verification_patch_secret_detected",
+  "verification_patch_outside_plan",
+  "verification_patch_conflict",
+  "verification_job_id_conflict",
+  "verification_runner_state_corrupt",
+  "verification_runner_state_unavailable",
+  "verification_runner_state_write_failed",
+  "verification_runner_queue_full",
+  "verification_runner_job_store_full",
+  "verification_archive_path_too_long",
+  "verification_archive_invalid_size",
+  "verification_archive_invalid_data",
+  "verification_archive_unsafe_path",
+  "verification_archive_file_limit",
+  "verification_archive_size_limit",
+  "verification_archive_special_file",
+  "verification_archive_truncated",
+  "verification_archive_invalid_header",
+  "verification_archive_unsafe_entry",
+  "verification_archive_git_metadata_forbidden",
+  "verification_archive_secret_file",
+  "verification_archive_duplicate_entry",
+  "verification_archive_mutable_entry",
+  "verification_archive_invalid_directory",
+  "verification_runner_spool_invalid",
+  "verification_runner_spool_identity_mismatch",
+  "verification_runner_spool_authentication_failed",
+  "verification_runner_spool_path_invalid",
+  "verification_runner_spool_artifact_invalid",
+]);
+const RETRYABLE_ADMISSION_ERROR_CATEGORIES = new Set([
+  "verification_artifact_unavailable",
+  "verification_runner_queue_full",
+  "verification_runner_job_store_full",
+  "verification_runner_state_unavailable",
+  "verification_runner_state_write_failed",
+]);
+
+class AdmissionFailure extends Error {
+  constructor(
+    readonly subphase: AdmissionSubphase,
+    readonly category: string,
+    readonly status: number,
+  ) {
+    super(category);
+    this.name = "AdmissionFailure";
+  }
+}
+
+function admissionFailure(subphase: AdmissionSubphase, error: unknown): AdmissionFailure {
+  if (error instanceof AdmissionFailure) return error;
+  const message = error instanceof Error ? error.message : "";
+  const category = SAFE_ADMISSION_ERROR_CATEGORIES.has(message)
+    ? message
+    : "verification_runner_internal_error";
+  const status =
+    category === "verification_runner_internal_error"
+      ? 500
+      : RETRYABLE_ADMISSION_ERROR_CATEGORIES.has(category)
+        ? 503
+        : 400;
+  return new AdmissionFailure(subphase, category, status);
+}
+
+function logAdmissionFailure(failure: AdmissionFailure) {
+  const admissionSubphase = ADMISSION_SUBPHASES.includes(failure.subphase)
+    ? failure.subphase
+    : "artifact_materialization";
+  const responseCategory = SAFE_ADMISSION_ERROR_CATEGORIES.has(failure.category)
+    ? failure.category
+    : "verification_runner_internal_error";
+  const httpStatus =
+    responseCategory === "verification_runner_internal_error"
+      ? 500
+      : RETRYABLE_ADMISSION_ERROR_CATEGORIES.has(responseCategory)
+        ? 503
+        : 400;
+  try {
+    console.warn(
+      JSON.stringify({
+        event: "verification_runner_admission_failure",
+        admissionSubphase,
+        responseCategory,
+        httpStatus,
+      }),
+    );
+  } catch {
+    // Diagnostics must not prevent the bounded HTTP failure response.
+  }
+}
+
+async function runAdmissionSubphase<T>(
+  subphase: AdmissionSubphase,
+  action: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    throw admissionFailure(subphase, error);
+  }
+}
+
+async function runArchiveAdmissionSubphase<T>(
+  subphase: AdmissionSubphase,
+  action: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error ? error.code : null;
+    if (code === "Z_DATA_ERROR")
+      throw admissionFailure(subphase, new Error("verification_archive_invalid_data"));
+    if (code === "Z_BUF_ERROR")
+      throw admissionFailure(subphase, new Error("verification_archive_truncated"));
+    throw admissionFailure(subphase, error);
+  }
+}
 
 type SafeFailure = { status: "failed"; category: string };
 type JobStatus =
@@ -99,6 +254,13 @@ export type VerificationRunnerConfig = {
     spoolRoot: string,
     secret: string,
   ) => Promise<MaterializedVerificationJob>;
+  /** Test seam for asserting job-record admission failures without changing filesystem permissions. */
+  persistQueuedJob?: (
+    store: string,
+    jobId: string,
+    state: JobStatus,
+    secret: string,
+  ) => Promise<void>;
   /** Test seam; Production reads the host-delivered signed identity and local Docker daemon. */
   attestIdentity?: () => Promise<{
     instanceIdentityDocument: string;
@@ -256,9 +418,23 @@ async function readEc2IdentityAndContainerImage() {
   }
 }
 
-function publicError(response: ServerResponse, status: number, error: string) {
+function publicError(
+  response: ServerResponse,
+  status: number,
+  error: string,
+  admissionSubphase?: AdmissionSubphase,
+) {
+  const safeAdmissionSubphase =
+    admissionSubphase && ADMISSION_SUBPHASES.includes(admissionSubphase)
+      ? admissionSubphase
+      : undefined;
   response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
-  response.end(JSON.stringify({ error }));
+  response.end(
+    JSON.stringify({
+      error,
+      ...(safeAdmissionSubphase ? { admissionSubphase: safeAdmissionSubphase } : {}),
+    }),
+  );
 }
 
 function json(response: ServerResponse, status: number, body: unknown) {
@@ -396,44 +572,59 @@ async function downloadArtifact(input: {
   request: VerificationJobRequest;
   destination: string;
 }) {
-  validateArtifactUrl(input.url, input.role, input.origin, input.request);
-  if (input.expectedBytes > input.maxBytes) throw new Error("verification_artifact_size_limit");
-  const response = await fetch(input.url, {
-    redirect: "error",
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!response.ok || !response.body) throw new Error("verification_artifact_unavailable");
-  const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > input.maxBytes)
-    throw new Error("verification_artifact_size_limit");
-  const hasher = makeHash("sha256");
-  let total = 0;
-  const file = await import("node:fs/promises").then(({ open }) =>
-    open(input.destination, "wx", 0o600),
-  );
-  const reader = response.body.getReader();
-  try {
-    while (true) {
-      const next = await reader.read();
-      if (next.done) break;
-      const chunk = Buffer.from(next.value);
-      total += chunk.byteLength;
-      if (total > input.maxBytes) throw new Error("verification_artifact_size_limit");
-      hasher.update(chunk);
-      let offset = 0;
-      while (offset < chunk.byteLength) {
-        const { bytesWritten } = await file.write(chunk, offset, chunk.byteLength - offset);
-        if (bytesWritten < 1) throw new Error("verification_artifact_read_failed");
-        offset += bytesWritten;
-      }
+  const downloaded = await runAdmissionSubphase("artifact_download", async () => {
+    validateArtifactUrl(input.url, input.role, input.origin, input.request);
+    if (input.expectedBytes > input.maxBytes) throw new Error("verification_artifact_size_limit");
+    let response: Response;
+    try {
+      response = await fetch(input.url, {
+        redirect: "error",
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch {
+      throw new Error("verification_artifact_unavailable");
     }
-  } finally {
-    await reader.cancel().catch(() => undefined);
-    await file.close();
-  }
-  if (total !== input.expectedBytes || hasher.digest("hex") !== input.expectedSha256)
-    throw new Error("verification_artifact_fingerprint_mismatch");
-  return total;
+    if (!response.ok || !response.body) throw new Error("verification_artifact_unavailable");
+    const declared = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > input.maxBytes)
+      throw new Error("verification_artifact_size_limit");
+    const hasher = makeHash("sha256");
+    let total = 0;
+    const file = await import("node:fs/promises").then(({ open }) =>
+      open(input.destination, "wx", 0o600),
+    );
+    const reader = response.body.getReader();
+    try {
+      while (true) {
+        let next: ReadableStreamReadResult<Uint8Array>;
+        try {
+          next = await reader.read();
+        } catch {
+          throw new Error("verification_artifact_unavailable");
+        }
+        if (next.done) break;
+        const chunk = Buffer.from(next.value);
+        total += chunk.byteLength;
+        if (total > input.maxBytes) throw new Error("verification_artifact_size_limit");
+        hasher.update(chunk);
+        let offset = 0;
+        while (offset < chunk.byteLength) {
+          const { bytesWritten } = await file.write(chunk, offset, chunk.byteLength - offset);
+          if (bytesWritten < 1) throw new Error("verification_artifact_read_failed");
+          offset += bytesWritten;
+        }
+      }
+    } finally {
+      await reader.cancel().catch(() => undefined);
+      await file.close();
+    }
+    return { total, sha256: hasher.digest("hex") };
+  });
+  return runAdmissionSubphase("artifact_integrity_validation", async () => {
+    if (downloaded.total !== input.expectedBytes || downloaded.sha256 !== input.expectedSha256)
+      throw new Error("verification_artifact_fingerprint_mismatch");
+    return downloaded.total;
+  });
 }
 
 async function makeWritable(root: string, current = root): Promise<void> {
@@ -638,14 +829,18 @@ async function materializeVerificationJob(input: {
   authSecret: string;
 }) {
   const { request } = input;
-  const job = toMaterializedVerificationJob(request);
+  const job = await runAdmissionSubphase("artifact_materialization", async () =>
+    toMaterializedVerificationJob(request),
+  );
   const staging = path.join(input.spoolRoot, `.${request.jobId}.${randomUUID()}.admitting`);
-  await mkdir(staging, { recursive: false, mode: 0o700 });
+  await runAdmissionSubphase("spool_persistence", () =>
+    mkdir(staging, { recursive: false, mode: 0o700 }),
+  );
   try {
     const snapshotArchive = path.join(staging, job.snapshot.fileName);
     const patchPath = path.join(staging, job.patch.fileName);
     const cacheArchive = path.join(staging, job.cacheArchive.fileName);
-    await Promise.all([
+    const downloads = await Promise.allSettled([
       downloadArtifact({
         url: request.snapshot.url,
         expectedSha256: request.snapshot.sha256,
@@ -677,55 +872,96 @@ async function materializeVerificationJob(input: {
         destination: cacheArchive,
       }),
     ]);
-    verifyCacheManifest(request, input.cachePublicKey);
+    const failedDownload = downloads.find(
+      (download): download is PromiseRejectedResult => download.status === "rejected",
+    );
+    if (failedDownload) throw failedDownload.reason;
+    await runAdmissionSubphase("dependency_cache_validation", async () =>
+      verifyCacheManifest(request, input.cachePublicKey),
+    );
     const snapshotCheck = path.join(staging, ".snapshot-check");
     const cacheCheck = path.join(staging, ".cache-check");
-    await mkdir(snapshotCheck, { recursive: true, mode: 0o700 });
-    await mkdir(cacheCheck, { recursive: true, mode: 0o700 });
+    await runAdmissionSubphase("snapshot_archive_extraction", () =>
+      mkdir(snapshotCheck, { recursive: true, mode: 0o700 }),
+    );
+    await runAdmissionSubphase("dependency_cache_validation", () =>
+      mkdir(cacheCheck, { recursive: true, mode: 0o700 }),
+    );
     try {
-      const snapshot = await extractSafeTarGzip(snapshotArchive, snapshotCheck, {
-        maxFiles: MAX_ARCHIVE_FILES,
-        maxBytes: MAX_SNAPSHOT_BYTES,
-        forbidSensitiveFiles: true,
+      const snapshot = await runArchiveAdmissionSubphase("snapshot_archive_extraction", () =>
+        extractSafeTarGzip(snapshotArchive, snapshotCheck, {
+          maxFiles: MAX_ARCHIVE_FILES,
+          maxBytes: MAX_SNAPSHOT_BYTES,
+          forbidSensitiveFiles: true,
+        }),
+      );
+      if (!snapshot.fileCount)
+        throw admissionFailure(
+          "snapshot_archive_extraction",
+          new Error("verification_snapshot_empty"),
+        );
+      await runAdmissionSubphase("snapshot_content_validation", async () => {
+        await makeWritable(snapshotCheck);
+        await assertNoSnapshotSecrets(snapshotCheck);
+        assertPatchPaths(await readFile(patchPath, "utf8"), request.identity.allowedPaths);
       });
-      if (!snapshot.fileCount) throw new Error("verification_snapshot_empty");
-      await makeWritable(snapshotCheck);
-      await assertNoSnapshotSecrets(snapshotCheck);
-      assertPatchPaths(await readFile(patchPath, "utf8"), request.identity.allowedPaths);
-      const cache = await extractSafeTarGzip(cacheArchive, cacheCheck, {
-        maxFiles: MAX_ARCHIVE_FILES,
-        maxBytes: MAX_ARCHIVE_EXPANDED_BYTES,
+      const cache = await runArchiveAdmissionSubphase("dependency_cache_validation", () =>
+        extractSafeTarGzip(cacheArchive, cacheCheck, {
+          maxFiles: MAX_ARCHIVE_FILES,
+          maxBytes: MAX_ARCHIVE_EXPANDED_BYTES,
+        }),
+      );
+      await runAdmissionSubphase("dependency_cache_validation", async () => {
+        await makeReadOnly(cacheCheck);
+        const tree = await inspectDependencyTree(cacheCheck, cache.treeFiles);
+        if (
+          tree.treeSha256 !== request.cacheManifest.treeSha256 ||
+          tree.files.length !== request.cacheManifest.fileCount ||
+          tree.byteCount !== request.cacheManifest.byteCount
+        )
+          throw new Error("verification_cache_tree_fingerprint_mismatch");
       });
-      await makeReadOnly(cacheCheck);
-      const tree = await inspectDependencyTree(cacheCheck, cache.treeFiles);
-      if (
-        tree.treeSha256 !== request.cacheManifest.treeSha256 ||
-        tree.files.length !== request.cacheManifest.fileCount ||
-        tree.byteCount !== request.cacheManifest.byteCount
-      )
-        throw new Error("verification_cache_tree_fingerprint_mismatch");
     } finally {
-      await rm(snapshotCheck, { recursive: true, force: true });
-      await rm(cacheCheck, { recursive: true, force: true });
+      try {
+        await rm(snapshotCheck, { recursive: true, force: true });
+        await rm(cacheCheck, { recursive: true, force: true });
+      } catch {
+        throw new AdmissionFailure("spool_cleanup", "verification_runner_internal_error", 500);
+      }
     }
-    await persistMaterializedJobManifest(staging, job, input.authSecret);
+    await runAdmissionSubphase("spool_persistence", () =>
+      persistMaterializedJobManifest(staging, job, input.authSecret),
+    );
     const final = path.join(input.spoolRoot, request.jobId);
     try {
       await rename(staging, final);
     } catch (error) {
       const code =
         typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
-      if (code !== "EEXIST" && code !== "ENOTEMPTY") throw error;
-      const existing = await readMaterializedJobManifest(final, input.authSecret);
+      if (code !== "EEXIST" && code !== "ENOTEMPTY")
+        throw admissionFailure("spool_persistence", error);
+      const existing = await runAdmissionSubphase("spool_persistence", () =>
+        readMaterializedJobManifest(final, input.authSecret),
+      );
       if (existing.requestFingerprint !== request.requestFingerprint)
-        throw new Error("verification_job_id_conflict");
-      await rm(staging, { recursive: true, force: true });
+        throw admissionFailure("spool_persistence", new Error("verification_job_id_conflict"));
+      await runAdmissionSubphase("spool_cleanup", () =>
+        rm(staging, { recursive: true, force: true }),
+      );
       return existing;
     }
     return job;
   } catch (error) {
-    await rm(staging, { recursive: true, force: true }).catch(() => undefined);
-    throw error;
+    const failure = admissionFailure(
+      error instanceof AdmissionFailure ? error.subphase : "artifact_materialization",
+      error,
+    );
+    try {
+      await rm(staging, { recursive: true, force: true });
+    } catch {
+      throw new AdmissionFailure("spool_cleanup", "verification_runner_internal_error", 500);
+    }
+    throw failure;
   }
 }
 
@@ -1285,7 +1521,9 @@ export function createVerificationRunnerServer(config: VerificationRunnerConfig)
       recordReservations.add(parsed.jobId);
       const admission = (async () => {
         const materialized = config.materialize
-          ? await config.materialize(parsed, spoolRoot, config.authSecret)
+          ? await runAdmissionSubphase("artifact_materialization", () =>
+              config.materialize!(parsed, spoolRoot, config.authSecret),
+            )
           : await materializeVerificationJob({
               request: parsed,
               artifactOrigin: config.artifactOrigin,
@@ -1293,16 +1531,20 @@ export function createVerificationRunnerServer(config: VerificationRunnerConfig)
               spoolRoot,
               authSecret: config.authSecret,
             });
-        const size = await getSpoolBytes(parsed.jobId);
+        const size = await runAdmissionSubphase("spool_accounting", () =>
+          getSpoolBytes(parsed.jobId),
+        );
         if (spooledBytes + size > maxSpoolBytes) {
-          await removeSpool(parsed.jobId);
-          throw new Error("verification_runner_queue_full");
+          await runAdmissionSubphase("spool_cleanup", () => removeSpool(parsed.jobId));
+          throw admissionFailure("spool_accounting", new Error("verification_runner_queue_full"));
         }
-        await writeJob(
-          store,
-          parsed.jobId,
-          { status: "queued", requestFingerprint: parsed.requestFingerprint },
-          config.authSecret,
+        await runAdmissionSubphase("job_record_persistence", () =>
+          (config.persistQueuedJob ?? writeJob)(
+            store,
+            parsed.jobId,
+            { status: "queued", requestFingerprint: parsed.requestFingerprint },
+            config.authSecret,
+          ),
         );
         persistedJobCount += 1;
         spooledBytes += size;
@@ -1318,15 +1560,12 @@ export function createVerificationRunnerServer(config: VerificationRunnerConfig)
         await admission;
       } catch (error) {
         recordReservations.delete(parsed.jobId);
-        const message = error instanceof Error ? error.message : "";
-        const transient =
-          message === "verification_artifact_unavailable" ||
-          message === "verification_runner_queue_full" ||
-          message === "verification_runner_state_unavailable";
-        const safeMessage = /^[a-z0-9_]{1,100}$/.test(message)
-          ? message
-          : "verification_runner_state_unavailable";
-        publicError(response, transient ? 503 : 400, safeMessage);
+        const failure = admissionFailure(
+          error instanceof AdmissionFailure ? error.subphase : "admission_commit",
+          error,
+        );
+        logAdmissionFailure(failure);
+        publicError(response, failure.status, failure.category, failure.subphase);
         return;
       } finally {
         submitting.delete(parsed.jobId);

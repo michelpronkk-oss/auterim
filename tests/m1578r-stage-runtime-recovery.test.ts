@@ -199,9 +199,10 @@ describe("M15.78R stage runtime recovery reporting", () => {
     const failure = withVerificationRunnerCorrelation(
       terminalRunnerFailure("runner_result_invalid", {
         phase: "admission",
-        httpStatus: 400,
-        responseCategory: "verification_artifact_unavailable",
+        httpStatus: 500,
+        responseCategory: "verification_runner_internal_error",
         reason: "http_error",
+        admissionSubphase: "job_record_persistence",
       }),
       {
         jobId: "a".repeat(64),
@@ -221,6 +222,16 @@ describe("M15.78R stage runtime recovery reporting", () => {
     );
     expect(diagnosticCall?.[1]).toMatchObject({
       p_failure_category: "runner_result_invalid",
+      p_retryable: false,
+      p_result: "failed",
+      p_diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 500,
+          responseCategory: "verification_runner_internal_error",
+          admissionSubphase: "job_record_persistence",
+        },
+      ],
       p_correlation: {
         jobId: "a".repeat(64),
         requestFingerprint: "b".repeat(64),
