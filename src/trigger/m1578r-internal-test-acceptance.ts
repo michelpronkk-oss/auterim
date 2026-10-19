@@ -231,21 +231,26 @@ export function freshAcceptanceDispatchKey(
   return `m1578r-fresh-${generation}:${sourceChangeId}:${stage}`;
 }
 
-export function freshV4PrewriteDecision(status: { status: string }) {
-  if (status.status === "not_started") return { allowed: true as const };
+export function freshV4PrewriteDecision(status: unknown) {
+  const readback = asRecord(status);
+  if (!readback || typeof readback.status !== "string")
+    return { allowed: false as const, category: "fresh_v4_prewrite_read_unavailable" };
+  if (readback.status === "not_started") return { allowed: true as const };
   return {
     allowed: false as const,
     category:
-      status.status === "unavailable"
+      readback.status === "unavailable"
         ? "fresh_v4_prewrite_read_unavailable"
         : "fresh_v4_acceptance_already_exists",
   };
 }
 
-export function freshV4ReplayDecision(replayed: boolean) {
-  return replayed
-    ? { allowed: false as const, category: "fresh_v4_replay_rejected" }
-    : { allowed: true as const };
+export function freshV4ReplayDecision(replayed: unknown) {
+  if (replayed === false) return { allowed: true as const };
+  return {
+    allowed: false as const,
+    category: replayed === true ? "fresh_v4_replay_rejected" : "fresh_v4_replay_status_invalid",
+  };
 }
 
 type BillingSubscription = {

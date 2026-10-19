@@ -147,6 +147,14 @@ describe("M15.78R bounded Fix Run status readback", () => {
       allowed: false,
       category: "fresh_v4_prewrite_read_unavailable",
     });
+    expect(freshV4PrewriteDecision(null)).toEqual({
+      allowed: false,
+      category: "fresh_v4_prewrite_read_unavailable",
+    });
+    expect(freshV4PrewriteDecision({})).toEqual({
+      allowed: false,
+      category: "fresh_v4_prewrite_read_unavailable",
+    });
   });
 
   it("rejects an idempotent V4 source replay instead of claiming a fresh acceptance", () => {
@@ -154,6 +162,10 @@ describe("M15.78R bounded Fix Run status readback", () => {
     expect(freshV4ReplayDecision(true)).toEqual({
       allowed: false,
       category: "fresh_v4_replay_rejected",
+    });
+    expect(freshV4ReplayDecision(undefined)).toEqual({
+      allowed: false,
+      category: "fresh_v4_replay_status_invalid",
     });
   });
 
