@@ -19,7 +19,7 @@ def identity_enabled_unit():
 Description=Auterim verifier
 
 [Service]
-ExecStop=/usr/bin/docker stop --time 10 auterim-verification-runner
+ExecStop=/usr/bin/docker stop --time 20 auterim-verification-runner
 EnvironmentFile=/etc/auterim-verifier/runner.env
 ExecStart=/bin/sh -lc 'exec docker run \\
     --rm --name auterim-verification-runner \\
@@ -103,6 +103,62 @@ class RunnerImagePinTests(unittest.TestCase):
                 with self.assertRaisesRegex(upgrade.UpgradeError, "image_archive_fingerprint_mismatch"):
                     upgrade.validate_archive(path)
 
+    def test_read_unit_requires_exact_live_execstop_contract(self):
+        legacy = upgrade._load_legacy()
+        service_path = Path("C:/m1578-test/systemd/runner.service")
+        unit_stat = SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o644, st_uid=0, st_gid=0, st_size=100_000
+        )
+        directory_stat = SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0
+        )
+        expected_line = "ExecStop=/usr/bin/docker stop --time 20 auterim-verification-runner"
+
+        def read_unit(unit):
+            raw = unit.encode("utf-8")
+
+            def fake_lstat(path):
+                if path == service_path:
+                    return unit_stat
+                if path in (service_path.parent, legacy.HELPER_PATH.parent):
+                    return directory_stat
+                raise AssertionError("unexpected path inspected")
+
+            def fake_read_bytes(path):
+                if path == service_path:
+                    return raw
+                raise AssertionError("unexpected file read")
+
+            with (
+                patch.object(upgrade, "SERVICE_PATH", service_path),
+                patch.object(Path, "lstat", autospec=True, side_effect=fake_lstat),
+                patch.object(Path, "read_bytes", autospec=True, side_effect=fake_read_bytes),
+            ):
+                return upgrade._read_unit(legacy)
+
+        original = identity_enabled_unit()
+        parsed = read_unit(original)
+        self.assertEqual(parsed[2]["restart"], "always")
+
+        malformed_units = {
+            "ten_seconds": original.replace(
+                expected_line, expected_line.replace("--time 20", "--time 10"), 1
+            ),
+            "unexpected_timeout": original.replace(
+                expected_line, expected_line.replace("--time 20", "--time 21"), 1
+            ),
+            "wrong_executable": original.replace(
+                expected_line, expected_line.replace("/usr/bin/docker", "/usr/bin/podman"), 1
+            ),
+            "extra_argument": original.replace(expected_line, expected_line + " --force", 1),
+            "missing": original.replace(expected_line, "", 1),
+            "duplicate": original + "\n" + expected_line + "\n",
+        }
+        for name, malformed in malformed_units.items():
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(upgrade.UpgradeError, "systemd_execstop_mismatch"):
+                    read_unit(malformed)
+
     def test_systemd_upgrade_changes_only_the_final_image_token(self):
         original = identity_enabled_unit()
         updated = upgrade._patch_unit(original)
@@ -110,7 +166,7 @@ class RunnerImagePinTests(unittest.TestCase):
         self.assertNotIn(upgrade.OLD_IMAGE_REF, updated)
         self.assertEqual(updated.replace(upgrade.IMAGE_REF, upgrade.OLD_IMAGE_REF, 1), original)
         self.assertIn("ExecStartPre=-/usr/bin/systemctl start auterim-verifier-identity-refresh.service", updated)
-        self.assertIn("ExecStop=/usr/bin/docker stop --time 10 auterim-verification-runner", updated)
+        self.assertIn("ExecStop=/usr/bin/docker stop --time 20 auterim-verification-runner", updated)
         self.assertIn("Restart=always", updated)
 
     def test_systemd_upgrade_rejects_wrong_identity_mount_handoff(self):
