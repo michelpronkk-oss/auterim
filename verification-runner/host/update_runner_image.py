@@ -13,6 +13,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
@@ -40,6 +42,50 @@ MAX_ARCHIVE_ENTRIES = 50_000
 MAX_ARCHIVE_EXPANDED_BYTES = 1_000_000_000
 CONTAINER_NAME = "auterim-verification-runner"
 EXPECTED_EXECSTOP = "/usr/bin/docker stop --time 20 auterim-verification-runner"
+READINESS_BUDGET_SECONDS = 120.0
+READINESS_POLL_INTERVAL_SECONDS = 2.0
+READINESS_TRANSIENT_CATEGORIES = frozenset(
+    {
+        "systemd_service_activating",
+        "container_observation_pending",
+        "docker_health_starting",
+        "application_health_endpoint_not_ready",
+    }
+)
+SAFE_READINESS_CATEGORIES = frozenset(
+    {
+        "systemd_configuration_mismatch",
+        "systemd_service_activating",
+        "systemd_service_inactive",
+        "container_observation_pending",
+        "container_identity_mismatch",
+        "container_exited",
+        "container_state_invalid",
+        "container_configuration_mismatch",
+        "image_identity_mismatch",
+        "mount_validation_failed",
+        "identity_attestation_failed",
+        "docker_health_starting",
+        "container_unhealthy",
+        "container_health_unavailable",
+        "application_health_endpoint_not_ready",
+        "health_probe_unavailable",
+        "readiness_observation_unavailable",
+        "readiness_timeout",
+    }
+)
+SAFE_OPERATION_CATEGORIES = frozenset(
+    {
+        "docker_image_load_failed",
+        "loaded_image_id_mismatch",
+        "operator_command_unavailable",
+        "operator_command_failed",
+        "atomic_write_parent_unsafe",
+        "deployment_operation_failed",
+        "rollback_operation_failed",
+        "operation_failed",
+    }
+)
 
 
 class UpgradeError(Exception):
@@ -48,12 +94,33 @@ class UpgradeError(Exception):
         category: str,
         *,
         cause_category: str | None = None,
+        cause_detail_category: str | None = None,
         rollback: str | None = None,
+        rollback_cause_category: str | None = None,
+        rollback_detail_category: str | None = None,
     ):
         super().__init__(category)
         self.category = category
         self.cause_category = cause_category
+        self.cause_detail_category = cause_detail_category
         self.rollback = rollback
+        self.rollback_cause_category = rollback_cause_category
+        self.rollback_detail_category = rollback_detail_category
+
+
+@dataclass(frozen=True)
+class ReadinessObservation:
+    ready: bool
+    category: str
+    retryable: bool = False
+
+
+def _safe_cause_category(value: str | None, fallback: str) -> str:
+    if isinstance(value, str) and (
+        value in SAFE_READINESS_CATEGORIES or value in SAFE_OPERATION_CATEGORIES
+    ):
+        return value
+    return fallback
 
 
 _legacy_cache: ModuleType | None = None
@@ -490,50 +557,316 @@ def _docker_load(path: Path) -> None:
         raise UpgradeError("docker_image_load_failed") from exc
 
 
-def _healthy(image_ref: str, image_ids: tuple[str, ...], expected: dict[str, object]) -> bool:
+def _readiness_command(args: list[str], deadline: float) -> str:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise UpgradeError("readiness_observation_timeout")
+    try:
+        result = subprocess.run(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=remaining,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise UpgradeError("readiness_observation_timeout") from exc
+    except Exception as exc:  # noqa: BLE001 - command details are never emitted
+        raise UpgradeError("readiness_observation_unavailable") from exc
+    if result.returncode != 0:
+        raise UpgradeError("readiness_observation_unavailable")
+    return result.stdout.strip()
+
+
+def _readiness_container(deadline: float) -> dict[str, object] | ReadinessObservation:
+    ids_output = _readiness_command(
+        [
+            "docker",
+            "ps",
+            "--all",
+            "--quiet",
+            "--no-trunc",
+            "--filter",
+            f"name=^/{CONTAINER_NAME}$",
+        ],
+        deadline,
+    )
+    container_ids = [value for value in ids_output.splitlines() if value]
+    if not container_ids:
+        return ReadinessObservation(False, "container_observation_pending", True)
+    if len(container_ids) != 1 or not re.fullmatch(r"[0-9a-f]{12,64}", container_ids[0]):
+        return ReadinessObservation(False, "container_identity_mismatch")
+
+    template = (
+        "{{.Id}}|{{.Image}}|{{.Config.Image}}|{{.State.Running}}|"
+        "{{.State.Health.Status}}|{{.HostConfig.RestartPolicy.Name}}|"
+        "{{json .Mounts}}|{{json .HostConfig.GroupAdd}}|{{json .HostConfig.PortBindings}}"
+    )
+    output = _readiness_command(
+        ["docker", "inspect", "--format", template, container_ids[0]],
+        deadline,
+    )
+    try:
+        values = output.split("|", 8)
+        if len(values) != 9 or values[0] != container_ids[0]:
+            raise ValueError()
+        mounts = json.loads(values[6])
+        groups = json.loads(values[7])
+        port_bindings = json.loads(values[8])
+        if not isinstance(mounts, list) or not isinstance(groups, list) or not isinstance(port_bindings, dict):
+            raise ValueError()
+    except Exception as exc:  # noqa: BLE001 - only a safe category escapes
+        raise UpgradeError("container_state_invalid") from exc
+    return {
+        "id": values[0],
+        "image_id": values[1],
+        "image_ref": values[2],
+        "running": values[3].lower() == "true",
+        "health": values[4],
+        "restart_policy": values[5],
+        "mounts": mounts,
+        "groups": groups,
+        "port_bindings": port_bindings,
+    }
+
+
+def _validate_identity_mount_bounded(
+    identity_directory: str,
+    expected_container_id: str,
+    deadline: float,
+) -> None:
+    container_ids = [
+        value
+        for value in _readiness_command(
+            ["docker", "ps", "--quiet", "--no-trunc"], deadline
+        ).splitlines()
+        if value
+    ]
+    if len(container_ids) > 256:
+        raise UpgradeError("mount_validation_failed")
+    matches: list[str] = []
+    for container_id in container_ids:
+        if not re.fullmatch(r"[0-9a-f]{12,64}", container_id):
+            raise UpgradeError("mount_validation_failed")
+        output = _readiness_command(
+            [
+                "docker",
+                "inspect",
+                "--format={{.Id}}|{{json .Mounts}}",
+                container_id,
+            ],
+            deadline,
+        )
+        try:
+            inspected_id, mounts_json = output.split("|", 1)
+            mounts = json.loads(mounts_json)
+            if not isinstance(mounts, list):
+                raise ValueError()
+        except Exception as exc:  # noqa: BLE001 - only a safe category escapes
+            raise UpgradeError("mount_validation_failed") from exc
+        if any(
+            isinstance(mount, dict)
+            and (
+                mount.get("Source") == identity_directory
+                or mount.get("Destination") == identity_directory
+            )
+            for mount in mounts
+        ):
+            matches.append(inspected_id)
+    if matches != [expected_container_id]:
+        raise UpgradeError("mount_validation_failed")
+
+
+def _assert_readiness_unit_path(legacy: ModuleType) -> None:
+    try:
+        unit_stat = SERVICE_PATH.lstat()
+        if (
+            not stat.S_ISREG(unit_stat.st_mode)
+            or stat.S_ISLNK(unit_stat.st_mode)
+            or unit_stat.st_uid != 0
+            or unit_stat.st_gid != 0
+            or stat.S_IMODE(unit_stat.st_mode) not in {0o644, 0o640}
+            or unit_stat.st_size > 256 * 1024
+        ):
+            raise UpgradeError("systemd_configuration_mismatch")
+        for parent in (SERVICE_PATH.parent, legacy.HELPER_PATH.parent):
+            parent_stat = parent.lstat()
+            if (
+                not stat.S_ISDIR(parent_stat.st_mode)
+                or stat.S_ISLNK(parent_stat.st_mode)
+                or parent_stat.st_uid != 0
+                or parent_stat.st_gid != 0
+                or stat.S_IMODE(parent_stat.st_mode) & 0o022
+            ):
+                raise UpgradeError("systemd_configuration_mismatch")
+    except UpgradeError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - path details are never emitted
+        raise UpgradeError("systemd_configuration_mismatch") from exc
+
+
+def _check_readiness(
+    image_ref: str,
+    image_ids: tuple[str, ...],
+    expected: dict[str, object],
+    deadline: float,
+) -> ReadinessObservation:
     try:
         legacy = _load_legacy()
+        _assert_readiness_unit_path(legacy)
         current_text = SERVICE_PATH.read_text(encoding="utf-8")
+        if image_ref not in {IMAGE_REF, OLD_IMAGE_REF}:
+            return ReadinessObservation(False, "image_identity_mismatch")
+        if current_text.count(image_ref) != 1:
+            return ReadinessObservation(False, "systemd_configuration_mismatch")
         if image_ref == IMAGE_REF:
-            if current_text.count(IMAGE_REF) != 1:
-                return False
             source_text = current_text.replace(IMAGE_REF, OLD_IMAGE_REF, 1)
         else:
             source_text = current_text
-        unit_info = legacy.validate_unit(source_text, allow_identity_mount=True)
-        systemd = _systemd_properties(legacy, unit_info)
-        if systemd["ActiveState"] != "active":
-            return False
-        runtime = legacy._inspect_running_container()
+        try:
+            unit_info = legacy.validate_unit(source_text, allow_identity_mount=True)
+        except Exception as exc:  # noqa: BLE001 - parser details are never exposed
+            raise UpgradeError("systemd_configuration_mismatch") from exc
+        if unit_info.get("restart") != "always":
+            return ReadinessObservation(False, "systemd_configuration_mismatch")
+        try:
+            stops = [
+                item[2]
+                for item in legacy._service_directives(source_text).get("ExecStop", [])
+            ]
+        except Exception as exc:  # noqa: BLE001 - parser details are never exposed
+            raise UpgradeError("systemd_configuration_mismatch") from exc
+        if stops != [EXPECTED_EXECSTOP]:
+            return ReadinessObservation(False, "systemd_configuration_mismatch")
+        names = (
+            "NeedDaemonReload",
+            "FragmentPath",
+            "DropInPaths",
+            "EnvironmentFiles",
+            "ActiveState",
+            "Restart",
+        )
+        values = {
+            name: _readiness_command(
+                ["systemctl", "show", SERVICE, f"--property={name}", "--value"],
+                deadline,
+            )
+            for name in names
+        }
         if (
-            runtime.get("running") is not True
-            or runtime.get("health") != "healthy"
-            or runtime.get("image_ref") != image_ref
-            or runtime.get("image_id") not in image_ids
-            or runtime.get("restart_policy") != expected.get("restart_policy")
+            values["NeedDaemonReload"].lower() != "no"
+            or values["FragmentPath"] != str(SERVICE_PATH)
+            or values["DropInPaths"]
+            or not re.fullmatch(
+                r"\{?/etc/auterim-verifier/runner\.env(?: \(ignore_errors=(?:yes|no)\))?\}?",
+                values["EnvironmentFiles"],
+            )
+            or values["Restart"] != unit_info.get("restart")
+        ):
+            return ReadinessObservation(False, "systemd_configuration_mismatch")
+        if values["ActiveState"] == "activating":
+            return ReadinessObservation(False, "systemd_service_activating", True)
+        if values["ActiveState"] != "active":
+            return ReadinessObservation(False, "systemd_service_inactive")
+
+        runtime = _readiness_container(deadline)
+        if isinstance(runtime, ReadinessObservation):
+            return runtime
+        if runtime.get("image_ref") != image_ref or runtime.get("image_id") not in image_ids:
+            return ReadinessObservation(False, "image_identity_mismatch")
+        if runtime.get("running") is not True:
+            return ReadinessObservation(False, "container_exited")
+        if (
+            runtime.get("restart_policy") != expected.get("restart_policy")
             or runtime.get("port_bindings") != expected.get("port_bindings")
             or runtime.get("groups") != expected.get("groups")
         ):
-            return False
-        _validate_mounts(runtime.get("mounts"), legacy.IDENTITY_DIRECTORY_VALUE)
-        legacy._assert_identity_mount_reserved(str(runtime["id"]))
-        legacy.validate_host_identity_file()
-        result = subprocess.run(
-            [
-                "docker",
-                "exec",
-                CONTAINER_NAME,
-                "node",
-                "-e",
-                "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))",
-            ],
-            capture_output=True,
-            timeout=8,
-            check=False,
+            return ReadinessObservation(False, "container_configuration_mismatch")
+        try:
+            _validate_mounts(runtime.get("mounts"), legacy.IDENTITY_DIRECTORY_VALUE)
+        except UpgradeError as exc:
+            raise UpgradeError("mount_validation_failed") from exc
+        _validate_identity_mount_bounded(
+            legacy.IDENTITY_DIRECTORY_VALUE, str(runtime["id"]), deadline
         )
-        return result.returncode == 0
-    except Exception:  # noqa: BLE001 - boolean health only
-        return False
+        try:
+            legacy.validate_host_identity_file()
+        except Exception as exc:  # noqa: BLE001 - identity details are never exposed
+            raise UpgradeError("identity_attestation_failed") from exc
+
+        health = runtime.get("health")
+        if health == "unhealthy":
+            return ReadinessObservation(False, "container_unhealthy")
+        if health not in {"starting", "healthy"}:
+            return ReadinessObservation(False, "container_health_unavailable")
+        try:
+            result = subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    CONTAINER_NAME,
+                    "node",
+                    "-e",
+                    "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.status===200?0:20)).catch(()=>process.exit(21))",
+                ],
+                capture_output=True,
+                timeout=max(0.001, deadline - time.monotonic()),
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise UpgradeError("readiness_observation_timeout") from exc
+        except Exception as exc:  # noqa: BLE001 - command details are never emitted
+            raise UpgradeError("readiness_observation_unavailable") from exc
+        if result.returncode == 0:
+            if health == "starting":
+                return ReadinessObservation(False, "docker_health_starting", True)
+            return ReadinessObservation(True, "ready")
+        if result.returncode in {20, 21}:
+            return ReadinessObservation(False, "application_health_endpoint_not_ready", True)
+        return ReadinessObservation(False, "health_probe_unavailable")
+    except UpgradeError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - safe readiness categories only
+        if exc.__class__.__name__ == "PreflightError":
+            category = getattr(exc, "category", "")
+            if category in {"runner_mount_shape_mismatch", "runner_mount_identity_mismatch"}:
+                return ReadinessObservation(False, "mount_validation_failed")
+            if category.startswith("host_identity_file_") or category.startswith("identity_"):
+                return ReadinessObservation(False, "identity_attestation_failed")
+            if category.startswith("systemd_"):
+                return ReadinessObservation(False, "systemd_configuration_mismatch")
+        return ReadinessObservation(False, "readiness_observation_unavailable")
+
+
+def _wait_for_healthy(
+    image_ref: str,
+    image_ids: tuple[str, ...],
+    expected: dict[str, object],
+) -> None:
+    deadline = time.monotonic() + READINESS_BUDGET_SECONDS
+    last_category = "readiness_observation_unavailable"
+    while True:
+        if time.monotonic() >= deadline:
+            raise UpgradeError("readiness_timeout", cause_category=last_category)
+        try:
+            observation = _check_readiness(image_ref, image_ids, expected, deadline)
+        except UpgradeError as exc:
+            if exc.category == "readiness_observation_timeout":
+                raise UpgradeError("readiness_timeout", cause_category=last_category) from exc
+            raise
+        if observation.ready:
+            return
+        if observation.category not in SAFE_READINESS_CATEGORIES:
+            raise UpgradeError("readiness_observation_unavailable")
+        last_category = observation.category
+        if not observation.retryable:
+            raise UpgradeError(observation.category)
+        if observation.category not in READINESS_TRANSIENT_CATEGORIES:
+            raise UpgradeError("readiness_observation_unavailable")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise UpgradeError("readiness_timeout", cause_category=last_category)
+        time.sleep(min(READINESS_POLL_INTERVAL_SECONDS, remaining))
 
 
 def _write_backup(unit_raw: bytes, runtime: dict[str, object]) -> Path:
@@ -664,8 +997,16 @@ def _restore_backup(backup: Path) -> dict[str, object]:
             "groups": metadata["previousGroups"],
             "port_bindings": metadata["previousPortBindings"],
         }
-        if not _healthy(OLD_IMAGE_REF, OLD_IMAGE_IDS, rollback_expectations):
-            raise UpgradeError("rollback_health_failed")
+        try:
+            _wait_for_healthy(OLD_IMAGE_REF, OLD_IMAGE_IDS, rollback_expectations)
+        except UpgradeError as exc:
+            raise UpgradeError(
+                "rollback_failed",
+                cause_category=_safe_cause_category(
+                    exc.category, "rollback_operation_failed"
+                ),
+                cause_detail_category=_safe_cause_category(exc.cause_category, ""),
+            ) from exc
         return {
             "status": "ROLLBACK_PASS",
             "service": SERVICE,
@@ -711,8 +1052,7 @@ def deploy(archive_path: Path) -> dict[str, object]:
             )
             _run(["systemctl", "daemon-reload"])
             _run(["systemctl", "restart", SERVICE], timeout=60)
-            if not _healthy(IMAGE_REF, IMAGE_IDS, old_runtime):
-                raise UpgradeError("new_runner_health_check_failed")
+            _wait_for_healthy(IMAGE_REF, IMAGE_IDS, old_runtime)
             return {
                 "status": "DEPLOY_PASS",
                 "service": SERVICE,
@@ -731,6 +1071,8 @@ def deploy(archive_path: Path) -> dict[str, object]:
             }
         except Exception as exc:
             rollback_ok = False
+            rollback_cause_category: str | None = None
+            rollback_detail_category: str | None = None
             try:
                 try:
                     current_unit = SERVICE_PATH.read_bytes()
@@ -747,14 +1089,32 @@ def deploy(archive_path: Path) -> dict[str, object]:
                     _run(["systemctl", "daemon-reload"])
                     _run(["docker", "tag", old_runtime["image_id"], OLD_IMAGE_REF])
                     _run(["systemctl", "restart", SERVICE], timeout=60)
-                rollback_ok = _healthy(OLD_IMAGE_REF, OLD_IMAGE_IDS, old_runtime)
-            except Exception:
-                rollback_ok = False
-            category = exc.category if isinstance(exc, UpgradeError) else "deployment_failed"
+                _wait_for_healthy(OLD_IMAGE_REF, OLD_IMAGE_IDS, old_runtime)
+                rollback_ok = True
+            except UpgradeError as rollback_exc:
+                rollback_cause_category = _safe_cause_category(
+                    rollback_exc.category, "rollback_operation_failed"
+                )
+                rollback_detail_category = _safe_cause_category(
+                    rollback_exc.cause_category, ""
+                ) or None
+            except Exception:  # noqa: BLE001 - raw rollback errors are never emitted
+                rollback_cause_category = "rollback_operation_failed"
+            if isinstance(exc, UpgradeError):
+                category = _safe_cause_category(
+                    exc.category, "deployment_operation_failed"
+                )
+                detail_category = _safe_cause_category(exc.cause_category, "") or None
+            else:
+                category = "deployment_operation_failed"
+                detail_category = None
             raise UpgradeError(
                 "deployment_failed",
                 cause_category=category,
+                cause_detail_category=detail_category,
                 rollback="passed" if rollback_ok else "failed",
+                rollback_cause_category=rollback_cause_category,
+                rollback_detail_category=rollback_detail_category,
             ) from exc
     finally:
         shutil.rmtree(stage, ignore_errors=True)
@@ -776,9 +1136,23 @@ def main(argv: list[str]) -> int:
     except UpgradeError as exc:
         result = {"status": "ABORT", "category": exc.category, "no_unapproved_fallback": True}
         if exc.cause_category is not None:
-            result["cause_category"] = exc.cause_category
+            result["cause_category"] = _safe_cause_category(
+                exc.cause_category, "operation_failed"
+            )
+        if exc.cause_detail_category is not None:
+            detail = _safe_cause_category(exc.cause_detail_category, "")
+            if detail:
+                result["cause_detail_category"] = detail
         if exc.rollback is not None:
             result["rollback"] = exc.rollback
+        if exc.rollback_cause_category is not None:
+            result["rollback_cause_category"] = _safe_cause_category(
+                exc.rollback_cause_category, "rollback_operation_failed"
+            )
+        if exc.rollback_detail_category is not None:
+            detail = _safe_cause_category(exc.rollback_detail_category, "")
+            if detail:
+                result["rollback_detail_category"] = detail
         print(
             json.dumps(result, sort_keys=True, separators=(",", ":"))
         )
