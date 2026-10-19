@@ -926,6 +926,8 @@ async function materializeVerificationJob(input: {
       });
     } finally {
       try {
+        await makeWritable(snapshotCheck);
+        await makeWritable(cacheCheck);
         await rm(snapshotCheck, { recursive: true, force: true });
         await rm(cacheCheck, { recursive: true, force: true });
       } catch {
@@ -1058,9 +1060,12 @@ export async function executeVerificationJob(
       resultFingerprint: sha256(canonicalJson(resultBase)),
     });
   } finally {
-    await rm(root, { recursive: true, force: true }).catch(() => {
+    try {
+      await makeWritable(root);
+      await rm(root, { recursive: true, force: true });
+    } catch {
       throw new Error("verification_runner_cleanup_failed");
-    });
+    }
   }
 }
 

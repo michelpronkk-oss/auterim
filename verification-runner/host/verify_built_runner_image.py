@@ -94,6 +94,25 @@ def inspect_built_image(archive_path: Path) -> dict[str, object]:
         )
         if embedded_ref != release.IMAGE_REF:
             raise release.UpgradeError("built_image_embedded_ref_mismatch")
+        git_version = _docker(
+            [
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--entrypoint",
+                "git",
+                release.IMAGE_REF,
+                "--version",
+            ]
+        )
+        if git_version != "git version 2.49.1":
+            raise release.UpgradeError("built_image_git_version_mismatch")
     except ValueError as exc:
         raise release.UpgradeError("built_container_identity_invalid") from exc
     finally:
@@ -113,6 +132,7 @@ def inspect_built_image(archive_path: Path) -> dict[str, object]:
         "platform": platform,
         "embedded_deployment_image_ref_matches": True,
         "container_config_image_matches": True,
+        "git_version": git_version,
         "secrets_or_environment_values_read": False,
     }
 

@@ -28,8 +28,9 @@ class BuiltRunnerImageTests(unittest.TestCase):
         self.assertTrue(evidence["container_config_image_matches"])
         self.assertEqual(
             evidence["image_ref"],
-            "auterim-verification-runner:m1578r-self-id-20261019-03",
+            "auterim-verification-runner:m1578r-snapshot-extraction-20261019-04",
         )
+        self.assertEqual(evidence["git_version"], "git version 2.49.1")
 
 
 if __name__ == "__main__":

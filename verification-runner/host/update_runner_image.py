@@ -22,20 +22,21 @@ from typing import BinaryIO
 
 SERVICE = "auterim-verification-runner.service"
 SERVICE_PATH = Path("/etc/systemd/system/auterim-verification-runner.service")
-OLD_IMAGE_REF = "auterim-verification-runner:f03235a2ddf2d59846fd0062ddcd6df614e1ad40"
-IMAGE_REF = "auterim-verification-runner:m1578r-self-id-20261019-03"
+OLD_IMAGE_REF = "auterim-verification-runner:m1578r-self-id-20261019-03"
+IMAGE_REF = "auterim-verification-runner:m1578r-snapshot-extraction-20261019-04"
 OLD_IMAGE_IDS = (
-    "sha256:5c8e5dacc9aab8f84ad41f8a288decb7effdce183e09a4721335a0c3bd552bd3",
-    "sha256:0d439b25ab2b717f5cb2f669ccca112e9ab281a1b32bf645c5abaf4a58c9b04b",
-)
-IMAGE_IDS = (
     "sha256:86ba0b06d9314a4df98b09fc57ceb185c6584598a8197bba23d78ae446098b7b",
     "sha256:8057869831067a84e653c55cc321b37dbb737892512eed45df743a540532956d",
     "sha256:015a340ef9eaa09ab9e8b7371f75ffe1b9cdf4d2631774c6800128bba89ee993",
 )
+IMAGE_IDS = (
+    "sha256:6b5bcfbade5f2a8293918884cf6225ce24e705e7328529aee2772f264b4a32c4",
+    "sha256:e7495ddf158b8ea60adfd210a0115c626c9771756c6e439c13c041b461a56bf4",
+    "sha256:fa84bc3808783d7ac0ef10379de187f1ac348f19e995aadb196bb910b8173639",
+)
 IMAGE_CONFIG_ID = IMAGE_IDS[2]
-IMAGE_ARCHIVE_SHA256 = "484f186c2714d7527fddf95527ae6de34c1843077843c2f54a95607a33381f01"
-IMAGE_ARCHIVE_NAME = "auterim-verification-runner-m1578r-self-id-20261019-03.tar"
+IMAGE_ARCHIVE_SHA256 = "9ae97d382799bbd7e626657cdc779ea32c08c477f00b9cacd9000820a3374192"
+IMAGE_ARCHIVE_NAME = "auterim-verification-runner-m1578r-snapshot-extraction-20261019-04.tar"
 LEGACY_LIBRARY_SHA256 = "55c2e568ec60b12edd435df42655ba6114654b3a5922101665877f9a38dff59e"
 BACKUP_ROOT = Path("/var/backups/auterim-verifier-runner-image")
 MAX_ARCHIVE_BYTES = 1_000_000_000

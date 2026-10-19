@@ -93,7 +93,7 @@ class RunnerImagePinTests(unittest.TestCase):
             dockerfile,
         )
         self.assertIn(
-            "RUN apk add --no-cache ca-certificates=20260909-r0 docker-cli=28.3.3-r5",
+            "RUN apk add --no-cache ca-certificates=20260909-r0 docker-cli=28.3.3-r5 git=2.49.1-r0",
             dockerfile,
         )
         self.assertIn("npm ci --ignore-scripts", dockerfile)
@@ -101,35 +101,36 @@ class RunnerImagePinTests(unittest.TestCase):
     def test_pin_matches_build_artifact_identity(self):
         self.assertEqual(
             upgrade.IMAGE_REF,
-            "auterim-verification-runner:m1578r-self-id-20261019-03",
+            "auterim-verification-runner:m1578r-snapshot-extraction-20261019-04",
         )
         self.assertEqual(
             upgrade.OLD_IMAGE_REF,
-            "auterim-verification-runner:f03235a2ddf2d59846fd0062ddcd6df614e1ad40",
+            "auterim-verification-runner:m1578r-self-id-20261019-03",
         )
         self.assertEqual(
             upgrade.OLD_IMAGE_IDS,
-            (
-                "sha256:5c8e5dacc9aab8f84ad41f8a288decb7effdce183e09a4721335a0c3bd552bd3",
-                "sha256:0d439b25ab2b717f5cb2f669ccca112e9ab281a1b32bf645c5abaf4a58c9b04b",
-            ),
-        )
-        self.assertEqual(
-            upgrade.IMAGE_IDS,
             (
                 "sha256:86ba0b06d9314a4df98b09fc57ceb185c6584598a8197bba23d78ae446098b7b",
                 "sha256:8057869831067a84e653c55cc321b37dbb737892512eed45df743a540532956d",
                 "sha256:015a340ef9eaa09ab9e8b7371f75ffe1b9cdf4d2631774c6800128bba89ee993",
             ),
         )
+        self.assertEqual(
+            upgrade.IMAGE_IDS,
+            (
+                "sha256:6b5bcfbade5f2a8293918884cf6225ce24e705e7328529aee2772f264b4a32c4",
+                "sha256:e7495ddf158b8ea60adfd210a0115c626c9771756c6e439c13c041b461a56bf4",
+                "sha256:fa84bc3808783d7ac0ef10379de187f1ac348f19e995aadb196bb910b8173639",
+            ),
+        )
         self.assertEqual(upgrade.IMAGE_CONFIG_ID, upgrade.IMAGE_IDS[2])
         self.assertIn(
-            "sha256:015a340ef9eaa09ab9e8b7371f75ffe1b9cdf4d2631774c6800128bba89ee993",
+            "sha256:fa84bc3808783d7ac0ef10379de187f1ac348f19e995aadb196bb910b8173639",
             upgrade.IMAGE_IDS,
         )
         self.assertEqual(
             upgrade.IMAGE_ARCHIVE_SHA256,
-            "484f186c2714d7527fddf95527ae6de34c1843077843c2f54a95607a33381f01",
+            "9ae97d382799bbd7e626657cdc779ea32c08c477f00b9cacd9000820a3374192",
         )
         self.assertEqual(len(upgrade.LEGACY_LIBRARY_SHA256), 64)
 
