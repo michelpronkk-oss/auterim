@@ -1,0 +1,411 @@
+import hashlib
+import io
+import json
+import os
+import stat
+import tarfile
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import deploy_identity_handoff as identity
+import update_runner_image as upgrade
+
+
+def identity_enabled_unit():
+    base = """[Unit]
+Description=Auterim verifier
+
+[Service]
+ExecStop=/usr/bin/docker stop --time 10 auterim-verification-runner
+EnvironmentFile=/etc/auterim-verifier/runner.env
+ExecStart=/bin/sh -lc 'exec docker run \\
+    --rm --name auterim-verification-runner \\
+    --pull=never \\
+    --group-add "$(stat -c %%g /var/run/docker.sock)" \\
+    --publish 127.0.0.1:8080:8080 \\
+    --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \\
+    --mount type=bind,source=/srv/auterim-runner,target=/srv/auterim-runner \\
+    --env FIX_VERIFICATION_RUNNER_AUTH_SECRET \\
+    --env FIX_VERIFICATION_RUNNER_WORK_ROOT \\
+    --env FIX_DEPENDENCY_CACHE_PUBLIC_KEY \\
+    --env NEXT_PUBLIC_SUPABASE_URL \\
+    auterim-verification-runner:ac73ed8'
+Restart=always
+"""
+    return identity.patch_unit(base)
+
+
+def archive_bytes(image_ref, config_id):
+    config = b'{"architecture":"amd64","os":"linux"}'
+    config_digest = hashlib.sha256(config).hexdigest()
+    if config_id != "sha256:" + config_digest:
+        raise AssertionError("test config identity mismatch")
+    config_path = f"blobs/sha256/{config_digest}"
+    manifest = json.dumps(
+        [{"Config": config_path, "RepoTags": [image_ref], "Layers": []}],
+        separators=(",", ":"),
+    ).encode()
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:") as archive:
+        for name, content in (("manifest.json", manifest), (config_path, config)):
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+    return output.getvalue(), config_id
+
+
+class RunnerImagePinTests(unittest.TestCase):
+    def test_pin_matches_build_artifact_identity(self):
+        self.assertEqual(
+            upgrade.IMAGE_REF,
+            "auterim-verification-runner:f03235a2ddf2d59846fd0062ddcd6df614e1ad40",
+        )
+        self.assertEqual(upgrade.IMAGE_CONFIG_ID, upgrade.IMAGE_IDS[1])
+        self.assertIn(
+            "sha256:0d439b25ab2b717f5cb2f669ccca112e9ab281a1b32bf645c5abaf4a58c9b04b",
+            upgrade.IMAGE_IDS,
+        )
+        self.assertEqual(len(upgrade.IMAGE_ARCHIVE_SHA256), 64)
+        self.assertEqual(len(upgrade.LEGACY_LIBRARY_SHA256), 64)
+
+    def test_image_archive_requires_exact_tag_archive_hash_and_config(self):
+        config_id = "sha256:" + hashlib.sha256(b'{"architecture":"amd64","os":"linux"}').hexdigest()
+        payload, _ = archive_bytes(upgrade.IMAGE_REF, config_id)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "runner.tar"
+            path.write_bytes(payload)
+            with (
+                patch.object(upgrade, "IMAGE_CONFIG_ID", config_id),
+                patch.object(upgrade, "IMAGE_IDS", ("sha256:" + "a" * 64, config_id)),
+                patch.object(upgrade, "IMAGE_ARCHIVE_SHA256", hashlib.sha256(payload).hexdigest()),
+            ):
+                result = upgrade.validate_archive(path)
+                self.assertEqual(result["image_config_id"], config_id)
+                self.assertEqual(result["archive_sha256"], hashlib.sha256(payload).hexdigest())
+
+    def test_image_archive_rejects_wrong_tag_and_modified_bytes(self):
+        config_id = "sha256:" + hashlib.sha256(b'{"architecture":"amd64","os":"linux"}').hexdigest()
+        wrong_tag, _ = archive_bytes("auterim-verification-runner:other", config_id)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "runner.tar"
+            path.write_bytes(wrong_tag)
+            with (
+                patch.object(upgrade, "IMAGE_CONFIG_ID", config_id),
+                patch.object(upgrade, "IMAGE_ARCHIVE_SHA256", hashlib.sha256(wrong_tag).hexdigest()),
+                self.assertRaisesRegex(upgrade.UpgradeError, "image_archive_tag_mismatch"),
+            ):
+                upgrade.validate_archive(path)
+            path.write_bytes(wrong_tag + b"tampered")
+            with patch.object(upgrade, "IMAGE_ARCHIVE_SHA256", hashlib.sha256(wrong_tag).hexdigest()):
+                with self.assertRaisesRegex(upgrade.UpgradeError, "image_archive_fingerprint_mismatch"):
+                    upgrade.validate_archive(path)
+
+    def test_systemd_upgrade_changes_only_the_final_image_token(self):
+        original = identity_enabled_unit()
+        updated = upgrade._patch_unit(original)
+        self.assertEqual(updated.count(upgrade.IMAGE_REF), 1)
+        self.assertNotIn(upgrade.OLD_IMAGE_REF, updated)
+        self.assertEqual(updated.replace(upgrade.IMAGE_REF, upgrade.OLD_IMAGE_REF, 1), original)
+        self.assertIn("ExecStartPre=-/usr/bin/systemctl start auterim-verifier-identity-refresh.service", updated)
+        self.assertIn("ExecStop=/usr/bin/docker stop --time 10 auterim-verification-runner", updated)
+        self.assertIn("Restart=always", updated)
+
+    def test_systemd_upgrade_rejects_wrong_identity_mount_handoff(self):
+        original = identity_enabled_unit().replace(
+            "/run/auterim-verifier-identity,target=/run/auterim-verifier-identity,readonly",
+            "/tmp/identity,target=/tmp/identity,readonly",
+        )
+        with self.assertRaisesRegex(Exception, "runner_job_store_mount_mismatch"):
+            upgrade._patch_unit(original)
+
+    def test_systemd_upgrade_rejects_extra_shell_command_or_image_occurrence(self):
+        original = identity_enabled_unit()
+        malformed = original.replace("exec docker run", "exec docker run; touch /tmp/unsafe")
+        with self.assertRaisesRegex(Exception, "systemd_shell_operator_unsupported"):
+            upgrade._patch_unit(malformed)
+        with self.assertRaisesRegex(upgrade.UpgradeError, "systemd_image_token_not_unique"):
+            upgrade._patch_unit(original + f"# {upgrade.IMAGE_REF}\n")
+
+    def test_mount_and_group_contracts_fail_closed(self):
+        with self.assertRaisesRegex(upgrade.UpgradeError, "runner_mount_shape_mismatch"):
+            upgrade._validate_mounts([], "/run/auterim-verifier-identity")
+        with self.assertRaisesRegex(upgrade.UpgradeError, "runner_mount_identity_mismatch"):
+            upgrade._validate_mounts(
+                [
+                    {"Type": "bind", "Source": "/var/run/docker.sock", "Destination": "/var/run/docker.sock", "RW": True},
+                    {"Type": "bind", "Source": "/srv/auterim-runner", "Destination": "/srv/auterim-runner", "RW": True},
+                    {"Type": "bind", "Source": "/run/auterim-verifier-identity", "Destination": "/run/auterim-verifier-identity", "RW": True},
+                ],
+                "/run/auterim-verifier-identity",
+            )
+        with self.assertRaisesRegex(upgrade.UpgradeError, "runner_group_handoff_mismatch"):
+            upgrade._validate_groups(["not-a-number", "62000"], 62000)
+
+    def test_effective_systemd_properties_accept_only_expected_runner_configuration(self):
+        expected = {
+            "NeedDaemonReload": "no",
+            "FragmentPath": str(upgrade.SERVICE_PATH),
+            "DropInPaths": "",
+            "EnvironmentFiles": "{/etc/auterim-verifier/runner.env (ignore_errors=no)}",
+            "ActiveState": "active",
+            "Restart": "always",
+        }
+        legacy = SimpleNamespace(_systemd_value=Mock(side_effect=lambda key: expected[key]))
+        self.assertEqual(upgrade._systemd_properties(legacy, {"restart": "always"}), expected)
+        for key, value, category in (
+            ("NeedDaemonReload", "yes", "systemd_unit_reload_pending"),
+            ("DropInPaths", "/etc/systemd/system/override.conf", "systemd_effective_unit_mismatch"),
+            (
+                "EnvironmentFiles",
+                "{/etc/auterim-verifier/runner.env (ignore_errors=no) /tmp/other.env}",
+                "systemd_effective_environment_mismatch",
+            ),
+            ("Restart", "on-failure", "systemd_restart_policy_mismatch"),
+        ):
+            with self.subTest(key=key, value=value):
+                altered = {**expected, key: value}
+                legacy._systemd_value.side_effect = lambda item, values=altered: values[item]
+                with self.assertRaisesRegex(upgrade.UpgradeError, category):
+                    upgrade._systemd_properties(legacy, {"restart": "always"})
+
+    def test_container_restart_policy_is_preserved_independently_from_systemd(self):
+        legacy = upgrade._load_legacy()
+        unit = identity_enabled_unit()
+        parsed = legacy.validate_unit(unit, allow_identity_mount=True)
+        runtime = {
+            "id": "container-id",
+            "image_id": upgrade.OLD_IMAGE_IDS[0],
+            "image_ref": upgrade.OLD_IMAGE_REF,
+            "running": True,
+            "health": "healthy",
+            "restart_policy": "",
+            "mounts": [
+                {"Type": "bind", "Source": "/var/run/docker.sock", "Destination": "/var/run/docker.sock", "RW": True},
+                {"Type": "bind", "Source": "/srv/auterim-runner", "Destination": "/srv/auterim-runner", "RW": True},
+                {"Type": "bind", "Source": "/run/auterim-verifier-identity", "Destination": "/run/auterim-verifier-identity", "RW": False},
+            ],
+            "groups": ["999", "62000"],
+            "port_bindings": {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}]},
+        }
+        with (
+            patch.object(legacy, "_inspect_running_container", return_value=runtime),
+            patch.object(legacy, "_assert_identity_mount_reserved") as reserved,
+        ):
+            self.assertEqual(upgrade._validate_runtime(legacy, parsed), runtime)
+        reserved.assert_called_once_with("container-id")
+
+    def test_identity_handoff_preflight_checks_pinned_files_timer_and_last_refresh(self):
+        helper_bytes = b"reviewed identity helper"
+        refresh_service = b"[Service]\nExecStart=/usr/local/bin/auterim-verifier-refresh-identity.py --refresh\n"
+        refresh_timer = b"[Timer]\nUnit=auterim-verifier-identity-refresh.service\n"
+
+        def file(path, content, mode):
+            return SimpleNamespace(
+                lstat=Mock(
+                    return_value=SimpleNamespace(
+                        st_mode=stat.S_IFREG | mode,
+                        st_uid=0,
+                        st_gid=0,
+                        st_size=len(content),
+                    )
+                ),
+                read_bytes=Mock(return_value=content),
+                name=path,
+            )
+
+        legacy = SimpleNamespace(
+            HELPER_PATH=file("auterim-verifier-refresh-identity.py", helper_bytes, 0o750),
+            HELPER_SHA256=hashlib.sha256(helper_bytes).hexdigest(),
+            REFRESH_SERVICE_PATH=file("auterim-verifier-identity-refresh.service", refresh_service, 0o644),
+            REFRESH_SERVICE=refresh_service.decode(),
+            REFRESH_TIMER_PATH=file("auterim-verifier-identity-refresh.timer", refresh_timer, 0o644),
+            REFRESH_TIMER=refresh_timer.decode(),
+        )
+        with patch.object(upgrade, "_run", side_effect=["active", "enabled", "success", "0"]) as run:
+            upgrade._validate_identity_handoff(legacy)
+        self.assertEqual(run.call_count, 4)
+
+        with patch.object(upgrade, "_run", side_effect=["active", "disabled"]):
+            with self.assertRaisesRegex(upgrade.UpgradeError, "identity_refresh_timer_disabled"):
+                upgrade._validate_identity_handoff(legacy)
+
+    def test_preflight_is_read_only_and_rechecks_all_runtime_gates(self):
+        unit = identity_enabled_unit()
+        unit_info = {"command": ["exec", "docker", "run", "auterim-verification-runner:ac73ed8"], "restart": "always"}
+        runtime = {
+            "id": "container-id",
+            "image_id": upgrade.OLD_IMAGE_IDS[0],
+            "image_ref": upgrade.OLD_IMAGE_REF,
+            "running": True,
+            "health": "healthy",
+            "restart_policy": "always",
+            "mounts": [],
+            "groups": ["999", "62000"],
+            "port_bindings": {},
+        }
+        archive = {"archive_sha256": upgrade.IMAGE_ARCHIVE_SHA256}
+        legacy = SimpleNamespace(
+            validate_host_identity_file=Mock(),
+            assert_no_active_jobs=Mock(return_value=0),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "runner.tar"
+            path.write_bytes(b"fixture")
+            with (
+                patch.object(upgrade.os, "geteuid", return_value=0, create=True),
+                patch.object(upgrade.os, "chown", return_value=None, create=True),
+                patch.object(upgrade, "_load_legacy", return_value=legacy),
+                patch.object(upgrade, "_validate_environment_file") as env_check,
+                patch.object(upgrade, "_read_unit", return_value=(unit.encode(), unit, unit_info)),
+                patch.object(upgrade, "_systemd_properties", return_value={"NeedDaemonReload": "no"}) as sys_check,
+                patch.object(upgrade, "_validate_identity_handoff") as identity_check,
+                patch.object(upgrade, "_validate_runtime", return_value=runtime) as runtime_check,
+                patch.object(upgrade, "validate_archive", return_value=archive) as archive_check,
+                patch.object(upgrade, "_patch_unit", return_value=unit),
+                patch.object(upgrade, "_run") as run,
+                patch.object(upgrade, "_atomic_write") as write,
+            ):
+                result = upgrade.preflight(path)
+            self.assertEqual(result["status"], "PREFLIGHT_PASS")
+            self.assertEqual(result["active_verification_jobs"], 0)
+            self.assertTrue(result["only_service_image_token_changes"])
+            env_check.assert_called_once()
+            sys_check.assert_called_once()
+            identity_check.assert_called_once_with(legacy)
+            runtime_check.assert_called_once()
+            archive_check.assert_called_once_with(path)
+            legacy.validate_host_identity_file.assert_called_once()
+            legacy.assert_no_active_jobs.assert_called_once()
+            run.assert_not_called()
+            write.assert_not_called()
+
+    def test_deploy_health_failure_restores_original_unit_and_old_image(self):
+        original = identity_enabled_unit()
+        updated = upgrade._patch_unit(original)
+        old_runtime = {
+            "id": "old-container",
+            "image_id": upgrade.OLD_IMAGE_IDS[0],
+            "image_ref": upgrade.OLD_IMAGE_REF,
+            "restart_policy": "always",
+            "groups": ["999", "62000"],
+            "port_bindings": {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}]},
+        }
+        commands = []
+
+        def write_file(path, data, mode, uid=0, gid=0):
+            Path(path).write_bytes(data)
+
+        def command(args, **_kwargs):
+            commands.append(args)
+            if args[:4] == ["docker", "image", "inspect", "--format"]:
+                return upgrade.IMAGE_IDS[1]
+            return ""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "image.tar"
+            source.write_bytes(b"archive")
+            unit_path = root / "runner.service"
+            unit_path.write_text(original, encoding="utf-8")
+            backup = root / "backup"
+            backup.mkdir()
+            healthy = Mock(side_effect=[False, True])
+            with (
+                patch.object(upgrade.os, "geteuid", return_value=0, create=True),
+                patch.object(upgrade.os, "chown", return_value=None, create=True),
+                patch.object(
+                    upgrade.tempfile,
+                    "mkdtemp",
+                    side_effect=lambda **_kwargs: (root.joinpath("stage").mkdir() or str(root / "stage")),
+                ),
+                patch.object(upgrade, "_load_legacy", return_value=SimpleNamespace(_stage_input_file=lambda src, dst, _max: Path(dst).write_bytes(Path(src).read_bytes()))),
+                patch.object(upgrade, "preflight", return_value={"archive_sha256": upgrade.IMAGE_ARCHIVE_SHA256}),
+                patch.object(upgrade, "_read_unit", return_value=(original.encode(), original, {"command": [], "restart": "always"})),
+                patch.object(upgrade, "_validate_runtime", return_value=old_runtime),
+                patch.object(upgrade, "_write_backup", return_value=backup),
+                patch.object(upgrade, "_docker_load") as load,
+                patch.object(upgrade, "_run", side_effect=command),
+                patch.object(upgrade, "_atomic_write", side_effect=write_file),
+                patch.object(upgrade, "_patch_unit", return_value=updated),
+                patch.object(upgrade, "_healthy", healthy),
+                patch.object(upgrade.shutil, "rmtree") as rmtree,
+                patch.object(upgrade, "SERVICE_PATH", unit_path),
+            ):
+                with self.assertRaisesRegex(upgrade.UpgradeError, "deployment_failed") as raised:
+                    upgrade.deploy(source)
+            self.assertEqual(raised.exception.cause_category, "new_runner_health_check_failed")
+            self.assertEqual(raised.exception.rollback, "passed")
+            self.assertEqual(unit_path.read_text(encoding="utf-8"), original)
+            self.assertEqual(healthy.call_count, 2)
+            load.assert_called_once()
+            self.assertEqual(
+                sum(1 for args in commands if args[:2] == ["systemctl", "restart"]), 2
+            )
+            rmtree.assert_called_once()
+
+    def test_deploy_success_changes_only_image_token_and_restarts_managed_service(self):
+        original = identity_enabled_unit()
+        updated = upgrade._patch_unit(original)
+        old_runtime = {
+            "id": "old-container",
+            "image_id": upgrade.OLD_IMAGE_IDS[0],
+            "image_ref": upgrade.OLD_IMAGE_REF,
+            "restart_policy": "",
+            "groups": ["999", "62000"],
+            "port_bindings": {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}]},
+        }
+        commands = []
+
+        def write_file(path, data, _mode, _uid=0, _gid=0):
+            Path(path).write_bytes(data)
+
+        def command(args, **_kwargs):
+            commands.append(args)
+            if args[:4] == ["docker", "image", "inspect", "--format"]:
+                return upgrade.IMAGE_IDS[1]
+            return ""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "image.tar"
+            source.write_bytes(b"archive")
+            unit_path = root / "runner.service"
+            unit_path.write_text(original, encoding="utf-8")
+            backup = root / "backup"
+            backup.mkdir()
+            with (
+                patch.object(upgrade.os, "geteuid", return_value=0, create=True),
+                patch.object(upgrade.os, "chown", return_value=None, create=True),
+                patch.object(
+                    upgrade.tempfile,
+                    "mkdtemp",
+                    side_effect=lambda **_kwargs: (root.joinpath("stage").mkdir() or str(root / "stage")),
+                ),
+                patch.object(upgrade, "_load_legacy", return_value=SimpleNamespace(_stage_input_file=lambda src, dst, _max: Path(dst).write_bytes(Path(src).read_bytes()))),
+                patch.object(upgrade, "preflight", return_value={"archive_sha256": upgrade.IMAGE_ARCHIVE_SHA256}),
+                patch.object(upgrade, "_read_unit", return_value=(original.encode(), original, {"command": [], "restart": "always"})),
+                patch.object(upgrade, "_validate_runtime", return_value=old_runtime),
+                patch.object(upgrade, "_write_backup", return_value=backup),
+                patch.object(upgrade, "_docker_load") as load,
+                patch.object(upgrade, "_run", side_effect=command),
+                patch.object(upgrade, "_atomic_write", side_effect=write_file),
+                patch.object(upgrade, "_patch_unit", return_value=updated),
+                patch.object(upgrade, "_healthy", return_value=True),
+                patch.object(upgrade.shutil, "rmtree") as rmtree,
+                patch.object(upgrade, "SERVICE_PATH", unit_path),
+            ):
+                result = upgrade.deploy(source)
+            self.assertEqual(result["status"], "DEPLOY_PASS")
+            self.assertEqual(result["image_ref"], upgrade.IMAGE_REF)
+            self.assertTrue(result["unit_changed_only_image_token"])
+            self.assertEqual(unit_path.read_text(encoding="utf-8"), updated)
+            self.assertEqual(sum(1 for args in commands if args[:2] == ["systemctl", "restart"]), 1)
+            load.assert_called_once()
+            rmtree.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()
