@@ -135,6 +135,12 @@ describe("M15.78R durable runner diagnostic contract", () => {
     expect(freshEvidenceMigration).toContain("job_id text");
     expect(freshEvidenceMigration).toContain("admission_state text");
     expect(freshEvidenceMigration).toContain("complete_fix_stage_with_runner_diagnostics_v2");
+    expect(freshEvidenceMigration).toMatch(
+      /revoke all on function public\.complete_fix_stage_with_runner_diagnostics_v2\(uuid,uuid,text,text,boolean,jsonb,jsonb\)\s+from public, anon, authenticated/i,
+    );
+    expect(freshEvidenceMigration).toMatch(
+      /grant execute on function public\.complete_fix_stage_with_runner_diagnostics_v2\(uuid,uuid,text,text,boolean,jsonb,jsonb\)\s+to service_role/i,
+    );
     expect(freshEvidenceMigration).toContain("record_fix_verification_runner_result");
     expect(freshEvidenceMigration).toContain(
       "grant execute on function public.record_fix_verification_runner_result",

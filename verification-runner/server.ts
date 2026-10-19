@@ -147,13 +147,16 @@ const RETRYABLE_ADMISSION_ERROR_CATEGORIES = new Set([
 ]);
 
 class AdmissionFailure extends Error {
-  constructor(
-    readonly subphase: AdmissionSubphase,
-    readonly category: string,
-    readonly status: number,
-  ) {
+  readonly subphase: AdmissionSubphase;
+  readonly category: string;
+  readonly status: number;
+
+  constructor(subphase: AdmissionSubphase, category: string, status: number) {
     super(category);
     this.name = "AdmissionFailure";
+    this.subphase = subphase;
+    this.category = category;
+    this.status = status;
   }
 }
 

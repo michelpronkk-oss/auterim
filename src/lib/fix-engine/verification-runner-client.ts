@@ -501,7 +501,13 @@ export class RemoteVerificationRunnerClient {
     } else if (response && response.status >= 400 && response.status < 500) {
       if (correlation.admissionState !== "accepted") correlation.admissionState = "rejected";
     } else if (response && response.status >= 500) {
-      if (correlation.admissionState !== "accepted") correlation.admissionState = "unconfirmed";
+      const definitiveAdmissionFailure =
+        response.status === 500 &&
+        responsePhase === "admission" &&
+        responseFailure(value) === "verification_runner_internal_error" &&
+        diagnostic("admission", response.status, value, "http_error").admissionSubphase;
+      if (correlation.admissionState !== "accepted")
+        correlation.admissionState = definitiveAdmissionFailure ? "rejected" : "unconfirmed";
     }
     while (true) {
       if (response?.status === 200 && correlation.admissionState !== "accepted")

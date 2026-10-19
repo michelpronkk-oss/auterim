@@ -939,6 +939,11 @@ describe("M15.78R remote verification runner", () => {
           admissionSubphase: "artifact_materialization",
         },
       ],
+      correlation: {
+        jobId: expect.stringMatching(/^[a-f0-9]{64}$/),
+        requestFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        admissionState: "rejected",
+      },
     });
     expect(JSON.stringify(await readdir(path.join(root, "jobs")))).not.toContain("private");
     expect(await readdir(path.join(root, "jobs"))).toEqual(["artifacts"]);
@@ -953,6 +958,47 @@ describe("M15.78R remote verification runner", () => {
       }),
     );
     expect(String(admissionLog.mock.calls[0]?.[0])).not.toContain("private");
+  });
+
+  it("keeps an unclassified HTTP 500 admission response unconfirmed", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: "verification_runner_internal_error" }), {
+            status: 500,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    let caught: unknown;
+    try {
+      await new RemoteVerificationRunnerClient({
+        url: "https://runner.invalid",
+        authSecret: AUTH_SECRET,
+        maxWaitMs: 1_000,
+      }).execute(makeRequest());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      category: "runner_result_invalid",
+      retryable: false,
+      diagnostics: [
+        {
+          phase: "admission",
+          httpStatus: 500,
+          responseCategory: "verification_runner_internal_error",
+          reason: "http_error",
+        },
+      ],
+      correlation: {
+        jobId: expect.stringMatching(/^[a-f0-9]{64}$/),
+        requestFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        admissionState: "unconfirmed",
+      },
+    });
+    expect(JSON.stringify(caught)).not.toContain("admissionSubphase");
   });
 
   it("reports only the job-record persistence phase for filesystem errors", async () => {
