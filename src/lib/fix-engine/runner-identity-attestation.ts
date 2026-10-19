@@ -23,10 +23,11 @@ export const EXPECTED_VERIFIER_INSTANCE = {
   instanceId: "i-0592719b99a518001",
 } as const;
 
-/** Exact Docker image ID independently confirmed on the live EC2 runner. */
+/** Docker image-store, manifest, and OCI config identities from the reviewed build. */
 export const EXPECTED_VERIFICATION_RUNNER_IMAGE_IDS = [
-  "sha256:5c8e5dacc9aab8f84ad41f8a288decb7effdce183e09a4721335a0c3bd552bd3",
-  "sha256:0d439b25ab2b717f5cb2f669ccca112e9ab281a1b32bf645c5abaf4a58c9b04b",
+  "sha256:86ba0b06d9314a4df98b09fc57ceb185c6584598a8197bba23d78ae446098b7b",
+  "sha256:8057869831067a84e653c55cc321b37dbb737892512eed45df743a540532956d",
+  "sha256:015a340ef9eaa09ab9e8b7371f75ffe1b9cdf4d2631774c6800128bba89ee993",
 ] as const;
 
 // AWS's eu-west-1 RSA certificate for the IMDS /instance-identity/signature endpoint.
