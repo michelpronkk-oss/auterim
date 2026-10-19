@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   freshAcceptanceDispatchKey,
+  freshAcceptanceFixtureCommitSha,
+  freshV4ActionKind,
+  freshV4PrewriteDecision,
+  freshV4ReplayDecision,
   M1578R_FRESH_ACCEPTANCE_KEY,
   M1578R_FRESH_V3_ACCEPTANCE_KEY,
+  M1578R_FRESH_V4_ACCEPTANCE_KEY,
   M1578R_FRESH_FIXTURE_COMMIT_SHA,
+  M1578R_INTERNAL_TEST_ACCEPTANCE_TARGET,
   M1578RInternalTestAcceptanceInputSchema,
   sanitizeFreshEndpointReferences,
   sanitizeM1578RVerificationChecks,
@@ -74,6 +80,81 @@ describe("M15.78R bounded Fix Run status readback", () => {
     expect(() => freshAcceptanceDispatchKey("000000000000000000000000000000000000", "fix")).toThrow(
       "invalid_source_change_id",
     );
+  });
+
+  it("routes V4 actions through the fixed Test fixture without caller-controlled scope", () => {
+    expect(M1578R_FRESH_V4_ACCEPTANCE_KEY).toBe("m1578r-internal-qa-fix-engine-v4");
+    expect(M1578R_FRESH_V4_ACCEPTANCE_KEY).not.toBe(M1578R_FRESH_V3_ACCEPTANCE_KEY);
+    expect(freshAcceptanceFixtureCommitSha("v4")).toBe("94135df6f85bfb34ac83c046e5541e1ad8d73a86");
+    expect(freshAcceptanceFixtureCommitSha("v4")).toBe(M1578R_FRESH_FIXTURE_COMMIT_SHA);
+    expect(M1578R_INTERNAL_TEST_ACCEPTANCE_TARGET).toMatchObject({
+      workspaceId: "e140d48e-9dc0-4552-a9a4-a81fe3872422",
+      productId: "de1f2a12-de3c-4644-8892-b6c2d458a300",
+      repositoryId: "b2abf377-2dbc-4b9c-b546-b0604f3ee4fe",
+      repositoryExternalId: 1409364414,
+      owner: "michelpronkk-oss",
+      repository: "auterim-m15-github-qa",
+      dependencyId: "3cfb1bb7-1d76-4692-932b-24e94b66f346",
+      workspaceDependencyId: "867eb92b-2ed2-4917-ac68-44a22773e369",
+    });
+
+    const routes = {
+      verify_fresh_v4: "verify",
+      read_fresh_v4_status: "status",
+      create_fresh_v4_source: "create_source",
+      dispatch_fresh_v4_intelligence: "dispatch_intelligence",
+      start_fresh_v4_fix_run: "start_fix_run",
+    } as const;
+    for (const [action, kind] of Object.entries(routes)) {
+      expect(freshV4ActionKind(action)).toBe(kind);
+      expect(M1578RInternalTestAcceptanceInputSchema.safeParse({ action }).success).toBe(true);
+      expect(
+        M1578RInternalTestAcceptanceInputSchema.safeParse({
+          action,
+          workspaceId: M1578R_INTERNAL_TEST_ACCEPTANCE_TARGET.workspaceId,
+          repositoryId: M1578R_INTERNAL_TEST_ACCEPTANCE_TARGET.repositoryId,
+          fixtureCommitSha: M1578R_FRESH_FIXTURE_COMMIT_SHA,
+          sourceChangeId: "11111111-1111-4111-8111-111111111111",
+        }).success,
+      ).toBe(false);
+    }
+    expect(freshV4ActionKind("create_source")).toBeNull();
+    expect(freshV4ActionKind("start_fresh_v3_fix_run")).toBeNull();
+  });
+
+  it("uses a V4-only idempotency namespace for every downstream stage", () => {
+    const sourceChangeId = "11111111-1111-4111-8111-111111111111";
+    for (const stage of ["classify", "intelligence", "fix"] as const) {
+      const v4 = freshAcceptanceDispatchKey(sourceChangeId, stage, "v4");
+      expect(v4).toBe(`m1578r-fresh-v4:${sourceChangeId}:${stage}`);
+      expect(v4).not.toBe(freshAcceptanceDispatchKey(sourceChangeId, stage, "v2"));
+      expect(v4).not.toBe(freshAcceptanceDispatchKey(sourceChangeId, stage, "v3"));
+    }
+    expect(freshAcceptanceDispatchKey(sourceChangeId, "classify", "v3")).toBe(
+      `m1578r-fresh-v3:${sourceChangeId}:classify`,
+    );
+  });
+
+  it("allows V4 source creation only when readback proves the key is absent", () => {
+    expect(freshV4PrewriteDecision({ status: "not_started" })).toEqual({ allowed: true });
+    for (const status of ["source_created", "readback", "blocked", "ambiguous"]) {
+      expect(freshV4PrewriteDecision({ status })).toEqual({
+        allowed: false,
+        category: "fresh_v4_acceptance_already_exists",
+      });
+    }
+    expect(freshV4PrewriteDecision({ status: "unavailable" })).toEqual({
+      allowed: false,
+      category: "fresh_v4_prewrite_read_unavailable",
+    });
+  });
+
+  it("rejects an idempotent V4 source replay instead of claiming a fresh acceptance", () => {
+    expect(freshV4ReplayDecision(false)).toEqual({ allowed: true });
+    expect(freshV4ReplayDecision(true)).toEqual({
+      allowed: false,
+      category: "fresh_v4_replay_rejected",
+    });
   });
 
   it("returns verification metadata only and drops output or unknown fields", () => {

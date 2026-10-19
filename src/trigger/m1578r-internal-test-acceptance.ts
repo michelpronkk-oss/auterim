@@ -23,12 +23,28 @@ const TARGET = {
   workspaceDependencyId: "867eb92b-2ed2-4917-ac68-44a22773e369",
   fixRunId: "7de04a75-aefa-43a6-ba64-9fa4a70e0ec1",
 } as const;
+export const M1578R_INTERNAL_TEST_ACCEPTANCE_TARGET = TARGET;
 
 const SOURCE_ACCEPTANCE_KEY = "m1578r-internal-qa-fix-engine-v1";
 export const M1578R_FRESH_ACCEPTANCE_KEY = "m1578r-internal-qa-fix-engine-v2";
 export const M1578R_FRESH_V3_ACCEPTANCE_KEY = "m1578r-internal-qa-fix-engine-v3";
+export const M1578R_FRESH_V4_ACCEPTANCE_KEY = "m1578r-internal-qa-fix-engine-v4";
 export const M1578R_FRESH_FIXTURE_COMMIT_SHA = "94135df6f85bfb34ac83c046e5541e1ad8d73a86";
-type FreshAcceptanceGeneration = "v2" | "v3";
+type FreshAcceptanceGeneration = "v2" | "v3" | "v4";
+const FRESH_V4_ACTION_KIND = {
+  verify_fresh_v4: "verify",
+  read_fresh_v4_status: "status",
+  create_fresh_v4_source: "create_source",
+  dispatch_fresh_v4_intelligence: "dispatch_intelligence",
+  start_fresh_v4_fix_run: "start_fix_run",
+} as const;
+type FreshV4Action = keyof typeof FRESH_V4_ACTION_KIND;
+
+export function freshV4ActionKind(action: string) {
+  return Object.hasOwn(FRESH_V4_ACTION_KIND, action)
+    ? FRESH_V4_ACTION_KIND[action as FreshV4Action]
+    : null;
+}
 const FRESH_ACCEPTANCE_CONFIG: Record<
   FreshAcceptanceGeneration,
   { acceptanceKey: string; fixtureCommitSha: string }
@@ -41,7 +57,15 @@ const FRESH_ACCEPTANCE_CONFIG: Record<
     acceptanceKey: M1578R_FRESH_V3_ACCEPTANCE_KEY,
     fixtureCommitSha: M1578R_FRESH_FIXTURE_COMMIT_SHA,
   },
+  v4: {
+    acceptanceKey: M1578R_FRESH_V4_ACCEPTANCE_KEY,
+    fixtureCommitSha: M1578R_FRESH_FIXTURE_COMMIT_SHA,
+  },
 };
+
+export function freshAcceptanceFixtureCommitSha(generation: FreshAcceptanceGeneration) {
+  return FRESH_ACCEPTANCE_CONFIG[generation].fixtureCommitSha;
+}
 const SOURCE_BASELINE =
   "Internal QA provider bulletin: endpoint https://api.openai.com/v1/auterim-m1578r-old is currently supported.";
 const SOURCE_CHANGED =
@@ -183,6 +207,11 @@ export const M1578RInternalTestAcceptanceInputSchema = z.discriminatedUnion("act
   z.object({ action: z.literal("dispatch_fresh_v3_intelligence") }).strict(),
   z.object({ action: z.literal("read_fresh_v3_status") }).strict(),
   z.object({ action: z.literal("start_fresh_v3_fix_run") }).strict(),
+  z.object({ action: z.literal("verify_fresh_v4") }).strict(),
+  z.object({ action: z.literal("read_fresh_v4_status") }).strict(),
+  z.object({ action: z.literal("create_fresh_v4_source") }).strict(),
+  z.object({ action: z.literal("dispatch_fresh_v4_intelligence") }).strict(),
+  z.object({ action: z.literal("start_fresh_v4_fix_run") }).strict(),
   z.object({ action: z.literal("diagnose_entitlement") }).strict(),
   z
     .object({
@@ -200,6 +229,23 @@ export function freshAcceptanceDispatchKey(
   if (!z.string().uuid().safeParse(sourceChangeId).success)
     throw new Error("invalid_source_change_id");
   return `m1578r-fresh-${generation}:${sourceChangeId}:${stage}`;
+}
+
+export function freshV4PrewriteDecision(status: { status: string }) {
+  if (status.status === "not_started") return { allowed: true as const };
+  return {
+    allowed: false as const,
+    category:
+      status.status === "unavailable"
+        ? "fresh_v4_prewrite_read_unavailable"
+        : "fresh_v4_acceptance_already_exists",
+  };
+}
+
+export function freshV4ReplayDecision(replayed: boolean) {
+  return replayed
+    ? { allowed: false as const, category: "fresh_v4_replay_rejected" }
+    : { allowed: true as const };
 }
 
 type BillingSubscription = {
@@ -1381,6 +1427,11 @@ async function dispatchFreshM1578RIntelligence(generation: FreshAcceptanceGenera
 
 async function createFreshM1578RSource(generation: FreshAcceptanceGeneration) {
   const { acceptanceKey, fixtureCommitSha } = FRESH_ACCEPTANCE_CONFIG[generation];
+  if (generation === "v4") {
+    const before = await inspectFreshM1578RAcceptance("v4");
+    const prewrite = freshV4PrewriteDecision(before);
+    if (!prewrite.allowed) return { status: "blocked", category: prewrite.category } as const;
+  }
   const readiness = await inspectReadiness(fixtureCommitSha);
   if (readiness.status !== "ready") return readiness;
   try {
@@ -1392,6 +1443,16 @@ async function createFreshM1578RSource(generation: FreshAcceptanceGeneration) {
       baseline: SOURCE_BASELINE,
       changed: SOURCE_CHANGED,
     });
+    if (generation === "v4") {
+      const replay = freshV4ReplayDecision(created.replayed);
+      if (!replay.allowed)
+        return {
+          status: "blocked",
+          category: replay.category,
+          sourceId: created.sourceId,
+          sourceChangeId: created.sourceChangeId,
+        } as const;
+    }
     const persisted = await inspectFreshM1578RAcceptance(generation);
     if (persisted.status !== "readback" || persisted.sourceChange?.id !== created.sourceChangeId)
       return { status: "blocked", category: "fresh_source_persistence_unverified" } as const;
@@ -1435,6 +1496,13 @@ export const m1578rInternalTestAcceptanceTask = schemaTask({
   queue: { concurrencyLimit: 1 },
   run: async (input) => {
     if (input.action === "read_fix_status") return inspectM1578RFixStatus();
+    const freshV4Action = freshV4ActionKind(input.action);
+    if (freshV4Action === "status") return inspectFreshM1578RAcceptance("v4");
+    if (freshV4Action === "verify")
+      return inspectReadiness(FRESH_ACCEPTANCE_CONFIG.v4.fixtureCommitSha);
+    if (freshV4Action === "dispatch_intelligence") return dispatchFreshM1578RIntelligence("v4");
+    if (freshV4Action === "start_fix_run") return startFreshM1578RFixRun("v4");
+    if (freshV4Action === "create_source") return createFreshM1578RSource("v4");
     if (input.action === "read_fresh_status") return inspectFreshM1578RAcceptance();
     if (input.action === "verify_fresh") return inspectReadiness(M1578R_FRESH_FIXTURE_COMMIT_SHA);
     if (input.action === "dispatch_fresh_intelligence") return dispatchFreshM1578RIntelligence();
