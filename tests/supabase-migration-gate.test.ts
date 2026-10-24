@@ -181,6 +181,13 @@ describe("supabase migration gate", () => {
 });
 
 describe("supabase production migration workflow", () => {
+  it("checks bounded settings in the plan and has no unbounded CLI apply path", () => {
+    expect(workflow).toContain("run: node scripts/supabase-bounded-migration.mjs plan");
+    expect(workflow).toContain("run: node scripts/supabase-bounded-migration.mjs apply");
+    expect(workflow).toContain('SUPABASE_MIGRATION_APPLY: "true"');
+    for (const line of executableLines.filter((value) => value.includes("db push")))
+      expect(line).toContain("--dry-run");
+  });
   it("is manual, plan-first and approval-gated", () => {
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).not.toMatch(/^\s+push:/m);

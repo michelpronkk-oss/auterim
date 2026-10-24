@@ -4,8 +4,8 @@
 #         exact `db push --dry-run` set. Never writes to the database.
 # apply : only when `apply` is true, only after a required reviewer approves the
 #         `supabase-production` environment, and only if every plan check still
-#         holds on the same SHA. Uses `db push --linked` with no seed, roles,
-#         vault or include-all.
+#         holds on the same SHA. The bounded helper supports only the checksum-pinned
+#         Step 4a migration; linking, history and dry runs retain the official CLI.
 # probe : on pull requests touching this file, checks TCP reachability of the
 #         Supabase pooler from GitHub-hosted runners. Uses no secrets.
 name: Supabase production migrations
@@ -185,6 +185,13 @@ jobs:
             echo "- Run: \`${GITHUB_RUN_ID}\` attempt \`${GITHUB_RUN_ATTEMPT}\` by \`${GITHUB_ACTOR}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Verify bounded transaction on the migration connection (read only)
+        env:
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          MERGE_SHA: ${{ inputs.merge_sha }}
+          APPROVED: ${{ inputs.approved_migrations }}
+        run: node scripts/supabase-bounded-migration.mjs plan
+
   apply:
     if: github.event_name == 'workflow_dispatch' && inputs.apply
     needs: plan
@@ -236,9 +243,11 @@ jobs:
 
       - name: Apply approved migrations
         env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-        run: npx --yes "supabase@${SUPABASE_CLI_VERSION}" db push --linked --skip-vault --yes
+          MERGE_SHA: ${{ needs.plan.outputs.merge_sha }}
+          APPROVED: ${{ inputs.approved_migrations }}
+          SUPABASE_MIGRATION_APPLY: "true"
+        run: node scripts/supabase-bounded-migration.mjs apply
 
       - name: Verify nothing remains pending
         env:
