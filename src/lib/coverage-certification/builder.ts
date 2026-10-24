@@ -26,7 +26,11 @@ export type ProductCoverageEvidence = {
   }>;
   surfaces: Array<{
     surfaceId: string;
-    /** The latest evidence row for the surface (by `observed_at`, then `id`). */
+    /**
+     * The evidence row for the surface's current Production deployment
+     * (`deployment_surfaces.current_production_deployment_id`) and the surface's linked
+     * repository. Never the most recently observed row: one sync writes every deployment it sees.
+     */
     evidence: {
       id: string;
       repositoryId: string;
@@ -121,6 +125,60 @@ function rows<T>(result: { data: T[] | null; error: unknown }, what: string): T[
   return result.data;
 }
 
+type CurrentDeploymentEvidence = {
+  id: string;
+  repository_id: string;
+  verification_state: NonNullable<
+    ProductCoverageEvidence["surfaces"][number]["evidence"]
+  >["verificationState"];
+  verified_commit_sha: string | null;
+};
+
+/**
+ * The evidence for the surface's current Production deployment and the given repository, the
+ * same selection the issuing RPC makes; null when the surface has no current Production
+ * deployment or no evidence for it.
+ */
+async function readCurrentDeploymentEvidence(
+  client: SupabaseClient,
+  input: { workspaceId: string; productId: string; surfaceId: string; repositoryId: string },
+): Promise<CurrentDeploymentEvidence | null> {
+  const [surface] = rows<{ current_production_deployment_id: string | null }>(
+    await client
+      .from("deployment_surfaces")
+      .select("current_production_deployment_id")
+      .eq("workspace_id", input.workspaceId)
+      .eq("id", input.surfaceId)
+      .limit(1),
+    "deployment_surface",
+  );
+  if (!surface?.current_production_deployment_id) return null;
+  const [observation] = rows<{ id: string }>(
+    await client
+      .from("deployment_observations")
+      .select("id")
+      .eq("workspace_id", input.workspaceId)
+      .eq("deployment_surface_id", input.surfaceId)
+      .eq("external_deployment_id", surface.current_production_deployment_id)
+      .limit(1),
+    "deployment_observation",
+  );
+  if (!observation) return null;
+  const [evidence] = rows<CurrentDeploymentEvidence>(
+    await client
+      .from("product_deployment_evidence")
+      .select("id, repository_id, verification_state, verified_commit_sha")
+      .eq("workspace_id", input.workspaceId)
+      .eq("protected_product_id", input.productId)
+      .eq("deployment_surface_id", input.surfaceId)
+      .eq("deployment_observation_id", observation.id)
+      .eq("repository_id", input.repositoryId)
+      .limit(1),
+    "deployment_evidence",
+  );
+  return evidence ?? null;
+}
+
 /**
  * Reads the Product's evidence with a service-role client. Every query is scoped to the
  * workspace and Product; any read error aborts the build so a partial read is never certified.
@@ -202,35 +260,22 @@ export async function readProductCoverageEvidence(
     });
   }
 
-  const surfaceRows = rows<{ deployment_surface_id: string }>(
+  const surfaceRows = rows<{ deployment_surface_id: string; repository_id: string }>(
     await client
       .from("workspace_product_deployment_surfaces")
-      .select("deployment_surface_id")
+      .select("deployment_surface_id, repository_id")
       .eq("workspace_id", workspaceId)
       .eq("protected_product_id", productId),
     "surfaces",
   );
   const surfaces = [];
   for (const surface of surfaceRows) {
-    const [evidence] = rows<{
-      id: string;
-      repository_id: string;
-      verification_state: NonNullable<
-        ProductCoverageEvidence["surfaces"][number]["evidence"]
-      >["verificationState"];
-      verified_commit_sha: string | null;
-    }>(
-      await client
-        .from("product_deployment_evidence")
-        .select("id, repository_id, verification_state, verified_commit_sha")
-        .eq("workspace_id", workspaceId)
-        .eq("protected_product_id", productId)
-        .eq("deployment_surface_id", surface.deployment_surface_id)
-        .order("observed_at", { ascending: false })
-        .order("id", { ascending: false })
-        .limit(1),
-      "deployment_evidence",
-    );
+    const evidence = await readCurrentDeploymentEvidence(client, {
+      workspaceId,
+      productId,
+      surfaceId: surface.deployment_surface_id,
+      repositoryId: surface.repository_id,
+    });
     const [sync] = rows<{ status: "succeeded" | "failed"; completed_at: string }>(
       await client
         .from("deployment_sync_attempts")
