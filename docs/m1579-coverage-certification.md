@@ -106,10 +106,22 @@ applies scan freshness:
   (bounded JSON of IDs: source/scan IDs, analysis run ID plus commit, deployment
   evidence plus observation ID plus commit), `observed_at`, `expires_at`.
 
-Issuance happens only through `issue_product_coverage_certificate(product_id, ...)`
-(service role). It recomputes the components inside the transaction from current rows,
-so a caller cannot supply states, and returns the existing certificate when the
-fingerprint is unchanged (idempotent).
+Issuance happens only through `issue_product_coverage_certificate(...)` (service role).
+Component states are computed once, by the TypeScript evaluators
+(`src/lib/coverage-certification`), so the rules have a single implementation. The RPC is
+a guard over that output, inside one transaction:
+
+- it binds the stored components to the evaluator's fingerprint through the canonical
+  text;
+- it requires every current subject of the Product (monitored dependencies, active
+  repository mappings, deployment surfaces), so omitting a weak subject cannot
+  strengthen a claim;
+- it rejects any `complete` or `partial` component that claims more than the evidence it
+  references (fresh provider-mode sources, a completed analysis of that repository at
+  the stated commit, production-verified evidence with a fresh successful sync); runtime
+  signals must stay `unknown` in contract v1;
+- it derives dimension states, the overall state and the claim level itself, and returns
+  the existing certificate when the fingerprint is unchanged (idempotent).
 
 ## Exposure verification
 
@@ -180,8 +192,8 @@ inputs), and a property test asserts no generated claim exceeds its certificate.
 1. **Contracts and pure evaluators** (no DB): state lattice, per-dimension evaluators,
    freshness, exposure rules, claim generator, canonical fingerprint. Unit and property
    tests. Smallest reviewable core.
-2. **Certificate schema**: two tables, RLS, immutability, issuing RPC that recomputes
-   components from existing rows. PGlite tests.
+2. **Certificate schema**: two tables, RLS, immutability, and the guarded issuing RPC
+   described above. PGlite tests.
 3. **Certificate builder and read API**: server lib plus a scheduled and post-sync
    Trigger task issuing certificates; `GET /api/products/{id}/coverage-certificate`
    (member-authorized). No UI.
