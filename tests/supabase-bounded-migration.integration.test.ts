@@ -6,7 +6,7 @@ import path from "node:path";
 import pg from "pg";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { CANDIDATE, runMigration } from "../scripts/supabase-bounded-migration.mjs";
-import { fixturePlan } from "./helpers/bounded-migration-fixture";
+import { disposableDatabaseUrl, fixturePlan } from "./helpers/bounded-migration-fixture";
 
 const exec = promisify(execFile);
 async function officialCli(args: string[]) {
@@ -25,17 +25,8 @@ function cliFixtureRoot() {
   );
   return root;
 }
-const url = new URL(process.env.AUTERIM_MIGRATION_TEST_URL ?? "http://invalid");
 // This suite intentionally destroys fixture schemas. It can never target a hosted project.
-if (
-  url.protocol !== "postgresql:" ||
-  url.hostname !== "127.0.0.1" ||
-  url.port !== "55579" ||
-  url.username !== "postgres" ||
-  url.password !== "local-migration-tests" ||
-  url.pathname !== "/postgres"
-)
-  throw Error("disposable_local_migration_database_required");
+const url = disposableDatabaseUrl(process.env.AUTERIM_MIGRATION_TEST_URL);
 const { plan } = fixturePlan();
 let clients: pg.Client[] = [];
 async function connect(options?: string) {

@@ -1,5 +1,6 @@
 import { writeFileSync } from "node:fs";
 import path from "node:path";
+import pg from "pg";
 import { describe, expect, it } from "vitest";
 import {
   CANDIDATE,
@@ -8,9 +9,32 @@ import {
   runMigration,
 } from "../scripts/supabase-bounded-migration.mjs";
 
-import { fixturePlan } from "./helpers/bounded-migration-fixture";
+import { disposableDatabaseUrl, fixturePlan } from "./helpers/bounded-migration-fixture";
 
 describe("bounded migration identity", () => {
+  it("rejects disposable-test URL overrides before any connection or destructive fixture", () => {
+    const local = "postgresql://postgres:local-migration-tests@127.0.0.1:55579/postgres";
+    expect(disposableDatabaseUrl(local).toString()).toBe(local);
+    // The driver's query parameters take precedence over URL authority fields.
+    const overridden = new pg.Client({ connectionString: local + "?host=example.invalid" });
+    const parameters = (overridden as pg.Client & { connectionParameters: { host: string } })
+      .connectionParameters;
+    expect(parameters.host).toBe("example.invalid");
+    for (const suffix of [
+      "?host=example.invalid",
+      "?port=5432",
+      "?password=override",
+      "?options=x",
+      "#unexpected",
+    ])
+      expect(() => disposableDatabaseUrl(local + suffix)).toThrow(/disposable_local/);
+    for (const target of [
+      undefined,
+      local.replace("127.0.0.1", "example.invalid"),
+      local.replace(":55579", ":5432"),
+    ])
+      expect(() => disposableDatabaseUrl(target)).toThrow(/disposable_local/);
+  });
   it("accepts only exact reviewed bytes and the single approved migration", () => {
     const { dir, plan } = fixturePlan();
     expect(plan.repository.size).toBe(88);
