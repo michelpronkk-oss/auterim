@@ -30,6 +30,74 @@ function table(rows: Array<[string, string]>) {
   ].join("\n");
 }
 
+/** Byte-exact stdout of Supabase CLI 2.122.0 in a CI environment (non-TTY, agent mode off). */
+const cliFixture = (name: string) =>
+  readFileSync(new URL(`./fixtures/supabase-cli-2.122.0/${name}`, import.meta.url), "utf8");
+
+describe("supabase migration gate against real CLI 2.122.0 output", () => {
+  const repository = new Set(["20261224000000", "20261225000000", RECOVERY]);
+  const recoveryFile = `${RECOVERY}_m1578r_fresh_v4_verification_recovery.sql`;
+
+  it("parses code-span table cells and accepts exactly the approved pending migration", () => {
+    const output = cliFixture("migration-list-pending.txt");
+    expect(output).toContain("`20261224000000` | `20261224000000`");
+    const parsed = parseMigrationList(output);
+    expect([...parsed.local].sort()).toEqual([...repository].sort());
+    expect([...parsed.remote].sort()).toEqual(["20261224000000", "20261225000000"]);
+    expect(checkHistory({ ...parsed, repository, expected: new Set([RECOVERY]) })).toEqual({
+      pending: [RECOVERY],
+      appliedCount: 2,
+      latestApplied: "20261225000000",
+    });
+  });
+
+  it("still rejects a remote-only migration rendered with an empty local cell", () => {
+    const parsed = parseMigrationList(cliFixture("migration-list-remote-only.txt"));
+    expect(parsed.remote.has("20261224500000")).toBe(true);
+    expect(parsed.local.has("20261224500000")).toBe(false);
+    expect(() => checkHistory({ ...parsed, repository, expected: new Set([RECOVERY]) })).toThrow(
+      /remote_only_migrations:20261224500000/,
+    );
+  });
+
+  it("reports nothing pending once applied", () => {
+    const parsed = parseMigrationList(cliFixture("migration-list-applied.txt"));
+    expect(checkHistory({ ...parsed, repository, expected: new Set() }).pending).toEqual([]);
+    expect(() => checkHistory({ ...parsed, repository, expected: new Set([RECOVERY]) })).toThrow(
+      /pending_mismatch/,
+    );
+  });
+
+  it("parses the real dry-run outputs", () => {
+    expect(parseDryRun(cliFixture("db-push-dry-run-pending.txt"))).toEqual([recoveryFile]);
+    expect(parseDryRun(cliFixture("db-push-dry-run-up-to-date.txt"))).toEqual([]);
+  });
+
+  it("fails closed on the real connection-failure output", () => {
+    expect(() => parseDryRun(cliFixture("db-push-dry-run-connect-error.txt"))).toThrow(
+      /dry_run_unparsed/,
+    );
+  });
+
+  it("keeps cell validation strict after unwrapping", () => {
+    const row = (local: string, remote: string) =>
+      `   Local | Remote | Time\n   ${local} | ${remote} | \`2026-12-26 00:00:00\`\n`;
+    expect(() => parseMigrationList(row("`20261224000000`", "`2026122400000`"))).toThrow(
+      /migration_list_row_invalid/,
+    );
+    expect(() => parseMigrationList(row("`20261224000000`", "``20261224000000``"))).toThrow(
+      /migration_list_row_invalid/,
+    );
+    expect(() => parseMigrationList(row("`20261224000000`", "`x`"))).toThrow(
+      /migration_list_row_invalid/,
+    );
+    expect(() => parseMigrationList(row("` `", "` `"))).toThrow(/migration_list_unparsed/);
+    expect(() =>
+      parseMigrationList('{"migrations":[{"local":"20261224000000","remote":"20261224000000"}]}'),
+    ).toThrow(/migration_list_unparsed/);
+  });
+});
+
 describe("supabase migration gate", () => {
   const repository = new Set(["20261224000000", "20261225000000", RECOVERY]);
 

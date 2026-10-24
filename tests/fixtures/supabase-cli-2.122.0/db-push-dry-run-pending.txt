@@ -1,0 +1,5 @@
+DRY RUN: migrations will *not* be pushed to the database.
+Connecting to remote database...
+Would push these migrations:
+ • 20261226000000_m1578r_fresh_v4_verification_recovery.sql
+Finished supabase db push.

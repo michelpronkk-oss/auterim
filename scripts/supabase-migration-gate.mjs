@@ -11,13 +11,23 @@ export const EXPECTED_PROJECT_REF = "lnljaacbptrubppoypaz";
 const VERSION = /^\d{14}$/;
 const MIGRATION_FILE = /^(\d{14})_[a-z0-9_]+\.sql$/;
 
+/**
+ * CLI 2.x renders each table cell as a Markdown code span: `20261224000000`, and an
+ * empty cell as ` `. Unwrap exactly one span; validation below stays unchanged.
+ */
+function tableCell(cell) {
+  const trimmed = cell.trim();
+  const span = /^`([^`]*)`$/.exec(trimmed);
+  return (span ? span[1] : trimmed).trim();
+}
+
 /** Parses `supabase migration list` table output into local and remote version sets. */
 export function parseMigrationList(output) {
   const local = new Set();
   const remote = new Set();
   let rows = 0;
   for (const line of output.split(/\r?\n/)) {
-    const cells = line.split("|").map((cell) => cell.trim());
+    const cells = line.split("|").map(tableCell);
     if (cells.length < 3) continue;
     const [localCell, remoteCell] = cells;
     if (!VERSION.test(localCell) && !VERSION.test(remoteCell)) continue;
