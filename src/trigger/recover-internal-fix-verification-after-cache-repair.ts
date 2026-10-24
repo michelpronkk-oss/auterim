@@ -42,7 +42,7 @@ const EXPECTED_CACHE_PUBLIC_KEY_FINGERPRINT =
 const G3_AUTHORIZATION_REFERENCE =
   "M15.78R user-authorized generation 3 after diagnostic readback preparation" as const;
 
-async function attestExpectedRunner(baseUrl: string, authSecret: string) {
+export async function attestExpectedRunner(baseUrl: string, authSecret: string) {
   try {
     const url = new URL(baseUrl);
     if (
@@ -79,7 +79,7 @@ async function attestExpectedRunner(baseUrl: string, authSecret: string) {
   }
 }
 
-async function verificationRunnerProtocolMatches(baseUrl: string) {
+export async function verificationRunnerProtocolMatches(baseUrl: string) {
   try {
     const origin = new URL(baseUrl);
     if (origin.protocol !== "https:") return false;
@@ -111,7 +111,7 @@ async function verificationRunnerProtocolMatches(baseUrl: string) {
   }
 }
 
-function isExpectedRunnerEndpoint(baseUrl: string) {
+export function isExpectedRunnerEndpoint(baseUrl: string) {
   try {
     const url = new URL(baseUrl);
     return (
