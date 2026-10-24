@@ -18,6 +18,8 @@ import {
   weakestState,
 } from "@/lib/coverage-certification/evaluate";
 import { certificateIssueArguments } from "@/lib/coverage-certification/issue";
+import { issueProductCoverageCertificate } from "@/lib/coverage-certification/builder";
+import { readProductCoverageCertificate } from "@/lib/coverage-certification/read";
 
 const migrationsDirectory = fileURLToPath(new URL("../supabase/migrations/", import.meta.url));
 
@@ -207,6 +209,91 @@ async function issue(
 
 const asServiceRole = (db: PGliteInterface) =>
   db.query("select set_config('request.jwt.claim.role', 'service_role', false)");
+
+/**
+ * The subset of the Supabase query builder the certificate builder and reader use, executed
+ * as SQL against PGlite, so they run against the real schema, guard and RLS.
+ */
+function pgliteClient(db: PGliteInterface) {
+  const ident = (name: string) => {
+    if (!/^[a-z_]+$/.test(name)) throw new Error(`unexpected identifier ${name}`);
+    return name;
+  };
+  return {
+    from(table: string) {
+      let columns = "*";
+      const where: string[] = [];
+      const params: unknown[] = [];
+      const order: string[] = [];
+      let limit = "";
+      const param = (value: unknown) => `$${params.push(value)}`;
+      const run = async () => {
+        try {
+          const sql = `select ${columns} from public.${ident(table)}${where.length ? ` where ${where.join(" and ")}` : ""}${order.length ? ` order by ${order.join(", ")}` : ""}${limit}`;
+          return { data: (await db.query(sql, params)).rows, error: null };
+        } catch (error) {
+          return { data: null, error };
+        }
+      };
+      const query = {
+        select(list: string) {
+          columns = list
+            .split(",")
+            .map((c) => ident(c.trim()))
+            .join(", ");
+          return query;
+        },
+        eq(column: string, value: unknown) {
+          where.push(`${ident(column)} = ${param(value)}`);
+          return query;
+        },
+        in(column: string, values: unknown[]) {
+          where.push(`${ident(column)} = any(${param(values)})`);
+          return query;
+        },
+        not(column: string, operator: string, value: unknown) {
+          if (operator !== "is" || value !== null) throw new Error("unsupported not()");
+          where.push(`${ident(column)} is not null`);
+          return query;
+        },
+        or(filter: string) {
+          const match = /^([a-z_]+)\.is\.null,\1\.eq\.([0-9a-f-]{36})$/.exec(filter);
+          if (!match) throw new Error(`unsupported or(${filter})`);
+          where.push(`(${match[1]} is null or ${match[1]} = ${param(match[2])})`);
+          return query;
+        },
+        order(column: string, options: { ascending?: boolean } = {}) {
+          order.push(`${ident(column)} ${options.ascending === false ? "desc" : "asc"}`);
+          return query;
+        },
+        limit(n: number) {
+          limit = ` limit ${Number(n)}`;
+          return query;
+        },
+        async maybeSingle() {
+          const result = await run();
+          return result.error ? result : { data: result.data![0] ?? null, error: null };
+        },
+        then(resolve: (value: unknown) => void, reject: (reason: unknown) => void) {
+          return run().then(resolve, reject);
+        },
+      };
+      return query;
+    },
+    async rpc(name: string, args: Record<string, unknown>) {
+      const names = Object.keys(args);
+      try {
+        const result = await db.query<{ value: unknown }>(
+          `select public.${ident(name)}(${names.map((n, i) => `${ident(n)} => $${i + 1}`).join(", ")}) as value`,
+          names.map((n) => (typeof args[n] === "object" ? JSON.stringify(args[n]) : args[n])),
+        );
+        return { data: result.rows[0]!.value, error: null };
+      } catch (error) {
+        return { data: null, error };
+      }
+    },
+  };
+}
 
 describe("M15.79 coverage certificates (database)", { timeout: 60_000 }, () => {
   let migrated: PGlite;
@@ -488,6 +575,77 @@ describe("M15.79 coverage certificates (database)", { timeout: 60_000 }, () => {
     expect(await issue(db, honest)).toMatchObject({
       status: "issued",
       claimLevel: "partial_protection",
+    });
+  });
+
+  it("issues from stored evidence with the builder and serves a claim no stronger than it", async () => {
+    const { db } = await fresh();
+    const client = pgliteClient(db) as never;
+    const first = await issueProductCoverageCertificate(client, {
+      workspaceId: WORKSPACE,
+      productId: PRODUCT,
+    });
+    expect(first.result).toMatchObject({
+      status: "issued",
+      claimLevel: "deployment_verified_protection",
+    });
+    expect(
+      (
+        await issueProductCoverageCertificate(client, {
+          workspaceId: WORKSPACE,
+          productId: PRODUCT,
+        })
+      ).result.status,
+    ).toBe("unchanged");
+
+    // Production now runs another commit: the analysis no longer counts, and the guard
+    // accepts the weaker certificate the builder produces.
+    await db.exec("set session_replication_role = replica");
+    await db.exec(
+      `insert into public.product_deployment_evidence(id, workspace_id, protected_product_id, deployment_surface_id,
+        deployment_observation_id, repository_id, verification_state, verified_commit_sha, observed_at)
+       values ('${NEWER_EVIDENCE}', '${WORKSPACE}', '${PRODUCT}', '${SURFACE}', '${NEWER_OBSERVATION}',
+        '${REPOSITORY}', 'production_verified', '${OLD_COMMIT}', now() + interval '1 minute')`,
+    );
+    await db.exec("set session_replication_role = origin");
+    const moved = await issueProductCoverageCertificate(client, {
+      workspaceId: WORKSPACE,
+      productId: PRODUCT,
+    });
+    expect(moved.result).toMatchObject({ status: "issued", sequence: 2, claimLevel: "unverified" });
+
+    // A stale sync: deployment evidence no longer counts either.
+    await db.exec("set session_replication_role = replica");
+    await db.exec(
+      "update public.deployment_sync_attempts set completed_at = now() - interval '2 days'",
+    );
+    await db.exec("set session_replication_role = origin");
+    const stale = await issueProductCoverageCertificate(client, {
+      workspaceId: WORKSPACE,
+      productId: PRODUCT,
+    });
+    expect(stale.certificate.dimensions.deployment_exposure).toBe("unknown");
+
+    // Members read the latest certificate through RLS; outsiders read nothing.
+    const readAs = async (user: string) => {
+      await db.query("select set_config('request.jwt.claim.sub', $1, false)", [user]);
+      await db.exec("set role authenticated");
+      try {
+        return await readProductCoverageCertificate(client, {
+          workspaceId: WORKSPACE,
+          productId: PRODUCT,
+        });
+      } finally {
+        await db.exec("reset role");
+      }
+    };
+    const member = await readAs(OWNER);
+    expect(member.certificate).toMatchObject({ sequence: 3 });
+    expect(member.claim.level).toBe("unverified");
+    expect(member.certificate!.components).toHaveLength(stale.certificate.components.length);
+    expect(await readAs(OUTSIDER)).toEqual({
+      claim: { level: "unverified", text: "Protection not currently verified." },
+      certificate: null,
     });
   });
 
