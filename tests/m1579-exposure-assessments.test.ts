@@ -499,6 +499,98 @@ describe("M15.79 Production exposure assessments (database)", { timeout: 120_000
     await db.exec("reset role");
   });
 
+  it.each(["proven", "disproven"] as const)(
+    "rejects missing or contradictory structural evidence in owner-inserted %s rows",
+    async (state) => {
+      const db = await fresh();
+      const row = {
+        id: uuid(90),
+        workspace_id: WORKSPACE,
+        graph_build_id: GRAPH,
+        source_change_id: uuid(2),
+        product_id: PRODUCT,
+        repository_id: REPOSITORY,
+        analysis_commit_sha: COMMIT,
+        deployment_surface_id: SURFACE,
+        product_deployment_evidence_id: EVIDENCE,
+        deployment_sync_attempt_id: SYNC,
+        deployed_commit_sha: COMMIT,
+        exposure_state: state,
+        reason:
+          state === "proven"
+            ? "deployed_commit_contains_impacted_code"
+            : "complete_negative_analysis_at_deployed_commit",
+        contract_version: "exposure-v1",
+        sequence: 1,
+        supersedes_assessment_id: null,
+        assessed_at: new Date().toISOString(),
+        valid_until: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      };
+      // This connection owns the table: no issuing RPC or RLS can mask a CHECK bypass.
+      const insert = (changes: Record<string, unknown>) =>
+        db.query(
+          `insert into public.impact_exposure_assessments
+           select (jsonb_populate_record(null::public.impact_exposure_assessments, $1::jsonb)).*`,
+          [JSON.stringify({ ...row, ...changes })],
+        );
+      const invalid: Array<[Record<string, unknown>, RegExp]> = [
+        // Before the fix this evaluates to NULL, which PostgreSQL CHECK accepts.
+        [{ deployed_commit_sha: null }, /impact_exposure_definite_evidence/],
+        [{ deployed_commit_sha: OTHER_COMMIT }, /impact_exposure_definite_evidence/],
+        [{ product_deployment_evidence_id: null }, /impact_exposure_definite_evidence/],
+        [{ deployment_sync_attempt_id: null }, /impact_exposure_definite_evidence/],
+        [{ valid_until: null }, /impact_exposure_definite_evidence/],
+        [{ reason: "graph_evidence_incomplete" }, /impact_exposure_state_reason/],
+        [
+          { exposure_state: "unknown" },
+          /impact_exposure_state_reason|impact_exposure_unknown_no_expiry/,
+        ],
+        [{ sequence: 2 }, /impact_exposure_supersedes_order/],
+        [{ supersedes_assessment_id: uuid(91) }, /impact_exposure_supersedes_order/],
+      ];
+      for (const column of [
+        "exposure_state",
+        "reason",
+        "contract_version",
+        "sequence",
+        "analysis_commit_sha",
+      ])
+        invalid.push([{ [column]: null }, /not-null constraint/]);
+      for (const [changes, error] of invalid)
+        await expect(insert(changes), JSON.stringify({ state, changes })).rejects.toThrow(error);
+      expect(
+        (await db.query("select * from public.impact_exposure_assessments")).rows,
+      ).toHaveLength(0);
+      // Case-insensitive matching commits remain structurally valid.
+      await insert({ deployed_commit_sha: COMMIT.toUpperCase() });
+      expect(
+        (await db.query("select * from public.impact_exposure_assessments")).rows,
+      ).toHaveLength(1);
+      await db.close();
+    },
+  );
+
+  it("allows absent evidence only for unknown rows without an expiry", async () => {
+    const db = await fresh();
+    const insert = (expiry: string | null) =>
+      db.query(
+        `insert into public.impact_exposure_assessments(workspace_id, graph_build_id, source_change_id,
+          product_id, repository_id, analysis_commit_sha, deployment_surface_id, exposure_state,
+          reason, contract_version, sequence, valid_until)
+         values ($1, $2, $3, $4, $5, $6, $7, 'unknown', 'deployment_not_production_verified',
+          'exposure-v1', 1, $8)`,
+        [WORKSPACE, GRAPH, uuid(2), PRODUCT, REPOSITORY, COMMIT, SURFACE, expiry],
+      );
+    await expect(insert(new Date().toISOString())).rejects.toThrow(
+      /impact_exposure_unknown_no_expiry/,
+    );
+    await insert(null);
+    expect(
+      (await db.query("select exposure_state from public.impact_exposure_assessments")).rows,
+    ).toEqual([{ exposure_state: "unknown" }]);
+    await db.close();
+  });
+
   it("computes the same outcome in SQL and TypeScript for every input combination", async () => {
     const db = await migrated.clone();
     const now = new Date("2026-10-24T12:00:00.000Z");

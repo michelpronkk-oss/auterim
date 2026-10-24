@@ -75,9 +75,12 @@ create table public.impact_exposure_assessments (
       'deployment_not_production_verified','analysis_commit_not_deployed','graph_evidence_incomplete'))
   ),
   -- A definite state always names its evidence, the analysed commit and an expiry.
+  -- Explicitly reject a NULL deployed commit: equality alone evaluates to NULL, which
+  -- PostgreSQL CHECK accepts. The issuing RPC also recomputes the semantic outcome.
   constraint impact_exposure_definite_evidence check (
     exposure_state = 'unknown'
     or (product_deployment_evidence_id is not null and deployment_sync_attempt_id is not null
+        and deployed_commit_sha is not null
         and lower(deployed_commit_sha) = analysis_commit_sha and valid_until is not null)
   ),
   constraint impact_exposure_unknown_no_expiry check (exposure_state <> 'unknown' or valid_until is null)
