@@ -646,6 +646,14 @@ class PGliteMonitoringRepository implements MonitoringRepository {
 }
 
 describe("Auterim migration and monitoring transaction", () => {
+  // Two tests use non-default migration variants. Build those templates once here, under an
+  // explicit hook timeout, so the tests clone warm templates instead of running the full
+  // migration chain inside a 5s test body.
+  beforeAll(async () => {
+    for (const db of await Promise.all([makeDatabase(false), makeDatabase(true, false)]))
+      await db.close();
+  }, 120_000);
+
   it("accepts one-time onboarding Growth events and keeps their keys opaque and idempotent", async () => {
     const db = await makeDatabase();
     const events = [

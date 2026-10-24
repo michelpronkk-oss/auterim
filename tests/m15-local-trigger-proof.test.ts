@@ -143,7 +143,12 @@ describe("M15 local pre-claim acceptance gate", () => {
     vi.spyOn(process, "cwd").mockReturnValue("C:\\Users\\miche\\Desktop\\Auterim");
   });
 
-  it("waits for the matching local release signal and stays unavailable outside acceptance", async () => {
+  // The pre-claim gate is pinned to the owner's Windows checkout (path.win32 root match) and
+  // is inert by design elsewhere, so its release-signal behaviour only exists on Windows.
+  const onWindows = it.runIf(process.platform === "win32");
+  const releaseSignalTest =
+    "waits for the matching local release signal and stays unavailable outside acceptance";
+  onWindows(releaseSignalTest, async () => {
     const queueId = randomUUID();
     const root = path.join(process.cwd(), "node_modules", ".cache", "m15-local", "preclaim-gates");
     const hold = path.join(root, `prepare-remediation-${queueId}.hold`);
