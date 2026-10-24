@@ -38,6 +38,11 @@ concurrency:
   group: supabase-production-migrations
   cancel-in-progress: false
 
+# Explicit bash runs with -eo pipefail, so a failing gate piped through tee fails the step.
+defaults:
+  run:
+    shell: bash
+
 env:
   SUPABASE_PROJECT_REF: lnljaacbptrubppoypaz
   SUPABASE_CLI_VERSION: 2.122.0
@@ -67,8 +72,8 @@ jobs:
             done
           done
           for host in "db.${SUPABASE_PROJECT_REF}.supabase.co"; do
-            a=$(getent ahostsv4 "$host" | head -1 | awk '{print $1}')
-            aaaa=$(getent ahostsv6 "$host" | head -1 | awk '{print $1}')
+            a=$(getent ahostsv4 "$host" | head -1 | awk '{print $1}' || true)
+            aaaa=$(getent ahostsv6 "$host" | head -1 | awk '{print $1}' || true)
             echo "direct host IPv4=${a:-none} IPv6=${aaaa:-none}"
             echo "| $host (direct) | DNS | IPv4=${a:-none}, IPv6=${aaaa:-none} |" >> "$GITHUB_STEP_SUMMARY"
           done
@@ -109,7 +114,7 @@ jobs:
           echo "supabase-production protection rules: ${rules:-none}"
           [[ ",$rules," == *",required_reviewers,"* ]] || { echo "supabase-production must require reviewers before apply" >&2; exit 1; }
 
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ inputs.merge_sha }}
           fetch-depth: 0
@@ -125,7 +130,7 @@ jobs:
           # project:check requires the canonical remote spelling.
           git remote set-url origin https://github.com/michelpronkk-oss/auterim.git
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -187,7 +192,7 @@ jobs:
     timeout-minutes: 20
     environment: supabase-production
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ needs.plan.outputs.merge_sha }}
           fetch-depth: 0
@@ -202,7 +207,7 @@ jobs:
           git merge-base --is-ancestor "$MERGE_SHA" origin/main
           git remote set-url origin https://github.com/michelpronkk-oss/auterim.git
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm

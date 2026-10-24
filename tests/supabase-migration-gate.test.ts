@@ -124,6 +124,20 @@ describe("supabase production migration workflow", () => {
     expect(workflow).toContain("git merge-base --is-ancestor");
   });
 
+  it("fails steps on any pipeline failure and pins actions to node24 release commits", () => {
+    // GitHub's implicit shell is `bash -e` without pipefail; `shell: bash` adds -o pipefail.
+    expect(workflow).toMatch(/^defaults:\n {2}run:\n {4}shell: bash$/m);
+    const uses = executableLines.filter((line) => line.includes("uses:"));
+    expect(uses.length).toBeGreaterThan(0);
+    for (const line of uses) expect(line).toMatch(/@[0-9a-f]{40} # v\d+\.\d+\.\d+$/);
+    expect(workflow).toContain(
+      "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0",
+    );
+    expect(workflow).toContain(
+      "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0",
+    );
+  });
+
   it("never pushes seeds, roles, vault or unlisted history", () => {
     for (const line of executableLines.filter((value) => value.includes("db push"))) {
       expect(line).not.toMatch(/--include-(all|seed|roles)|--db-url/);
