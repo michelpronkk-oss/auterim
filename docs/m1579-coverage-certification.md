@@ -82,6 +82,17 @@ Each subject has a deterministic state from a pure evaluator with explicit `reas
 codes (for example `no_successful_scan`, `analysis_commit_behind_head`,
 `lockfile_unsupported`, `sync_stale`, `alias_ambiguous`).
 
+`dependency_sources` maps the existing catalog labels (provider catalog: three or more
+distinct enabled source types is _strong_, one or two _partial_, none _pending_) and then
+applies scan freshness:
+
+| Catalog label                     | Every enabled source has a successful scan within 48 h | Otherwise                                       |
+| --------------------------------- | ------------------------------------------------------ | ----------------------------------------------- |
+| strong                            | `complete`                                             | `unknown` (`no_successful_scan` / `scan_stale`) |
+| partial                           | `partial`                                              | `unknown`                                       |
+| pending (no sources)              | `unsupported` (`no_configured_sources`)                | `unsupported`                                   |
+| unknown (incomplete catalog read) | `unknown`                                              | `unknown`                                       |
+
 ### Tables (append-only)
 
 - `product_coverage_certificates`: `id`, `workspace_id`, `product_id`,
@@ -186,13 +197,21 @@ optional `runtime_signals` dimension or notifications.
 
 ### Smallest end-to-end certified path
 
-Internal QA Product `de1f2a12…` with repository `auterim-m15-github-qa`, one Vercel
-project deploying that repository, and its confirmed OpenAI dependency: sync the
-deployment (production_verified at the fixture commit), analyse at that commit, issue a
-certificate, assess exposure for the M15.78R graph build `382d7644…` (expected `proven`
-when the deployed commit equals `94135df6…`), and render the claim. OpenAI's source
-coverage is expected to be `partial`, so the expected claim level is
-`partial_protection`, which demonstrates the honesty rule rather than hiding it.
+Internal QA Product `de1f2a12…` with repository `auterim-m15-github-qa` and its
+confirmed OpenAI dependency. OpenAI has three enabled source types (pricing,
+changelog, deprecation), so it is _strong_ and maps to `complete` when every source has
+a successful scan within 48 h.
+
+**Prerequisite (not yet in place):** no Vercel project currently deploys the QA
+repository. One must be created, connected through the Vercel connector and selected for
+the QA Product before the deployment dimension can be anything but `unknown`.
+
+Path: sync the deployment (production_verified at the fixture commit), analyse at that
+commit, issue a certificate, assess exposure for the M15.78R graph build `382d7644…`
+(expected `proven` when the deployed commit equals `94135df6…`), and render the claim.
+Expected claim level: `deployment_verified_protection` when the Vercel prerequisite is
+met and all inputs are fresh; `code_verified_protection` before it is met. Either
+outcome is a valid acceptance result as long as it matches the evidence.
 
 ## Acceptance criteria
 
