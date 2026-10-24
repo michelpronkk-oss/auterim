@@ -14,6 +14,16 @@ function readProjectFile(path: string) {
   }
 }
 
+function readOptionalProjectFile(path: string) {
+  try {
+    return readFileSync(resolve(root, path), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    errors.push(`${path} is unreadable`);
+    return "";
+  }
+}
+
 function parseKeyValues(contents: string) {
   return Object.fromEntries(
     contents.split(/\r?\n/).flatMap((line) => {
@@ -42,8 +52,15 @@ function readOrigin(config: string) {
 
 const identity = parseKeyValues(readProjectFile(".project-identity"));
 const packageJson = JSON.parse(readProjectFile("package.json")) as { name?: string };
-const environmentText = readProjectFile(".env.local");
-const localEnvironment = parseKeyValues(environmentText);
+// Cloud sessions provide configuration as process environment variables instead of
+// .env.local; values in .env.local take precedence when the file exists.
+const environmentFile = readOptionalProjectFile(".env.local");
+const environmentSource = environmentFile === undefined ? "process environment" : ".env.local";
+const localEnvironment = { ...process.env, ...parseKeyValues(environmentFile ?? "") };
+const environmentText = Object.entries(localEnvironment)
+  .filter(([key]) => /SUPABASE|TRIGGER|VERCEL/.test(key))
+  .map(([key, value]) => `${key}=${value ?? ""}`)
+  .join("\n");
 const triggerConfig = readProjectFile("trigger.config.ts");
 const gitConfig = readProjectFile(".git/config");
 
@@ -75,7 +92,7 @@ try {
   const environment = parseEnvironment(localEnvironment);
   const supabaseUrl = environment.NEXT_PUBLIC_SUPABASE_URL;
   if (!supabaseUrl || !environment.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY) {
-    errors.push("Auterim Supabase URL or publishable key is not configured in .env.local");
+    errors.push(`Auterim Supabase URL or publishable key is not configured in ${environmentSource}`);
   } else {
     const parsedUrl = new URL(supabaseUrl);
     const suffix = ".supabase.co";
@@ -88,11 +105,11 @@ try {
       }
     }
     if (!(environment.SUPABASE_SECRET_KEY || environment.SUPABASE_SERVICE_ROLE_KEY)) {
-      errors.push("server-only Supabase secret is not configured in .env.local");
+      errors.push(`server-only Supabase secret is not configured in ${environmentSource}`);
     }
   }
 } catch {
-  errors.push("Auterim .env.local failed environment validation");
+  errors.push(`Auterim ${environmentSource} failed environment validation`);
 }
 
 const triggerProject = triggerConfig.match(/^\s*project\s*:\s*["'](proj_[a-z0-9]{20})["']/m)?.[1];
@@ -136,6 +153,7 @@ if (errors.length > 0) {
   console.log("Project: Auterim");
   console.log("GitHub: michelpronkk-oss/auterim");
   console.log(`Supabase project ref: ${supabaseRef}`);
+  console.log(`Environment source: ${environmentSource}`);
   console.log(`Trigger project: ${triggerProject}`);
   console.log("Vercel: not configured locally; no deployment check required");
   console.log("No secret values were printed. No remote requests were made.");
