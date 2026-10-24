@@ -152,11 +152,12 @@ analysed commit is what runs in Production. No other combination produces a nega
 | Claim level                      | Requires                                                                     | Example wording                                                                                   |
 | -------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `deployment_verified_protection` | every required dimension `complete`, a production-verified deployment, fresh | "Protected: monitored dependencies, code analysed at the commit running in Production."           |
-| `code_verified_protection`       | sources and code `complete`; deployment `unknown` or `partial`               | "Protected at commit abc123; Production deployment not verified."                                 |
+| `code_verified_protection`       | sources and code `complete`; deployment not `complete`                       | "Protected at commit abc123; Production deployment not verified."                                 |
 | `partial_protection`             | any required dimension `partial` or `unsupported`                            | "Partially protected: 3 of 5 dependencies have monitored sources; pnpm repository not supported." |
-| `unverified`                     | any required dimension `unknown`, or certificate expired                     | "Protection not currently verified."                                                              |
+| `unverified`                     | sources or code `unknown`, or certificate expired                            | "Protection not currently verified."                                                              |
 
-Required dimensions are `dependency_sources`, `repository_code` and
+Unknown deployment evidence caps the claim at code-verified rather than hiding code
+and source coverage that exists. Required dimensions are `dependency_sources`, `repository_code` and
 `deployment_exposure`; `runtime_signals` is optional and only adds a "runtime-verified"
 qualifier when present. A claim never states "no impact" unless the specific finding
 has `disproven` exposure. The claim generator takes only the certificate (no other
