@@ -235,6 +235,12 @@ begin
           or v_expires_at is null or v_expires_at > v_oldest_success + interval '48 hours' then
           raise exception 'coverage_certificate_claim_exceeds_evidence' using errcode = '42501';
         end if;
+      elsif v_state = 'unsupported' and exists (
+          select 1 from public.source_catalog s
+          where s.dependency_id = v_dependency.dependency_id and s.enabled
+            and s.source_mode = 'provider') then
+        -- 'unsupported' ranks above 'unknown'; it must not hide sources that exist.
+        raise exception 'coverage_certificate_claim_exceeds_evidence' using errcode = '42501';
       end if;
     elsif v_dimension = 'repository_code' then
       if not exists (select 1 from public.workspace_product_repositories m
@@ -242,7 +248,7 @@ begin
                        and m.repository_id::text = v_subject_id and m.status = 'active') then
         raise exception 'coverage_certificate_subject_invalid' using errcode = '42501';
       end if;
-      if v_state in ('complete','partial') then
+      if v_state in ('complete','partial','unsupported') then
         v_ref := (select r from jsonb_array_elements(v_component->'evidenceRefs') r
                   where r->>'kind' = 'code_analysis_run' limit 1);
         select * into v_analysis from public.code_analysis_runs a
@@ -252,7 +258,25 @@ begin
         if not found or v_analysis.status <> 'completed'
           or v_analysis.commit_sha is distinct from v_ref->>'commitSha'
           or (v_state = 'complete' and v_analysis.coverage_state <> 'complete')
-          or (v_state = 'partial' and v_analysis.coverage_state not in ('complete','partial')) then
+          or (v_state = 'partial' and v_analysis.coverage_state not in ('complete','partial'))
+          or (v_state = 'unsupported' and v_analysis.coverage_state <> 'unsupported') then
+          raise exception 'coverage_certificate_claim_exceeds_evidence' using errcode = '42501';
+        end if;
+        -- Code evidence counts only at the commit running in Production when that is verified.
+        -- The repository head commit is not stored in the database; that binding stays in
+        -- evaluateRepositoryCode().
+        if v_state in ('complete','partial') and exists (
+            select 1 from public.workspace_product_deployment_surfaces l
+            cross join lateral (
+              select e.repository_id, e.verification_state, e.verified_commit_sha
+              from public.product_deployment_evidence e
+              where e.workspace_id = p_workspace_id and e.protected_product_id = p_product_id
+                and e.deployment_surface_id = l.deployment_surface_id
+              order by e.observed_at desc, e.id desc limit 1) current_evidence
+            where l.workspace_id = p_workspace_id and l.protected_product_id = p_product_id
+              and current_evidence.repository_id::text = v_subject_id
+              and current_evidence.verification_state = 'production_verified'
+              and lower(current_evidence.verified_commit_sha) is distinct from lower(v_analysis.commit_sha)) then
           raise exception 'coverage_certificate_claim_exceeds_evidence' using errcode = '42501';
         end if;
       end if;
@@ -265,9 +289,14 @@ begin
       if v_state in ('complete','partial') then
         v_ref := (select r from jsonb_array_elements(v_component->'evidenceRefs') r
                   where r->>'kind' = 'product_deployment_evidence' limit 1);
+        -- Only the latest evidence for the surface describes what runs now.
         select * into v_evidence from public.product_deployment_evidence e
-        where v_ref is not null and e.id::text = v_ref->>'id' and e.workspace_id = p_workspace_id
-          and e.protected_product_id = p_product_id and e.deployment_surface_id::text = v_subject_id;
+        where e.workspace_id = p_workspace_id and e.protected_product_id = p_product_id
+          and e.deployment_surface_id::text = v_subject_id
+        order by e.observed_at desc, e.id desc limit 1;
+        if v_ref is null or v_evidence.id::text is distinct from v_ref->>'id' then
+          v_evidence := null;
+        end if;
         select a.completed_at into v_sync_completed from public.deployment_sync_attempts a
         where a.workspace_id = p_workspace_id and a.deployment_surface_id::text = v_subject_id
           and a.status in ('succeeded','failed') and a.completed_at is not null
@@ -278,12 +307,16 @@ begin
                          where a.workspace_id = p_workspace_id and a.deployment_surface_id::text = v_subject_id
                            and a.status = 'succeeded' and a.completed_at = v_sync_completed)
           or v_sync_completed < now() - interval '24 hours'
-          or (v_state = 'complete' and v_evidence.verification_state <> 'production_verified')
+          or (v_state = 'complete' and (v_evidence.verification_state <> 'production_verified'
+                                        or v_evidence.verified_commit_sha is null))
           or (v_state = 'partial' and v_evidence.verification_state not in ('production_verified','commit_verified'))
           or v_expires_at is null or v_expires_at > v_sync_completed + interval '24 hours' then
           raise exception 'coverage_certificate_claim_exceeds_evidence' using errcode = '42501';
         end if;
         v_evidence := null;
+      elsif v_state = 'unsupported' then
+        -- Contract v1 never classifies a deployment surface as unsupported.
+        raise exception 'coverage_certificate_claim_exceeds_evidence' using errcode = '42501';
       end if;
     else
       -- No runtime adapter exists in contract v1.

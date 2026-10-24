@@ -43,6 +43,10 @@ const SOURCES = [
   ["50000000-0000-4000-8000-000000000003", "deprecation"],
 ] as const;
 const COMMIT = "94135df6f85bfb34ac83c046e5541e1ad8d73a86";
+const OLD_COMMIT = "0123456789abcdef0123456789abcdef01234567";
+const OLD_ANALYSIS = "10000000-0000-4000-8000-000000000003";
+const NEWER_OBSERVATION = "30000000-0000-4000-8000-000000000002";
+const NEWER_EVIDENCE = "40000000-0000-4000-8000-000000000002";
 
 async function migratedDatabase() {
   const db = new PGlite({ extensions: { pgcrypto } });
@@ -366,6 +370,125 @@ describe("M15.79 coverage certificates (database)", { timeout: 60_000 }, () => {
         )
       ).rows[0]!.n,
     ).toBe(0);
+  });
+
+  it("binds claims to current evidence and never lets unsupported hide evidence", async () => {
+    const { db, evidence } = await fresh();
+    const all = components(evidence);
+    const rejected = (list: SubjectEvaluation[]) =>
+      expect(
+        issue(db, buildCertificate({ components: list, issuedAt: new Date() })),
+      ).rejects.toThrow(/coverage_certificate_claim_exceeds_evidence/);
+    const replace = (dimension: string, component: SubjectEvaluation) =>
+      all.map((c) => (c.dimension === dimension ? component : c));
+
+    // 'unsupported' ranks above 'unknown', so it cannot replace evidence that exists.
+    await rejected(
+      replace("dependency_sources", {
+        ...all[0]!,
+        state: "unsupported",
+        reason: "no_configured_sources",
+      }),
+    );
+    await rejected(
+      replace("repository_code", {
+        ...all[1]!,
+        state: "unsupported",
+        reason: "analysis_unsupported",
+      }),
+    );
+    await rejected(
+      replace("deployment_exposure", {
+        ...all[2]!,
+        state: "unsupported",
+        reason: "deployment_inconclusive",
+      }),
+    );
+
+    // A complete analysis at a commit other than the one verified in Production.
+    await db.exec("set session_replication_role = replica");
+    await db.exec(
+      `insert into public.code_analysis_runs(id, workspace_id, product_id, repository_id, provider_repository_identity,
+        commit_sha, analyzer_version, language_profile, analysis_profile, idempotency_key, status, coverage_state, completed_at)
+       values ('${OLD_ANALYSIS}', '${WORKSPACE}', '${PRODUCT}', '${REPOSITORY}', 'acme/app', '${OLD_COMMIT}',
+        'code-intelligence-v3', 'javascript-typescript', 'javascript-typescript-v2.3', 'k3', 'completed', 'complete', now())`,
+    );
+    await db.exec("set session_replication_role = origin");
+    await rejected(
+      replace(
+        "repository_code",
+        evaluateRepositoryCode({
+          repositoryId: REPOSITORY,
+          analysis: {
+            runId: OLD_ANALYSIS,
+            commitSha: OLD_COMMIT,
+            status: "completed",
+            coverageState: "complete",
+          },
+          headCommitSha: OLD_COMMIT,
+          productionCommitSha: null,
+        }),
+      ),
+    );
+
+    // Only the latest evidence for the surface may be cited, even at the same commit.
+    const addEvidence = async (id: string, observation: string, state: string, commit: string) => {
+      await db.exec("set session_replication_role = replica");
+      await db.exec(
+        `insert into public.product_deployment_evidence(id, workspace_id, protected_product_id, deployment_surface_id,
+          deployment_observation_id, repository_id, verification_state, verified_commit_sha, observed_at)
+         values ('${id}', '${WORKSPACE}', '${PRODUCT}', '${SURFACE}', '${observation}', '${REPOSITORY}',
+          '${state}', ${commit ? `'${commit}'` : "null"}, now() + interval '1 minute')`,
+      );
+      await db.exec("set session_replication_role = origin");
+    };
+    await addEvidence(NEWER_EVIDENCE, NEWER_OBSERVATION, "production_verified", COMMIT);
+    await rejected(all);
+
+    // Newer inconclusive evidence supersedes the production-verified row.
+    await db.exec("set session_replication_role = replica");
+    await db.exec(`delete from public.product_deployment_evidence where id = '${NEWER_EVIDENCE}'`);
+    await db.exec("set session_replication_role = origin");
+    await addEvidence(NEWER_EVIDENCE, NEWER_OBSERVATION, "inconclusive", "");
+    await rejected(all);
+    expect(
+      (
+        await db.query<{ n: number }>(
+          "select count(*)::int as n from public.product_coverage_certificates",
+        )
+      ).rows[0]!.n,
+    ).toBe(0);
+
+    // A dependency without enabled provider sources is honestly unsupported.
+    await db.exec("set session_replication_role = replica");
+    await db.exec("update public.source_catalog set enabled = false");
+    await db.exec("delete from public.product_deployment_evidence");
+    await db.exec("set session_replication_role = origin");
+    const unsupportedSources = evaluateDependencySources({
+      dependencyId: DEPENDENCY,
+      catalogReadComplete: true,
+      sources: [],
+      now: new Date(),
+    });
+    const honest = buildCertificate({
+      components: [
+        unsupportedSources,
+        all[1]!,
+        evaluateDeploymentExposure({
+          surfaceId: SURFACE,
+          evidence: null,
+          lastSync: { status: "succeeded", completedAt: evidence.syncCompletedAt },
+          now: new Date(),
+        }),
+        all[3]!,
+      ],
+      issuedAt: new Date(),
+    });
+    expect(honest.claimLevel).toBe("partial_protection");
+    expect(await issue(db, honest)).toMatchObject({
+      status: "issued",
+      claimLevel: "partial_protection",
+    });
   });
 
   it("requires every current subject and rejects foreign or tampered input", async () => {
