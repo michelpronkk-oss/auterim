@@ -21,6 +21,7 @@ export default defineConfig({
       "tests/m15-dependency-lifecycle.test.ts",
       "tests/m1579-coverage-certificates.test.ts",
       "tests/m1579-exposure-assessments.test.ts",
+      "tests/supabase-bounded-migration.integration.test.ts",
       "tests/m1578r-fresh-v4-verification-recovery.test.ts",
       "tests/onboarding.test.ts",
       "tests/products.test.ts",

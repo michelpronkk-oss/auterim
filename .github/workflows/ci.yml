@@ -76,6 +76,16 @@ jobs:
     name: Database tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    services:
+      migration-postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: local-migration-tests
+        ports:
+          - 55579:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -86,6 +96,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx vitest run --config vitest.database.config.mts
+      - name: Bounded migration real PostgreSQL regression tests (local service only)
+        env:
+          AUTERIM_MIGRATION_TEST_URL: postgresql://postgres:local-migration-tests@127.0.0.1:55579/postgres
+        run: npx vitest run --config vitest.migration-lock.config.mts
 
   bounded-scan:
     name: Bounded scanner tests
