@@ -79,8 +79,12 @@ Ordered from strongest to weakest: `complete` > `partial` > `unsupported` > `unk
 | `runtime_signals` (optional) | connected runtime providers                        | none in M15.79                                               | always `unknown` until a runtime adapter exists; never blocks                                        |
 
 Each subject has a deterministic state from a pure evaluator with explicit `reason`
-codes (for example `no_successful_scan`, `analysis_commit_behind_head`,
-`lockfile_unsupported`, `sync_stale`, `alias_ambiguous`).
+codes from the contract (for example `no_successful_scan`, `analysis_commit_behind_head`,
+`analysis_unsupported`, `sync_stale`, `deployment_inconclusive`).
+
+`deployment_exposure` is `complete` only with `production_verified` evidence and a
+successful sync within 24 h; `commit_verified` evidence is `partial`
+(`commit_verified_only`); anything else is `unknown`.
 
 `dependency_sources` maps the existing catalog labels (provider catalog: three or more
 distinct enabled source types is _strong_, one or two _partial_, none _pending_) and then
@@ -165,7 +169,7 @@ analysed commit is what runs in Production. No other combination produces a nega
 | -------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `deployment_verified_protection` | every required dimension `complete`, a production-verified deployment, fresh | "Protected: monitored dependencies, code analysed at the commit running in Production."           |
 | `code_verified_protection`       | sources and code `complete`; deployment not `complete`                       | "Protected at commit abc123; Production deployment not verified."                                 |
-| `partial_protection`             | any required dimension `partial` or `unsupported`                            | "Partially protected: 3 of 5 dependencies have monitored sources; pnpm repository not supported." |
+| `partial_protection`             | sources or code `partial` or `unsupported`, neither `unknown`                | "Partially protected: 3 of 5 dependencies have monitored sources; pnpm repository not supported." |
 | `unverified`                     | sources or code `unknown`, or certificate expired                            | "Protection not currently verified."                                                              |
 
 Unknown deployment evidence caps the claim at code-verified rather than hiding code
