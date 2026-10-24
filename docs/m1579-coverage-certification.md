@@ -253,3 +253,31 @@ outcome is a valid acceptance result as long as it matches the evidence.
 Runtime provider adapters, customer-facing Draft PRs, multi-language analysers and
 pnpm/Yarn verification. Each needs its own milestone and is represented here only as
 `unsupported` or `unknown`.
+
+## Acceptance record: Steps 1–3 (24 Oct 2026)
+
+| Step                                       | Evidence                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1. Contracts and evaluators                | #136, merged                                                                                                                                                                                                                                                                                                                                                      |
+| 2. Certificate schema and guarded issuance | #137 merged as `4d01a64e81d8d1bfda38092dae0cae6eb5ad5463`. Migration `20261227000000_m1579_coverage_certificates.sql` (sha256 `7a5c5f59f5978980733512d7fdd60baae24eb3ee01931e2220887793d548bc75`): dry run in Actions run `40073106492`, applied in run `40073340074` after the `supabase-production` environment approval; afterwards no migrations were pending |
+| 3. Builder and read-only API               | #139 merged as `02bc01e732ee15826212076143af3d5bfad378d5`; main CI run `40074648568` passed                                                                                                                                                                                                                                                                       |
+
+Production verification after the apply (read-only):
+
+- Both tables exist with every contract column and hold **0 rows**; no certificate has been issued.
+- Catalog (run by the operator in the SQL editor):
+  - RLS is enabled on both tables. Both policies are `SELECT to authenticated` with a membership check through `workspace_members` and `auth.uid()`.
+  - Grants are `SELECT` only, for `authenticated` and `service_role`. `anon` has no access, and `authenticated` cannot write.
+  - All four immutability triggers are enabled (`tgenabled = 'O'`).
+  - `issue_product_coverage_certificate` is `SECURITY DEFINER` with an empty `search_path` and is executable only by `service_role`. The three `private` helpers are not executable by `anon` or `authenticated`.
+- A deliberately invalid service-role call returned `22023 coverage_certificate_request_invalid`, which is rejected before any read or write.
+- Nothing calls `issueProductCoverageCertificate`; the API route imports only the read model. Without a certificate the API answers `unverified`.
+- Fix Engine queues are unchanged: `process-fix-engine-stage` and `recover-internal-fix-verification-after-cache-repair` remain paused.
+
+Not yet verified, and launch blockers:
+
+- Live tenant isolation in Production with real member and outsider tokens (covered only by the PGlite suite).
+- Customer data deletion and retention for append-only evidence (deleting a workspace or Product that has certificates is rejected).
+- The stale publishable key in this environment and in the `supabase-production-plan` GitHub environment.
+- `npm audit` findings (2 critical, 8 high, 2 moderate).
+- Hosting (Vercel Hobby deployment limit, Supabase plan) and live billing verification.
