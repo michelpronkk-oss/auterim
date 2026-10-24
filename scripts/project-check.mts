@@ -57,10 +57,12 @@ const packageJson = JSON.parse(readProjectFile("package.json")) as { name?: stri
 const environmentFile = readOptionalProjectFile(".env.local");
 const environmentSource = environmentFile === undefined ? "process environment" : ".env.local";
 const localEnvironment = { ...process.env, ...parseKeyValues(environmentFile ?? "") };
-const environmentText = Object.entries(localEnvironment)
-  .filter(([key]) => /SUPABASE|TRIGGER|VERCEL/.test(key))
-  .map(([key, value]) => `${key}=${value ?? ""}`)
-  .join("\n");
+const environmentText = [
+  environmentFile ?? "",
+  ...Object.entries(process.env)
+    .filter(([key]) => /SUPABASE|TRIGGER|VERCEL/.test(key))
+    .map(([key, value]) => `${key}=${value ?? ""}`),
+].join("\n");
 const triggerConfig = readProjectFile("trigger.config.ts");
 const gitConfig = readProjectFile(".git/config");
 
