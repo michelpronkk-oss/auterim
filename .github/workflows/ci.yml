@@ -1,0 +1,103 @@
+# Pull-request and main-branch CI: typecheck, lint and the repository's three test
+# phases (parallel unit suites, serial PGlite database suites, bounded scanner suite).
+# No secrets and no Production access.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  NODE_VERSION: "24"
+
+jobs:
+  static:
+    name: Typecheck and lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      # Runtime-browser egress tests launch the project's pinned Chromium build and bind a
+      # loopback listener on port 80; allow unprivileged binds instead of running as root.
+      - run: npx playwright install --with-deps chromium
+      - run: sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
+      # Ubuntu 24.04 AppArmor blocks the unprivileged user namespaces Chromium's sandbox needs.
+      # Allow them on this ephemeral runner so the tests keep exercising the sandboxed browser.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Unit tests (runner user)
+        run: >-
+          npx vitest run --config vitest.unit.config.mts
+          --exclude tests/fix-engine.dependency-cache.test.ts
+          --exclude tests/runner-host-identity.test.ts
+      # These suites exercise root-only host behaviour: removing the sealed read-only
+      # dependency cache tree and chown to root in the verifier host deploy helper.
+      - name: Unit tests requiring root
+        run: >-
+          sudo --preserve-env=CI env "PATH=$PATH"
+          npx vitest run --config vitest.unit.config.mts
+          tests/fix-engine.dependency-cache.test.ts tests/runner-host-identity.test.ts
+
+  database:
+    name: Database tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npx vitest run --config vitest.database.config.mts
+
+  bounded-scan:
+    name: Bounded scanner tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npx vitest run --config vitest.bounded-scan.config.mts
