@@ -15,7 +15,11 @@ export type ExposureEvidence = {
     commitSha: string;
   };
   surfaceId: string;
-  /** The latest evidence row for the Product and surface (by `observed_at`, then `id`). */
+  /**
+   * The evidence row for the surface's current Production deployment
+   * (`deployment_surfaces.current_production_deployment_id`) and this graph's repository; never
+   * simply the most recently observed row, since one sync writes every deployment it sees.
+   */
   evidence: {
     id: string;
     repositoryId: string;

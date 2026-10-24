@@ -26,6 +26,9 @@ const OTHER_SURFACE = "20000000-0000-4000-8000-000000000002";
 const EVIDENCE = "40000000-0000-4000-8000-000000000001";
 const NEWER_EVIDENCE = "40000000-0000-4000-8000-000000000002";
 const SYNC = "70000000-0000-4000-8000-000000000001";
+const OBSERVATION = "30000000-0000-4000-8000-000000000001";
+const NEWER_OBSERVATION = "30000000-0000-4000-8000-000000000002";
+const PREVIEW_OBSERVATION = "30000000-0000-4000-8000-000000000003";
 const COMMIT = "94135df6f85bfb34ac83c046e5541e1ad8d73a86";
 const OTHER_COMMIT = "0123456789abcdef0123456789abcdef01234567";
 const uuid = (n: number) => `90000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -84,15 +87,19 @@ async function seed(db: PGliteInterface) {
       analysis_profile, graph_builder_version, policy_version, coverage_state, coverage_truth, assessment_state,
       status, completed_at, idempotency_key)
       values ${graphRow(GRAPH, WORKSPACE, REPOSITORY, 0)}, ${graphRow(FOREIGN_GRAPH, OTHER_WORKSPACE, REPOSITORY, 10)};
-    insert into public.deployment_surfaces(id, workspace_id, installation_id, external_project_id, project_name, environment_scope)
-      values ('${SURFACE}', '${WORKSPACE}', gen_random_uuid(), 'prj_1', 'app', 'production'),
-             ('${OTHER_SURFACE}', '${WORKSPACE}', gen_random_uuid(), 'prj_2', 'api', 'production');
+    insert into public.deployment_surfaces(id, workspace_id, installation_id, external_project_id, project_name,
+      environment_scope, current_production_deployment_id)
+      values ('${SURFACE}', '${WORKSPACE}', gen_random_uuid(), 'prj_1', 'app', 'production', 'dpl_1'),
+             ('${OTHER_SURFACE}', '${WORKSPACE}', gen_random_uuid(), 'prj_2', 'api', 'production', null);
+    insert into public.deployment_observations(id, workspace_id, deployment_surface_id, external_deployment_id,
+      environment_type, deployment_state, commit_sha, verification_state)
+      values ('${OBSERVATION}', '${WORKSPACE}', '${SURFACE}', 'dpl_1', 'production', 'ready', '${COMMIT}', 'production_verified');
     insert into public.workspace_product_deployment_surfaces(workspace_id, protected_product_id, deployment_surface_id, repository_id, provenance)
       values ('${WORKSPACE}', '${PRODUCT}', '${SURFACE}', '${REPOSITORY}', 'protected_repository_identity'),
              ('${WORKSPACE}', '${PRODUCT}', '${OTHER_SURFACE}', '${OTHER_REPOSITORY}', 'protected_repository_identity');
     insert into public.product_deployment_evidence(id, workspace_id, protected_product_id, deployment_surface_id,
       deployment_observation_id, repository_id, verification_state, verified_commit_sha)
-      values ('${EVIDENCE}', '${WORKSPACE}', '${PRODUCT}', '${SURFACE}', gen_random_uuid(), '${REPOSITORY}',
+      values ('${EVIDENCE}', '${WORKSPACE}', '${PRODUCT}', '${SURFACE}', '${OBSERVATION}', '${REPOSITORY}',
         'production_verified', '${COMMIT}');
     insert into public.deployment_sync_attempts(id, workspace_id, deployment_surface_id, status, started_at, completed_at)
       values ('${SYNC}', '${WORKSPACE}', '${SURFACE}', 'succeeded', now() - interval '1 hour', now() - interval '1 hour');
@@ -110,9 +117,13 @@ async function readEvidence(db: PGliteInterface, surface = SURFACE): Promise<Exp
   ).rows[0]!;
   const evidence = (
     await db.query<Record<string, string | null>>(
-      `select id, repository_id, verification_state, verified_commit_sha from public.product_deployment_evidence
-       where workspace_id = '${WORKSPACE}' and protected_product_id = '${PRODUCT}' and deployment_surface_id = '${surface}'
-       order by observed_at desc, id desc limit 1`,
+      `select e.id, e.repository_id, e.verification_state, e.verified_commit_sha
+       from public.deployment_surfaces s
+       join public.deployment_observations o on o.workspace_id = s.workspace_id
+        and o.deployment_surface_id = s.id and o.external_deployment_id = s.current_production_deployment_id
+       join public.product_deployment_evidence e on e.deployment_observation_id = o.id
+        and e.protected_product_id = '${PRODUCT}' and e.deployment_surface_id = s.id and e.repository_id = '${graph.repository_id}'
+       where s.id = '${surface}' and s.workspace_id = '${WORKSPACE}'`,
     )
   ).rows[0];
   const sync = (
@@ -167,6 +178,26 @@ const argsFor = (evidence: ExposureEvidence, surface = SURFACE) =>
     exposure: exposureForSurface(evidence, new Date()),
   });
 
+/** A newer deployment observed on the surface, with its Product evidence. */
+function deploymentSql(input: {
+  observation: string;
+  evidence: string;
+  externalId: string;
+  environment: "production" | "preview";
+  state: string;
+  commit: string | null;
+}) {
+  const commit = input.commit ? `'${input.commit}'` : "null";
+  return `insert into public.deployment_observations(id, workspace_id, deployment_surface_id, external_deployment_id,
+      environment_type, deployment_state, commit_sha, verification_state)
+    values ('${input.observation}', '${WORKSPACE}', '${SURFACE}', '${input.externalId}', '${input.environment}', 'ready',
+      ${commit}, '${input.state}');
+    insert into public.product_deployment_evidence(id, workspace_id, protected_product_id, deployment_surface_id,
+      deployment_observation_id, repository_id, verification_state, verified_commit_sha, observed_at)
+    values ('${input.evidence}', '${WORKSPACE}', '${PRODUCT}', '${SURFACE}', '${input.observation}', '${REPOSITORY}',
+      '${input.state}', ${commit}, now() + interval '1 minute');`;
+}
+
 async function replica(db: PGliteInterface, sql: string) {
   await db.exec("set session_replication_role = replica");
   await db.exec(sql);
@@ -218,10 +249,16 @@ describe("M15.79 Production exposure assessments (database)", { timeout: 120_000
     // Production now runs another commit.
     await replica(
       db,
-      `insert into public.product_deployment_evidence(id, workspace_id, protected_product_id, deployment_surface_id,
-        deployment_observation_id, repository_id, verification_state, verified_commit_sha, observed_at)
-       values ('${NEWER_EVIDENCE}', '${WORKSPACE}', '${PRODUCT}', '${SURFACE}', gen_random_uuid(), '${REPOSITORY}',
-        'production_verified', '${OTHER_COMMIT}', now() + interval '1 minute')`,
+      deploymentSql({
+        observation: NEWER_OBSERVATION,
+        evidence: NEWER_EVIDENCE,
+        externalId: "dpl_2",
+        environment: "production",
+        state: "production_verified",
+        commit: OTHER_COMMIT,
+      }) +
+        `update public.product_deployment_evidence set verification_state = 'historical' where id = '${EVIDENCE}';
+         update public.deployment_surfaces set current_production_deployment_id = 'dpl_2' where id = '${SURFACE}';`,
     );
     const moved = await issue(db, argsFor(await readEvidence(db)));
     expect(moved).toMatchObject({ status: "issued", sequence: 2, exposureState: "unknown" });
@@ -239,7 +276,8 @@ describe("M15.79 Production exposure assessments (database)", { timeout: 120_000
     // A complete negative analysis at the deployed commit disproves exposure.
     await replica(
       db,
-      `delete from public.product_deployment_evidence where id = '${NEWER_EVIDENCE}';
+      `update public.deployment_surfaces set current_production_deployment_id = 'dpl_1' where id = '${SURFACE}';
+       update public.product_deployment_evidence set verification_state = 'production_verified' where id = '${EVIDENCE}';
        update public.impact_graph_builds set assessment_state = 'absence_observed' where id = '${GRAPH}'`,
     );
     expect(await issue(db, argsFor(await readEvidence(db)))).toMatchObject({
@@ -265,20 +303,25 @@ describe("M15.79 Production exposure assessments (database)", { timeout: 120_000
     for (const [label, args] of mismatches)
       await expect(issue(db, args), label).rejects.toThrow(/impact_exposure_assessment_mismatch/);
 
-    // Superseded evidence cannot be cited, even at the same commit.
+    // Evidence for a deployment that is no longer current cannot be cited, even at the same commit.
     await replica(
       db,
-      `insert into public.product_deployment_evidence(id, workspace_id, protected_product_id, deployment_surface_id,
-        deployment_observation_id, repository_id, verification_state, verified_commit_sha, observed_at)
-       values ('${NEWER_EVIDENCE}', '${WORKSPACE}', '${PRODUCT}', '${SURFACE}', gen_random_uuid(), '${REPOSITORY}',
-        'production_verified', '${COMMIT}', now() + interval '1 minute')`,
+      deploymentSql({
+        observation: NEWER_OBSERVATION,
+        evidence: NEWER_EVIDENCE,
+        externalId: "dpl_2",
+        environment: "production",
+        state: "production_verified",
+        commit: COMMIT,
+      }) +
+        `update public.deployment_surfaces set current_production_deployment_id = 'dpl_2' where id = '${SURFACE}';`,
     );
     await expect(issue(db, good)).rejects.toThrow(/impact_exposure_assessment_mismatch/);
 
     // A stale sync no longer supports the proven claim.
     await replica(
       db,
-      `delete from public.product_deployment_evidence where id = '${NEWER_EVIDENCE}';
+      `update public.deployment_surfaces set current_production_deployment_id = 'dpl_1' where id = '${SURFACE}';
        update public.deployment_sync_attempts set completed_at = now() - interval '25 hours'`,
     );
     await expect(issue(db, good)).rejects.toThrow(/impact_exposure_assessment_mismatch/);
@@ -301,6 +344,48 @@ describe("M15.79 Production exposure assessments (database)", { timeout: 120_000
         )
       ).rows[0]!.n,
     ).toBe(0);
+  });
+
+  it("reads only the current Production deployment, never the most recently observed row", async () => {
+    const db = await fresh();
+    // The same sync also observed a newer preview deployment.
+    await replica(
+      db,
+      deploymentSql({
+        observation: PREVIEW_OBSERVATION,
+        evidence: NEWER_EVIDENCE,
+        externalId: "dpl_preview",
+        environment: "preview",
+        state: "commit_verified",
+        commit: OTHER_COMMIT,
+      }),
+    );
+    expect(exposureForSurface(await readEvidence(db), new Date())).toMatchObject({
+      state: "proven",
+      evidenceId: EVIDENCE,
+    });
+    expect(await issue(db, argsFor(await readEvidence(db)))).toMatchObject({
+      exposureState: "proven",
+    });
+
+    // No current Production deployment: a production_verified row left from an earlier sync
+    // proves nothing.
+    const db2 = await fresh();
+    await replica(
+      db2,
+      `update public.deployment_surfaces set current_production_deployment_id = null where id = '${SURFACE}'`,
+    );
+    expect(exposureForSurface(await readEvidence(db2), new Date())).toMatchObject({
+      state: "unknown",
+      reason: "deployment_not_production_verified",
+      evidenceId: null,
+    });
+    await expect(issue(db2, argsFor(await readEvidence(db)))).rejects.toThrow(
+      /impact_exposure_assessment_mismatch/,
+    );
+    expect(await issue(db2, argsFor(await readEvidence(db2)))).toMatchObject({
+      exposureState: "unknown",
+    });
   });
 
   it("treats evidence about another repository and unfinished graph builds as no evidence", async () => {
@@ -359,6 +444,25 @@ describe("M15.79 Production exposure assessments (database)", { timeout: 120_000
          from public.impact_exposure_assessments`,
       ),
     ).rejects.toThrow(/impact_exposure_definite_evidence/);
+
+    // Foreign keys bind the cited sync attempt to the surface and the evidence row to the
+    // workspace, Product, surface and repository, independent of the issuing function.
+    const ownerInsert = (sync: string | null, evidence: string | null, surface = SURFACE) =>
+      db.exec(
+        `insert into public.impact_exposure_assessments(workspace_id, graph_build_id, source_change_id, product_id,
+          repository_id, analysis_commit_sha, deployment_surface_id, product_deployment_evidence_id,
+          deployment_sync_attempt_id, exposure_state, reason, contract_version, sequence, supersedes_assessment_id)
+         select workspace_id, graph_build_id, source_change_id, product_id, repository_id, analysis_commit_sha,
+          '${surface}', ${evidence ? `'${evidence}'` : "null"}, ${sync ? `'${sync}'` : "null"},
+          'unknown', 'graph_evidence_incomplete', 'exposure-v1', 9, id
+         from public.impact_exposure_assessments`,
+      );
+    await expect(ownerInsert(SYNC, null, OTHER_SURFACE)).rejects.toThrow(
+      /impact_exposure_sync_fkey/,
+    );
+    await expect(ownerInsert(null, EVIDENCE, OTHER_SURFACE)).rejects.toThrow(
+      /impact_exposure_evidence_fkey/,
+    );
 
     const visible = async (user: string) => {
       await db.query("select set_config('request.jwt.claim.sub', $1, false)", [user]);

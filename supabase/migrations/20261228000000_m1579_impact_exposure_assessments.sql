@@ -4,6 +4,19 @@
 -- rule as assessExposure() in src/lib/coverage-certification; the issuing RPC accepts a claim
 -- only when it equals that outcome for the exact evidence and sync attempt it cites. Existing
 -- impact_graph_builds and fix_runs rows are not changed: their exposure stays 'unknown'.
+--
+-- "What runs in Production" is the evidence row for the surface's current Production
+-- deployment (deployment_surfaces.current_production_deployment_id, written by every sync),
+-- never the most recently observed row: one sync writes every observed deployment, previews
+-- included, with the same observed_at.
+
+-- Composite keys so assessments can bind their sync attempt to the surface and their
+-- evidence row to the workspace, Product, surface and repository. Both are additive.
+alter table public.deployment_sync_attempts
+  add constraint deployment_sync_attempts_id_surface_key unique (id, workspace_id, deployment_surface_id);
+alter table public.product_deployment_evidence
+  add constraint product_deployment_evidence_id_scope_key
+    unique (id, workspace_id, protected_product_id, deployment_surface_id, repository_id);
 
 create table public.impact_exposure_assessments (
   id uuid primary key default gen_random_uuid(),
@@ -14,7 +27,7 @@ create table public.impact_exposure_assessments (
   repository_id uuid not null,
   analysis_commit_sha text not null check (analysis_commit_sha ~ '^[a-f0-9]{40,64}$'),
   deployment_surface_id uuid not null,
-  product_deployment_evidence_id uuid references public.product_deployment_evidence(id) on delete cascade,
+  product_deployment_evidence_id uuid,
   deployment_sync_attempt_id uuid,
   deployed_commit_sha text check (deployed_commit_sha is null or deployed_commit_sha ~ '^[A-Fa-f0-9]{40,64}$'),
   exposure_state text not null check (exposure_state in ('proven','disproven','unknown')),
@@ -41,8 +54,12 @@ create table public.impact_exposure_assessments (
     foreign key (deployment_surface_id, workspace_id)
     references public.deployment_surfaces(id, workspace_id) on delete cascade,
   constraint impact_exposure_sync_fkey
-    foreign key (deployment_sync_attempt_id, workspace_id)
-    references public.deployment_sync_attempts(id, workspace_id) on delete cascade,
+    foreign key (deployment_sync_attempt_id, workspace_id, deployment_surface_id)
+    references public.deployment_sync_attempts(id, workspace_id, deployment_surface_id) on delete cascade,
+  constraint impact_exposure_evidence_fkey
+    foreign key (product_deployment_evidence_id, workspace_id, product_id, deployment_surface_id, repository_id)
+    references public.product_deployment_evidence(id, workspace_id, protected_product_id, deployment_surface_id, repository_id)
+    on delete cascade,
   constraint impact_exposure_id_workspace_key unique (id, workspace_id),
   constraint impact_exposure_supersedes_fkey
     foreign key (supersedes_assessment_id, workspace_id)
@@ -166,15 +183,18 @@ begin
   perform pg_advisory_xact_lock(
     hashtextextended(p_graph_build_id::text || ':' || p_deployment_surface_id::text, 0));
 
-  -- Only the latest evidence and the latest finished sync describe what runs now; evidence
-  -- about another repository says nothing about this graph's code.
-  select * into v_evidence from public.product_deployment_evidence e
-  where e.workspace_id = p_workspace_id and e.protected_product_id = v_graph.product_id
-    and e.deployment_surface_id = p_deployment_surface_id
-  order by e.observed_at desc, e.id desc limit 1;
-  if v_evidence.id is not null and v_evidence.repository_id <> v_graph.repository_id then
-    v_evidence := null;
-  end if;
+  -- What runs now: the evidence for the surface's current Production deployment and this
+  -- graph's repository (at most one row), and the latest finished sync.
+  select e.* into v_evidence
+  from public.deployment_surfaces s
+  join public.deployment_observations o
+    on o.workspace_id = s.workspace_id and o.deployment_surface_id = s.id
+   and o.external_deployment_id = s.current_production_deployment_id
+  join public.product_deployment_evidence e
+    on e.deployment_observation_id = o.id and e.workspace_id = s.workspace_id
+   and e.protected_product_id = v_graph.product_id and e.deployment_surface_id = s.id
+   and e.repository_id = v_graph.repository_id
+  where s.id = p_deployment_surface_id and s.workspace_id = p_workspace_id;
   select * into v_sync from public.deployment_sync_attempts a
   where a.workspace_id = p_workspace_id and a.deployment_surface_id = p_deployment_surface_id
     and a.status in ('succeeded','failed') and a.completed_at is not null
