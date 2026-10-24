@@ -525,6 +525,7 @@ export async function getVercelProjectDeploymentSnapshot(
   projectId: string,
   teamId: string | null,
   observedAt = new Date().toISOString(),
+  options: { requireCompleteAliases?: boolean } = {},
 ): Promise<VercelProjectDeploymentSnapshot> {
   const projectValue = await vercelGet<unknown>(
     credentials,
@@ -560,6 +561,21 @@ export async function getVercelProjectDeploymentSnapshot(
     )
     .map((domain) => domain.name as string)
     .slice(0, 10);
+  // Step 4b cannot infer a current target from a partially read alias set. Preserve
+  // existing callers while allowing the dormant analyzer to demand a complete read.
+  if (
+    options.requireCompleteAliases &&
+    ((domainsResponse.domains?.length ?? 0) >= 100 ||
+      (domainsResponse.domains ?? []).filter((domain) => domain.verified === true).length > 10 ||
+      (domainsResponse.domains ?? []).filter((domain) => domain.verified === true).length !==
+        verifiedDomains.length)
+  )
+    throw new ConnectorError(
+      "PROVIDER_UNAVAILABLE",
+      false,
+      "vercel",
+      "Production aliases exceed the verification bound.",
+    );
   const aliasTargets = await Promise.all(
     verifiedDomains.map(async (domain) => {
       const alias = await vercelGet<unknown>(
@@ -575,7 +591,11 @@ export async function getVercelProjectDeploymentSnapshot(
       aliasTargets.map((target) => target.deploymentId).filter((id): id is string => Boolean(id)),
     ),
   ];
-  const currentProductionDeploymentId = currentTargets.length === 1 ? currentTargets[0]! : null;
+  const completeAliases =
+    !options.requireCompleteAliases ||
+    (verifiedDomains.length > 0 && aliasTargets.every((target) => target.deploymentId !== null));
+  const currentProductionDeploymentId =
+    completeAliases && currentTargets.length === 1 ? currentTargets[0]! : null;
   const currentProductionAliases = currentProductionDeploymentId
     ? aliasTargets
         .filter((target) => target.deploymentId === currentProductionDeploymentId)

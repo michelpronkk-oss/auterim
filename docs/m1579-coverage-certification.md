@@ -193,6 +193,9 @@ inputs), and a property test asserts no generated claim exceeds its certificate.
 
 ## Implementation sequence (small, independently testable PRs)
 
+Step 4b's dormant, exact-current-deployment coordinator and its activation boundary
+are documented in [Step 4b implementation](m1579-step4b-production-analysis.md).
+
 1. **Contracts and pure evaluators** (no DB): state lattice, per-dimension evaluators,
    freshness, exposure rules, claim generator, canonical fingerprint. Unit and property
    tests. Smallest reviewable core.
