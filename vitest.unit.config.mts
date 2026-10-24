@@ -19,6 +19,7 @@ export default defineConfig({
       "tests/baseline-queue-migration.test.ts",
       "tests/database.test.ts",
       "tests/m15-dependency-lifecycle.test.ts",
+      "tests/m1579-coverage-certificates.test.ts",
       "tests/m1578r-fresh-v4-verification-recovery.test.ts",
       "tests/onboarding.test.ts",
       "tests/products.test.ts",
