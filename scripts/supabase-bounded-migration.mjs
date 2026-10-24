@@ -8,6 +8,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import {
+  CA_SHA256,
+  connectionFailure,
+  migrationTls,
+  verifiedTlsProtocol,
+} from "./supabase-migration-tls.mjs";
+import {
   checkHistory,
   EXPECTED_PROJECT_REF,
   repositoryMigrationVersions,
@@ -56,7 +62,7 @@ export function connectionConfig(poolerUrl, password, projectRef) {
     database: "postgres",
     user: url.username,
     password,
-    ssl: { rejectUnauthorized: true },
+    ssl: migrationTls(url.hostname),
     connectionTimeoutMillis: 10_000,
     query_timeout: 35_000,
     application_name: "auterim-bounded-migration",
@@ -234,6 +240,10 @@ async function main() {
   client.on("error", () => {});
   try {
     await client.connect();
+    const protocol = verifiedTlsProtocol(client.connection.stream);
+    console.log(
+      `bounded migration TLS verified: ca_sha256=${CA_SHA256} protocol=${protocol} hostname_verified=true`,
+    );
     const result = await runMigration(client, plan, mode);
     console.log(
       `bounded migration ${result.outcome}: ${CANDIDATE.file} sha256=${CANDIDATE.sha256} lock=5s statement=30s transaction=60s`,
@@ -246,9 +256,7 @@ async function main() {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
     console.error(
-      error instanceof BoundedMigrationError
-        ? error.message
-        : "bounded_migration_failed:preflight_or_connection",
+      error instanceof BoundedMigrationError ? error.message : connectionFailure(error),
     );
     process.exitCode = 1;
   });
