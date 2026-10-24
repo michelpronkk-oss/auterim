@@ -283,15 +283,44 @@ describe("M15.78R fresh V4 bounded verification recovery (database)", { timeout:
       stageStatus: "claimed",
       recoveryId: first.recoveryId,
     });
-    await db.exec(
-      `update public.fix_stage_queue set status = 'failed', claim_token = null, lease_expires_at = null,
-         failure_category = 'runner_result_invalid', completed_at = now() where id = '${VERIFY_STAGE}'`,
+
+    // A transient runner failure on attempt 2 goes through the canonical retry transition;
+    // a replay during that in-delivery retry still reports consumed and does not requeue.
+    const retried = await db.query<{ value: Record<string, unknown> }>(
+      "select public.complete_fix_stage($1, $2, 'retry', 'runner_unavailable') as value",
+      [VERIFY_STAGE, claimed.rows[0]!.value.claimToken],
     );
+    expect(retried.rows[0]!.value).toMatchObject({ status: "retry_queued" });
+    expect(await authorize(db)).toMatchObject({
+      status: "already_consumed",
+      stageStatus: "queued",
+    });
+    expect((await verifyState(db)).stage).toMatchObject({
+      attempt_count: 2,
+      operator_retry_count: 1,
+    });
+
+    // Attempt 3 is the last claim under the existing stage cap; then the stage is terminal.
+    const third = await db.query<{ value: Record<string, unknown> }>(
+      "select public.claim_fix_stage($1, 120) as value",
+      [VERIFY_STAGE],
+    );
+    expect(third.rows[0]!.value).toMatchObject({ status: "claimed", attemptNumber: 3 });
+    const terminal = await db.query<{ value: Record<string, unknown> }>(
+      "select public.complete_fix_stage($1, $2, 'failed', 'runner_result_invalid') as value",
+      [VERIFY_STAGE, third.rows[0]!.value.claimToken],
+    );
+    expect(terminal.rows[0]!.value).toMatchObject({ status: "validation_failed" });
     expect(await authorize(db)).toMatchObject({
       status: "already_consumed",
       stageStatus: "failed",
     });
-    expect((await verifyState(db)).stage.status).toBe("failed");
+    expect((await verifyState(db)).stage).toMatchObject({ status: "failed", attempt_count: 3 });
+    const fourth = await db.query<{ value: Record<string, unknown> }>(
+      "select public.claim_fix_stage($1, 120) as value",
+      [VERIFY_STAGE],
+    );
+    expect(fourth.rows[0]!.value).toMatchObject({ status: "busy" });
 
     // The ledger row is append-only.
     await expect(

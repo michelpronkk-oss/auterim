@@ -162,8 +162,10 @@ begin
       return jsonb_build_object('status', 'already_authorized', 'fixRunId', v_run.id,
         'stageId', v_stage.id, 'recoveryId', v_existing.id);
     end if;
-    if v_stage.attempt_count = 2 and v_stage.operator_retry_count = 1
-      and v_stage.status in ('claimed', 'completed', 'failed') then
+    -- Any claim after the requeue consumes the authorization. Transient runner
+    -- failures may still use attempt 3 inside the same delivery (stage cap 3).
+    if v_stage.attempt_count between 2 and 3 and v_stage.operator_retry_count = 1
+      and v_stage.status in ('queued', 'claimed', 'completed', 'failed') then
       return jsonb_build_object('status', 'already_consumed', 'fixRunId', v_run.id,
         'stageId', v_stage.id, 'stageStatus', v_stage.status, 'recoveryId', v_existing.id);
     end if;

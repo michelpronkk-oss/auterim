@@ -198,6 +198,13 @@ cron dispatcher excludes the stage; the task dispatches it once with key
 original delivery key is still inside its 30-day idempotency window. Replays
 return `already_authorized` or `already_consumed` and never requeue again.
 
+Within that single delivery the canonical stage runtime still applies: a
+retryable runner failure (unavailable, queue full, transient state, transport
+ambiguity, poll timeout) returns the stage to `queued` and the same
+`process-fix-engine-stage` run retries it, so the recovery can use attempts 2
+and 3 under the existing three-attempt stage cap. A non-retryable failure, or
+a retryable one on attempt 3, is terminal.
+
 Runner job identity is content-addressed, so the recovered job may carry the
 same ID `5c51d42c…`. That is not a replay: rejected admissions are never
 persisted by the runner, so that ID has no stored record, and the runner
@@ -207,7 +214,7 @@ accepted admission and terminal job record for the request.
 ### V4 Stage 7 PASS contract after recovery
 
 `read_fresh_v4_status` must show, for Fix Run `8d38263a…`: verify stage
-attempt 2 completed; a new runner diagnostic or result record with admission
+completed on attempt 2 or 3; a new runner diagnostic or result record with admission
 `accepted` and a terminal job; runner account/region/instance as above, image
 `sha256:6b5bcfba…32c4`, protocol `m1578-verification-runner-v1`; a valid signed
 result; at least one supported command persisted as passed; a deterministic
