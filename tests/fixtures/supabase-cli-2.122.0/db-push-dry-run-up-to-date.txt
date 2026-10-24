@@ -1,0 +1,5 @@
+DRY RUN: migrations will *not* be pushed to the database.
+Connecting to remote database...
+failed to connect to postgres: failed to connect to `host=127.0.0.1 user=postgres database=postgres`: dial error (connect ECONNREFUSED 127.0.0.1:55433)
+Make sure your local IP is allowed in Network Restrictions and Network Bans.
+https://supabase.com/dashboard/project/_/database/settings
