@@ -73,6 +73,12 @@ describe("supabase migration gate against real CLI 2.122.0 output", () => {
     expect(parseDryRun(cliFixture("db-push-dry-run-up-to-date.txt"))).toEqual([]);
   });
 
+  it("fails closed on the real connection-failure output", () => {
+    expect(() => parseDryRun(cliFixture("db-push-dry-run-connect-error.txt"))).toThrow(
+      /dry_run_unparsed/,
+    );
+  });
+
   it("keeps cell validation strict after unwrapping", () => {
     const row = (local: string, remote: string) =>
       `   Local | Remote | Time\n   ${local} | ${remote} | \`2026-12-26 00:00:00\`\n`;
