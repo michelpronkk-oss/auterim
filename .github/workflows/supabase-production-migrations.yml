@@ -1,0 +1,253 @@
+# Manual, approval-gated Supabase migrations for the Auterim Production project.
+#
+# plan  : verifies identity, the approved merge SHA, migration history and the
+#         exact `db push --dry-run` set. Never writes to the database.
+# apply : only when `apply` is true, only after a required reviewer approves the
+#         `supabase-production` environment, and only if every plan check still
+#         holds on the same SHA. Uses `db push --linked` with no seed, roles,
+#         vault or include-all.
+# probe : on pull requests touching this file, checks TCP reachability of the
+#         Supabase pooler from GitHub-hosted runners. Uses no secrets.
+name: Supabase production migrations
+
+on:
+  workflow_dispatch:
+    inputs:
+      merge_sha:
+        description: Approved merge commit on main (full 40-character SHA)
+        required: true
+        type: string
+      approved_migrations:
+        description: Comma-separated migration filenames expected to be pending
+        required: true
+        type: string
+      apply:
+        description: Apply after approval (false = plan only)
+        required: true
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - .github/workflows/supabase-production-migrations.yml
+      - scripts/supabase-migration-gate.mjs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supabase-production-migrations
+  cancel-in-progress: false
+
+env:
+  SUPABASE_PROJECT_REF: lnljaacbptrubppoypaz
+  SUPABASE_CLI_VERSION: 2.122.0
+  NODE_VERSION: "24"
+  # Public identifiers only; project:check validates them against .project-identity.
+  NEXT_PUBLIC_SUPABASE_URL: https://lnljaacbptrubppoypaz.supabase.co
+
+jobs:
+  probe:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Probe Supabase pooler reachability (no credentials)
+        run: |
+          set -u
+          {
+            echo "## Supabase pooler reachability from GitHub-hosted runner"
+            echo "| Host | Port | Result |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for host in aws-0-eu-west-1.pooler.supabase.com aws-1-eu-west-1.pooler.supabase.com; do
+            for port in 5432 6543; do
+              if timeout 8 bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null; then result=open; else result=unreachable; fi
+              echo "$host:$port $result"
+              echo "| $host | $port | $result |" >> "$GITHUB_STEP_SUMMARY"
+            done
+          done
+          for host in "db.${SUPABASE_PROJECT_REF}.supabase.co"; do
+            a=$(getent ahostsv4 "$host" | head -1 | awk '{print $1}')
+            aaaa=$(getent ahostsv6 "$host" | head -1 | awk '{print $1}')
+            echo "direct host IPv4=${a:-none} IPv6=${aaaa:-none}"
+            echo "| $host (direct) | DNS | IPv4=${a:-none}, IPv6=${aaaa:-none} |" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+  plan:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: supabase-production-plan
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      merge_sha: ${{ steps.sha.outputs.merge_sha }}
+    steps:
+      - name: Require dispatch from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "This workflow must be dispatched from main." >&2
+          exit 1
+
+      - name: Validate inputs
+        id: sha
+        env:
+          MERGE_SHA: ${{ inputs.merge_sha }}
+          APPROVED: ${{ inputs.approved_migrations }}
+        run: |
+          [[ "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "merge_sha must be a full lowercase SHA" >&2; exit 1; }
+          [[ "$APPROVED" =~ ^[0-9]{14}_[a-z0-9_]+\.sql(,[0-9]{14}_[a-z0-9_]+\.sql)*$ ]] || { echo "approved_migrations invalid" >&2; exit 1; }
+          echo "merge_sha=$MERGE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Require protected apply environment
+        if: inputs.apply
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rules=$(gh api "repos/${GITHUB_REPOSITORY}/environments/supabase-production" --jq '[.protection_rules[]?.type] | join(",")')
+          echo "supabase-production protection rules: ${rules:-none}"
+          [[ ",$rules," == *",required_reviewers,"* ]] || { echo "supabase-production must require reviewers before apply" >&2; exit 1; }
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.merge_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify merge SHA is on main
+        env:
+          MERGE_SHA: ${{ inputs.merge_sha }}
+        run: |
+          git fetch --no-tags origin main
+          [[ "$(git rev-parse HEAD)" == "$MERGE_SHA" ]] || { echo "checked out SHA mismatch" >&2; exit 1; }
+          git merge-base --is-ancestor "$MERGE_SHA" origin/main || { echo "merge_sha is not on main" >&2; exit 1; }
+          # project:check requires the canonical remote spelling.
+          git remote set-url origin https://github.com/michelpronkk-oss/auterim.git
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Auterim project identity check
+        env:
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          grep -qx 'EXPECTED_TRIGGER_PROJECT=proj_hwqtxtyrvwykjirkrdoh' .project-identity
+          npm run project:check
+
+      - name: Link pinned Supabase CLI to the Auterim project
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          [[ "$(npx --yes "supabase@${SUPABASE_CLI_VERSION}" --version)" == "${SUPABASE_CLI_VERSION}" ]]
+          npx --yes "supabase@${SUPABASE_CLI_VERSION}" link --project-ref "$SUPABASE_PROJECT_REF"
+          node scripts/supabase-migration-gate.mjs project-ref --file supabase/.temp/project-ref
+
+      - name: Validate migration history
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          APPROVED: ${{ inputs.approved_migrations }}
+        run: |
+          npx --yes "supabase@${SUPABASE_CLI_VERSION}" migration list --linked > "$RUNNER_TEMP/migration-list.txt"
+          node scripts/supabase-migration-gate.mjs history --output "$RUNNER_TEMP/migration-list.txt" --approved "$APPROVED" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Dry run
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          APPROVED: ${{ inputs.approved_migrations }}
+        run: |
+          npx --yes "supabase@${SUPABASE_CLI_VERSION}" db push --linked --dry-run --skip-vault > "$RUNNER_TEMP/dry-run.txt" 2>&1
+          node scripts/supabase-migration-gate.mjs dry-run --output "$RUNNER_TEMP/dry-run.txt" --approved "$APPROVED" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Record plan evidence
+        env:
+          MERGE_SHA: ${{ inputs.merge_sha }}
+        run: |
+          {
+            echo "## Supabase migration plan"
+            echo "- Project ref: \`$SUPABASE_PROJECT_REF\`"
+            echo "- Merge SHA: \`$MERGE_SHA\`"
+            echo "- Supabase CLI: \`$SUPABASE_CLI_VERSION\`"
+            echo "- Apply requested: \`${{ inputs.apply }}\`"
+            echo "- Run: \`${GITHUB_RUN_ID}\` attempt \`${GITHUB_RUN_ATTEMPT}\` by \`${GITHUB_ACTOR}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  apply:
+    if: github.event_name == 'workflow_dispatch' && inputs.apply
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: supabase-production
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.plan.outputs.merge_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Re-verify merge SHA is on main
+        env:
+          MERGE_SHA: ${{ needs.plan.outputs.merge_sha }}
+        run: |
+          git fetch --no-tags origin main
+          [[ "$(git rev-parse HEAD)" == "$MERGE_SHA" ]]
+          git merge-base --is-ancestor "$MERGE_SHA" origin/main
+          git remote set-url origin https://github.com/michelpronkk-oss/auterim.git
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Auterim project identity check
+        env:
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npm run project:check
+
+      - name: Link, re-validate history and dry run
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          APPROVED: ${{ inputs.approved_migrations }}
+        run: |
+          [[ "$(npx --yes "supabase@${SUPABASE_CLI_VERSION}" --version)" == "${SUPABASE_CLI_VERSION}" ]]
+          npx --yes "supabase@${SUPABASE_CLI_VERSION}" link --project-ref "$SUPABASE_PROJECT_REF"
+          node scripts/supabase-migration-gate.mjs project-ref --file supabase/.temp/project-ref
+          npx --yes "supabase@${SUPABASE_CLI_VERSION}" migration list --linked > "$RUNNER_TEMP/migration-list.txt"
+          node scripts/supabase-migration-gate.mjs history --output "$RUNNER_TEMP/migration-list.txt" --approved "$APPROVED"
+          npx --yes "supabase@${SUPABASE_CLI_VERSION}" db push --linked --dry-run --skip-vault > "$RUNNER_TEMP/dry-run.txt" 2>&1
+          node scripts/supabase-migration-gate.mjs dry-run --output "$RUNNER_TEMP/dry-run.txt" --approved "$APPROVED"
+
+      - name: Apply approved migrations
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: npx --yes "supabase@${SUPABASE_CLI_VERSION}" db push --linked --skip-vault --yes
+
+      - name: Verify nothing remains pending
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          APPROVED: ${{ inputs.approved_migrations }}
+          MERGE_SHA: ${{ needs.plan.outputs.merge_sha }}
+        run: |
+          npx --yes "supabase@${SUPABASE_CLI_VERSION}" migration list --linked > "$RUNNER_TEMP/migration-list-after.txt"
+          node scripts/supabase-migration-gate.mjs history-applied --output "$RUNNER_TEMP/migration-list-after.txt" --approved "$APPROVED"
+          {
+            echo "## Supabase migration applied"
+            echo "- Project ref: \`$SUPABASE_PROJECT_REF\`"
+            echo "- Merge SHA: \`$MERGE_SHA\`"
+            echo "- Applied: \`$APPROVED\`"
+            echo "- Approved run: \`${GITHUB_RUN_ID}\` attempt \`${GITHUB_RUN_ATTEMPT}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
