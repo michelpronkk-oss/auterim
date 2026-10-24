@@ -179,7 +179,11 @@ describe("readProductCoverageEvidence", () => {
     code_analysis_runs: [
       { id: "run-1", commit_sha: COMMIT, coverage_state: "complete", product_id: null },
     ],
-    workspace_product_deployment_surfaces: [{ deployment_surface_id: "surface-1" }],
+    workspace_product_deployment_surfaces: [
+      { deployment_surface_id: "surface-1", repository_id: REPOSITORY },
+    ],
+    deployment_surfaces: [{ current_production_deployment_id: "dpl_1" }],
+    deployment_observations: [{ id: "observation-1" }],
     product_deployment_evidence: [
       {
         id: "evidence-1",
@@ -211,20 +215,45 @@ describe("readProductCoverageEvidence", () => {
     );
     expect(ops("workspace_dependencies")).toContainEqual(["eq", "monitoring_enabled", true]);
     expect(ops("workspace_product_repositories")).toContainEqual(["eq", "status", "active"]);
-    expect(ops("product_deployment_evidence")).toEqual(
+    // Evidence is the row for the surface's current Production deployment and linked
+    // repository, never "the most recently observed row".
+    expect(ops("deployment_observations")).toContainEqual([
+      "eq",
+      "external_deployment_id",
+      "dpl_1",
+    ]);
+    const evidenceOps = ops("product_deployment_evidence");
+    expect(evidenceOps).toEqual(
       expect.arrayContaining([
         ["eq", "protected_product_id", PRODUCT],
-        ["order", "observed_at", { ascending: false }],
-        ["order", "id", { ascending: false }],
-        ["limit", 1],
+        ["eq", "deployment_observation_id", "observation-1"],
+        ["eq", "repository_id", REPOSITORY],
       ]),
     );
+    expect(evidenceOps.some(([op]) => op === "order")).toBe(false);
     expect(ops("deployment_sync_attempts")).toEqual(
       expect.arrayContaining([
         ["in", "status", ["succeeded", "failed"]],
         ["order", "completed_at", { ascending: false }],
       ]),
     );
+  });
+
+  it("reads no deployment evidence without a current Production deployment", async () => {
+    for (const missing of [
+      { deployment_surfaces: [{ current_production_deployment_id: null }] },
+      { deployment_observations: [] },
+      { product_deployment_evidence: [] },
+    ]) {
+      const read = await readProductCoverageEvidence(
+        recordingClient({ ...data, ...missing }) as never,
+        { workspaceId: WORKSPACE, productId: PRODUCT },
+      );
+      expect(read.surfaces[0]!.evidence, JSON.stringify(missing)).toBeNull();
+      expect(
+        componentsFromEvidence(read, NOW).find((c) => c.dimension === "deployment_exposure"),
+      ).toMatchObject({ state: "unknown" });
+    }
   });
 
   it("aborts on any read error and rejects non-UUID subjects", async () => {

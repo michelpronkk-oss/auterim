@@ -49,6 +49,8 @@ const OLD_COMMIT = "0123456789abcdef0123456789abcdef01234567";
 const OLD_ANALYSIS = "10000000-0000-4000-8000-000000000003";
 const NEWER_OBSERVATION = "30000000-0000-4000-8000-000000000002";
 const NEWER_EVIDENCE = "40000000-0000-4000-8000-000000000002";
+const PREVIEW_OBSERVATION = "30000000-0000-4000-8000-000000000003";
+const PREVIEW_EVIDENCE = "40000000-0000-4000-8000-000000000003";
 
 async function migratedDatabase() {
   const db = new PGlite({ extensions: { pgcrypto } });
@@ -109,8 +111,12 @@ async function seed(db: PGliteInterface) {
               'javascript-typescript', 'javascript-typescript-v2.3', 'k1', 'completed', 'complete', now()),
              ('${OTHER_ANALYSIS}', '${OTHER_WORKSPACE}', '${OTHER_PRODUCT}', '${OTHER_REPOSITORY}', 'other/app', '${COMMIT}',
               'code-intelligence-v3', 'javascript-typescript', 'javascript-typescript-v2.3', 'k2', 'completed', 'complete', now());
-    insert into public.deployment_surfaces(id, workspace_id, installation_id, external_project_id, project_name, environment_scope)
-      values ('${SURFACE}', '${WORKSPACE}', gen_random_uuid(), 'prj_1', 'app', 'production');
+    insert into public.deployment_surfaces(id, workspace_id, installation_id, external_project_id, project_name,
+      environment_scope, current_production_deployment_id)
+      values ('${SURFACE}', '${WORKSPACE}', gen_random_uuid(), 'prj_1', 'app', 'production', 'dpl_1');
+    insert into public.deployment_observations(id, workspace_id, deployment_surface_id, external_deployment_id,
+      environment_type, deployment_state, commit_sha, verification_state)
+      values ('${OBSERVATION}', '${WORKSPACE}', '${SURFACE}', 'dpl_1', 'production', 'ready', '${COMMIT}', 'production_verified');
     insert into public.workspace_product_deployment_surfaces(workspace_id, protected_product_id, deployment_surface_id, repository_id, provenance)
       values ('${WORKSPACE}', '${PRODUCT}', '${SURFACE}', '${REPOSITORY}', 'protected_repository_identity');
     insert into public.product_deployment_evidence(id, workspace_id, protected_product_id, deployment_surface_id,
@@ -205,6 +211,35 @@ async function issue(
     ),
   );
   return result.rows[0]!.value;
+}
+
+/** Another deployment observed on the surface, with its Product evidence; optionally made current. */
+async function addDeployment(
+  db: PGliteInterface,
+  input: {
+    observation: string;
+    evidence: string;
+    externalId: string;
+    environment: "production" | "preview";
+    state: string;
+    commit: string | null;
+    current: boolean;
+  },
+) {
+  const commit = input.commit ? `'${input.commit}'` : "null";
+  await db.exec("set session_replication_role = replica");
+  await db.exec(`
+    insert into public.deployment_observations(id, workspace_id, deployment_surface_id, external_deployment_id,
+      environment_type, deployment_state, commit_sha, verification_state)
+    values ('${input.observation}', '${WORKSPACE}', '${SURFACE}', '${input.externalId}', '${input.environment}',
+      'ready', ${commit}, '${input.state}');
+    insert into public.product_deployment_evidence(id, workspace_id, protected_product_id, deployment_surface_id,
+      deployment_observation_id, repository_id, verification_state, verified_commit_sha, observed_at)
+    values ('${input.evidence}', '${WORKSPACE}', '${PRODUCT}', '${SURFACE}', '${input.observation}', '${REPOSITORY}',
+      '${input.state}', ${commit}, now() + interval '1 minute');
+    ${input.current ? `update public.deployment_surfaces set current_production_deployment_id = '${input.externalId}' where id = '${SURFACE}';` : ""}
+  `);
+  await db.exec("set session_replication_role = origin");
 }
 
 const asServiceRole = (db: PGliteInterface) =>
@@ -518,26 +553,41 @@ describe("M15.79 coverage certificates (database)", { timeout: 60_000 }, () => {
       ),
     );
 
-    // Only the latest evidence for the surface may be cited, even at the same commit.
-    const addEvidence = async (id: string, observation: string, state: string, commit: string) => {
-      await db.exec("set session_replication_role = replica");
-      await db.exec(
-        `insert into public.product_deployment_evidence(id, workspace_id, protected_product_id, deployment_surface_id,
-          deployment_observation_id, repository_id, verification_state, verified_commit_sha, observed_at)
-         values ('${id}', '${WORKSPACE}', '${PRODUCT}', '${SURFACE}', '${observation}', '${REPOSITORY}',
-          '${state}', ${commit ? `'${commit}'` : "null"}, now() + interval '1 minute')`,
-      );
-      await db.exec("set session_replication_role = origin");
-    };
-    await addEvidence(NEWER_EVIDENCE, NEWER_OBSERVATION, "production_verified", COMMIT);
+    // A newer Production deployment became current: the previous one's evidence cannot be
+    // cited any more, even at the same commit.
+    await addDeployment(db, {
+      observation: NEWER_OBSERVATION,
+      evidence: NEWER_EVIDENCE,
+      externalId: "dpl_2",
+      environment: "production",
+      state: "production_verified",
+      commit: COMMIT,
+      current: true,
+    });
     await rejected(all);
 
-    // Newer inconclusive evidence supersedes the production-verified row.
+    // The current deployment is only inconclusive.
     await db.exec("set session_replication_role = replica");
-    await db.exec(`delete from public.product_deployment_evidence where id = '${NEWER_EVIDENCE}'`);
+    await db.exec(
+      `update public.product_deployment_evidence set verification_state = 'inconclusive', verified_commit_sha = null
+       where id = '${NEWER_EVIDENCE}'`,
+    );
     await db.exec("set session_replication_role = origin");
-    await addEvidence(NEWER_EVIDENCE, NEWER_OBSERVATION, "inconclusive", "");
     await rejected(all);
+
+    // No current Production deployment: a production_verified row left from an earlier sync is
+    // historical and supports no claim.
+    await db.exec("set session_replication_role = replica");
+    await db.exec(
+      `update public.deployment_surfaces set current_production_deployment_id = null where id = '${SURFACE}'`,
+    );
+    await db.exec("set session_replication_role = origin");
+    await rejected(all);
+    await db.exec("set session_replication_role = replica");
+    await db.exec(
+      `update public.deployment_surfaces set current_production_deployment_id = 'dpl_1' where id = '${SURFACE}'`,
+    );
+    await db.exec("set session_replication_role = origin");
     expect(
       (
         await db.query<{ n: number }>(
@@ -598,16 +648,36 @@ describe("M15.79 coverage certificates (database)", { timeout: 60_000 }, () => {
       ).result.status,
     ).toBe("unchanged");
 
+    // A newer preview deployment in the same sync changes nothing.
+    await addDeployment(db, {
+      observation: PREVIEW_OBSERVATION,
+      evidence: PREVIEW_EVIDENCE,
+      externalId: "dpl_preview",
+      environment: "preview",
+      state: "commit_verified",
+      commit: OLD_COMMIT,
+      current: false,
+    });
+    expect(
+      (
+        await issueProductCoverageCertificate(client, {
+          workspaceId: WORKSPACE,
+          productId: PRODUCT,
+        })
+      ).result.status,
+    ).toBe("unchanged");
+
     // Production now runs another commit: the analysis no longer counts, and the guard
     // accepts the weaker certificate the builder produces.
-    await db.exec("set session_replication_role = replica");
-    await db.exec(
-      `insert into public.product_deployment_evidence(id, workspace_id, protected_product_id, deployment_surface_id,
-        deployment_observation_id, repository_id, verification_state, verified_commit_sha, observed_at)
-       values ('${NEWER_EVIDENCE}', '${WORKSPACE}', '${PRODUCT}', '${SURFACE}', '${NEWER_OBSERVATION}',
-        '${REPOSITORY}', 'production_verified', '${OLD_COMMIT}', now() + interval '1 minute')`,
-    );
-    await db.exec("set session_replication_role = origin");
+    await addDeployment(db, {
+      observation: NEWER_OBSERVATION,
+      evidence: NEWER_EVIDENCE,
+      externalId: "dpl_2",
+      environment: "production",
+      state: "production_verified",
+      commit: OLD_COMMIT,
+      current: true,
+    });
     const moved = await issueProductCoverageCertificate(client, {
       workspaceId: WORKSPACE,
       productId: PRODUCT,
@@ -647,6 +717,45 @@ describe("M15.79 coverage certificates (database)", { timeout: 60_000 }, () => {
       claim: { level: "unverified", text: "Protection not currently verified." },
       certificate: null,
     });
+  });
+
+  it("binds deployment claims to the current Production deployment, not the newest row", async () => {
+    // Over-claim fixed by 20261227120000: the only evidence row is a production_verified row
+    // from an earlier sync, but the surface reports no current Production deployment.
+    const { db, evidence } = await fresh();
+    await db.exec("set session_replication_role = replica");
+    await db.exec(
+      `update public.deployment_surfaces set current_production_deployment_id = null where id = '${SURFACE}'`,
+    );
+    await db.exec("set session_replication_role = origin");
+    await expect(
+      issue(db, buildCertificate({ components: components(evidence), issuedAt: new Date() })),
+    ).rejects.toThrow(/coverage_certificate_claim_exceeds_evidence/);
+    const stale = await issueProductCoverageCertificate(pgliteClient(db) as never, {
+      workspaceId: WORKSPACE,
+      productId: PRODUCT,
+    });
+    expect(stale.certificate.dimensions.deployment_exposure).toBe("unknown");
+    expect(stale.result.claimLevel).not.toBe("deployment_verified_protection");
+
+    // Under-claim fixed by 20261227120000: a newer preview deployment observed in the same
+    // sync is not "what runs in Production".
+    const preview = await fresh();
+    await addDeployment(preview.db, {
+      observation: PREVIEW_OBSERVATION,
+      evidence: PREVIEW_EVIDENCE,
+      externalId: "dpl_preview",
+      environment: "preview",
+      state: "commit_verified",
+      commit: OLD_COMMIT,
+      current: false,
+    });
+    expect(
+      await issue(
+        preview.db,
+        buildCertificate({ components: components(preview.evidence), issuedAt: new Date() }),
+      ),
+    ).toMatchObject({ status: "issued", claimLevel: "deployment_verified_protection" });
   });
 
   it("requires every current subject and rejects foreign or tampered input", async () => {
