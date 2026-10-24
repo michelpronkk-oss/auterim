@@ -1,0 +1,37 @@
+# External Production reachability probe, independent of Trigger.dev.
+# Uses only the public project URL and publishable key; no secrets. A failed scheduled run
+# is GitHub's notification to the workflow's owner. Missing configuration fails the run.
+name: Production health probe
+
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-health-probe
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  supabase:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+      - name: Probe Supabase API reachability
+        env:
+          SUPABASE_URL: https://lnljaacbptrubppoypaz.supabase.co
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+        run: node scripts/supabase-health-probe.mjs | tee -a "$GITHUB_STEP_SUMMARY"
