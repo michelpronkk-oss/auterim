@@ -11,7 +11,12 @@ Production source change, Fix Run, or verification by itself.
 > `dispatch_fresh_v4_intelligence`, `start_fresh_v4_fix_run`) with acceptance
 > key `m1578r-internal-qa-fix-engine-v4` and the same fixture commit. The V4
 > evidence record, the Stage 7 failure and its bounded recovery are in
-> [V4 status](#v4-status-and-evidence) below. Stage 7 has **not** passed.
+> [V4 status](#v4-status-and-evidence) below.
+>
+> **Update 24 Oct 2026: M15.78R PASS.** Stage 7 passed through the bounded
+> recovery below; the full evidence and the scope of the verdict are in
+> [the Production acceptance record](../fix-engine/m1578r-production-acceptance.md).
+> The sections below are kept as written when Stage 7 had not yet passed.
 
 ## Immutable scope
 
