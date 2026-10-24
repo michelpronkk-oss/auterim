@@ -56,6 +56,9 @@ jobs:
       # loopback listener on port 80; allow unprivileged binds instead of running as root.
       - run: npx playwright install --with-deps chromium
       - run: sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
+      # Ubuntu 24.04 AppArmor blocks the unprivileged user namespaces Chromium's sandbox needs.
+      # Allow them on this ephemeral runner so the tests keep exercising the sandboxed browser.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Unit tests (runner user)
         run: >-
           npx vitest run --config vitest.unit.config.mts
